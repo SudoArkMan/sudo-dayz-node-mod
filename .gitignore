@@ -1,0 +1,12 @@
+build/
+.backup/
+*.user
+*.exe
+*.obj
+shot*.png
+final*.png
+events*.png
+livecode*.png
+vars.png
+code1.png
+FINDINGS.json

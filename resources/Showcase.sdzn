@@ -1,0 +1,1532 @@
+{
+  "name": "Node Showcase",
+  "folders": [
+    "4_World"
+  ],
+  "scripts": [
+    {
+      "id": "s1",
+      "name": "SUDO_DemoItem",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_DemoItem",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "event",
+            "ref": "m2792",
+            "x": 40,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n12",
+            "kind": "builtin",
+            "ref": "bi.serverOnly",
+            "x": 320,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n3",
+            "kind": "call",
+            "ref": "m3548",
+            "x": 40,
+            "y": 460,
+            "inputs": {}
+          },
+          {
+            "id": "n4",
+            "kind": "builtin",
+            "ref": "bi.literal",
+            "x": 40,
+            "y": 560,
+            "inputs": {
+              "v": "35.0"
+            },
+            "opts": {
+              "type": "float"
+            }
+          },
+          {
+            "id": "n11",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 260,
+            "y": 470,
+            "inputs": {},
+            "opts": {
+              "op": "<"
+            }
+          },
+          {
+            "id": "n6",
+            "kind": "varGet",
+            "ref": "isLocked",
+            "x": 40,
+            "y": 680,
+            "inputs": {}
+          },
+          {
+            "id": "n16",
+            "kind": "builtin",
+            "ref": "bi.not",
+            "x": 260,
+            "y": 680,
+            "inputs": {}
+          },
+          {
+            "id": "n17",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 440,
+            "y": 560,
+            "inputs": {},
+            "opts": {
+              "op": "&&"
+            }
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.branch",
+            "x": 620,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n5",
+            "kind": "call",
+            "ref": "m3551",
+            "x": 880,
+            "y": 120,
+            "inputs": {
+              "p0": "100.0"
+            }
+          },
+          {
+            "id": "n14",
+            "kind": "varGet",
+            "ref": "var.get.hitCount",
+            "x": 620,
+            "y": 700,
+            "inputs": {}
+          },
+          {
+            "id": "n15",
+            "kind": "builtin",
+            "ref": "bi.litInt",
+            "x": 620,
+            "y": 800,
+            "inputs": {
+              "v": "1"
+            }
+          },
+          {
+            "id": "n13",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 820,
+            "y": 720,
+            "inputs": {},
+            "opts": {
+              "op": "+"
+            }
+          },
+          {
+            "id": "n7",
+            "kind": "varSet",
+            "ref": "var.set.hitCount",
+            "x": 1140,
+            "y": 120,
+            "inputs": {}
+          },
+          {
+            "id": "n19",
+            "kind": "call",
+            "ref": "m3005",
+            "x": 1400,
+            "y": 120,
+            "inputs": {}
+          },
+          {
+            "id": "n10",
+            "kind": "builtin",
+            "ref": "bi.cast",
+            "x": 880,
+            "y": 340,
+            "inputs": {},
+            "opts": {
+              "cls": "ItemBase"
+            }
+          },
+          {
+            "id": "n18",
+            "kind": "varSet",
+            "ref": "var.set.lastAttachment",
+            "x": 1140,
+            "y": 340,
+            "inputs": {}
+          },
+          {
+            "id": "n8",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 1400,
+            "y": 340,
+            "inputs": {
+              "value": "\"attached\""
+            }
+          },
+          {
+            "id": "n9",
+            "kind": "comment",
+            "ref": "bi.comment",
+            "x": 40,
+            "y": 40,
+            "inputs": {},
+            "opts": {
+              "text": "Top the item up when it is unlocked and damaged, then remember what was attached. Every node family the generator knows is on one of the two canvases in this project.",
+              "w": "560",
+              "h": "110"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s1_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n12",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e2",
+            "from": {
+              "node": "n12",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e3",
+            "from": {
+              "node": "n3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n11",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s1_e4",
+            "from": {
+              "node": "n4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n11",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s1_e5",
+            "from": {
+              "node": "n6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n16",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s1_e6",
+            "from": {
+              "node": "n16",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n17",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s1_e7",
+            "from": {
+              "node": "n11",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n17",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s1_e8",
+            "from": {
+              "node": "n17",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "cond"
+            }
+          },
+          {
+            "id": "s1_e9",
+            "from": {
+              "node": "n2",
+              "pin": "true"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e10",
+            "from": {
+              "node": "n5",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n7",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e11",
+            "from": {
+              "node": "n14",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n13",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s1_e12",
+            "from": {
+              "node": "n15",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n13",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s1_e13",
+            "from": {
+              "node": "n13",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n7",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s1_e14",
+            "from": {
+              "node": "n7",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n19",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e15",
+            "from": {
+              "node": "n2",
+              "pin": "false"
+            },
+            "to": {
+              "node": "n10",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e16",
+            "from": {
+              "node": "n1",
+              "pin": "o0"
+            },
+            "to": {
+              "node": "n10",
+              "pin": "obj"
+            }
+          },
+          {
+            "id": "s1_e17",
+            "from": {
+              "node": "n10",
+              "pin": "success"
+            },
+            "to": {
+              "node": "n18",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e18",
+            "from": {
+              "node": "n10",
+              "pin": "as"
+            },
+            "to": {
+              "node": "n18",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s1_e19",
+            "from": {
+              "node": "n18",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n8",
+              "pin": "exec"
+            }
+          }
+        ],
+        "variables": [
+          {
+            "id": "isLocked",
+            "name": "m_IsLocked",
+            "type": "bool",
+            "default": "false",
+            "sync": true,
+            "persist": true
+          },
+          {
+            "id": "hitCount",
+            "name": "m_HitCount",
+            "type": "int",
+            "default": "0",
+            "sync": true,
+            "persist": true
+          },
+          {
+            "id": "lastAttachment",
+            "name": "m_LastAttachment",
+            "type": "ItemBase",
+            "default": "",
+            "sync": false,
+            "persist": false,
+            "ref": false
+          }
+        ],
+        "functions": []
+      }
+    },
+    {
+      "id": "s2",
+      "name": "SUDO_DemoSpawner",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_DemoSpawner",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "b1",
+            "kind": "builtin",
+            "ref": "bi.begin",
+            "x": 40,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "when": "init"
+            }
+          },
+          {
+            "id": "b2",
+            "kind": "builtin",
+            "ref": "bi.new",
+            "x": 300,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "cls": "TStringArray"
+            }
+          },
+          {
+            "id": "b3",
+            "kind": "varSet",
+            "ref": "var.set.loot",
+            "x": 560,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "b4",
+            "kind": "builtin",
+            "ref": "bi.raw",
+            "x": 820,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "code": "m_LootTypes.Insert(\"Apple\");\nm_LootTypes.Insert(\"Nail\");"
+            }
+          },
+          {
+            "id": "b5",
+            "kind": "builtin",
+            "ref": "bi.serverOnly",
+            "x": 1080,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "b6",
+            "kind": "builtin",
+            "ref": "bi.sequence",
+            "x": 1300,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "c1",
+            "kind": "builtin",
+            "ref": "bi.forEach",
+            "x": 1560,
+            "y": 120,
+            "inputs": {}
+          },
+          {
+            "id": "c2",
+            "kind": "varGet",
+            "ref": "var.get.loot",
+            "x": 1300,
+            "y": 460,
+            "inputs": {}
+          },
+          {
+            "id": "c3",
+            "kind": "builtin",
+            "ref": "bi.self",
+            "x": 1560,
+            "y": 460,
+            "inputs": {}
+          },
+          {
+            "id": "c4",
+            "kind": "call",
+            "ref": "fn.call.s2.f1",
+            "x": 1820,
+            "y": 120,
+            "inputs": {}
+          },
+          {
+            "id": "c5",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 2100,
+            "y": 120,
+            "inputs": {}
+          },
+          {
+            "id": "c6",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 1860,
+            "y": 320,
+            "inputs": {},
+            "opts": {
+              "op": "+"
+            }
+          },
+          {
+            "id": "c7",
+            "kind": "builtin",
+            "ref": "bi.litString",
+            "x": 1620,
+            "y": 320,
+            "inputs": {
+              "v": "spawned #"
+            }
+          },
+          {
+            "id": "d1",
+            "kind": "builtin",
+            "ref": "bi.forLoop",
+            "x": 1560,
+            "y": 620,
+            "inputs": {
+              "first": "0"
+            }
+          },
+          {
+            "id": "d2",
+            "kind": "builtin",
+            "ref": "bi.rawExpr",
+            "x": 1300,
+            "y": 720,
+            "inputs": {},
+            "opts": {
+              "code": "m_LootTypes.Count()"
+            }
+          },
+          {
+            "id": "d3",
+            "kind": "varSet",
+            "ref": "var.set.spawned",
+            "x": 1820,
+            "y": 620,
+            "inputs": {}
+          },
+          {
+            "id": "d4",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 1620,
+            "y": 860,
+            "inputs": {},
+            "opts": {
+              "op": "+"
+            }
+          },
+          {
+            "id": "d5",
+            "kind": "varGet",
+            "ref": "var.get.spawned",
+            "x": 1360,
+            "y": 860,
+            "inputs": {}
+          },
+          {
+            "id": "d6",
+            "kind": "builtin",
+            "ref": "bi.litInt",
+            "x": 1360,
+            "y": 960,
+            "inputs": {
+              "v": "1"
+            }
+          },
+          {
+            "id": "e1",
+            "kind": "builtin",
+            "ref": "bi.while",
+            "x": 1560,
+            "y": 1120,
+            "inputs": {}
+          },
+          {
+            "id": "e2",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 1300,
+            "y": 1220,
+            "inputs": {},
+            "opts": {
+              "op": ">"
+            }
+          },
+          {
+            "id": "e3",
+            "kind": "varGet",
+            "ref": "var.get.spawned",
+            "x": 1040,
+            "y": 1220,
+            "inputs": {}
+          },
+          {
+            "id": "e4",
+            "kind": "builtin",
+            "ref": "bi.litInt",
+            "x": 1040,
+            "y": 1320,
+            "inputs": {
+              "v": "10"
+            }
+          },
+          {
+            "id": "e5",
+            "kind": "varSet",
+            "ref": "var.set.spawned",
+            "x": 1820,
+            "y": 1180,
+            "inputs": {}
+          },
+          {
+            "id": "e6",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 1620,
+            "y": 1420,
+            "inputs": {},
+            "opts": {
+              "op": "-"
+            }
+          },
+          {
+            "id": "e7",
+            "kind": "varGet",
+            "ref": "var.get.spawned",
+            "x": 1360,
+            "y": 1420,
+            "inputs": {}
+          },
+          {
+            "id": "e8",
+            "kind": "builtin",
+            "ref": "bi.litInt",
+            "x": 1360,
+            "y": 1520,
+            "inputs": {
+              "v": "1"
+            }
+          },
+          {
+            "id": "z1",
+            "kind": "builtin",
+            "ref": "bi.end",
+            "x": 40,
+            "y": 1700,
+            "inputs": {}
+          },
+          {
+            "id": "z2",
+            "kind": "builtin",
+            "ref": "bi.raw",
+            "x": 300,
+            "y": 1700,
+            "inputs": {},
+            "opts": {
+              "code": "if (m_LootTypes)\n{\n\tm_LootTypes.Clear();\n}"
+            }
+          },
+          {
+            "id": "f1e",
+            "kind": "event",
+            "ref": "fn.entry.f1",
+            "x": 40,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "h1",
+            "kind": "call",
+            "ref": "g272",
+            "x": 40,
+            "y": 2140,
+            "inputs": {}
+          },
+          {
+            "id": "h2",
+            "kind": "call",
+            "ref": "m4256",
+            "x": 300,
+            "y": 2140,
+            "inputs": {}
+          },
+          {
+            "id": "h3",
+            "kind": "builtin",
+            "ref": "bi.branch",
+            "x": 560,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "g1",
+            "kind": "builtin",
+            "ref": "bi.litString",
+            "x": 40,
+            "y": 2600,
+            "inputs": {
+              "v": ""
+            }
+          },
+          {
+            "id": "g2",
+            "kind": "builtin",
+            "ref": "bi.op",
+            "x": 300,
+            "y": 2520,
+            "inputs": {},
+            "opts": {
+              "op": "=="
+            }
+          },
+          {
+            "id": "g3",
+            "kind": "builtin",
+            "ref": "bi.litString",
+            "x": 300,
+            "y": 2720,
+            "inputs": {
+              "v": "Apple"
+            }
+          },
+          {
+            "id": "g4",
+            "kind": "builtin",
+            "ref": "bi.select",
+            "x": 560,
+            "y": 2520,
+            "inputs": {}
+          },
+          {
+            "id": "g5",
+            "kind": "call",
+            "ref": "m3413",
+            "x": 560,
+            "y": 2740,
+            "inputs": {}
+          },
+          {
+            "id": "g6",
+            "kind": "builtin",
+            "ref": "bi.spawn",
+            "x": 820,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "g7",
+            "kind": "call",
+            "ref": "m3418",
+            "x": 1080,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "g8",
+            "kind": "builtin",
+            "ref": "bi.litVector",
+            "x": 1080,
+            "y": 2220,
+            "inputs": {
+              "v": "0 90 0"
+            }
+          },
+          {
+            "id": "g10",
+            "kind": "call",
+            "ref": "m3551",
+            "x": 1340,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "g11",
+            "kind": "builtin",
+            "ref": "bi.litFloat",
+            "x": 1340,
+            "y": 2220,
+            "inputs": {
+              "v": "100.0"
+            }
+          },
+          {
+            "id": "g12",
+            "kind": "call",
+            "ref": "m3569",
+            "x": 1600,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "g13",
+            "kind": "builtin",
+            "ref": "bi.litBool",
+            "x": 1600,
+            "y": 2220,
+            "inputs": {
+              "v": "false"
+            }
+          },
+          {
+            "id": "g9",
+            "kind": "builtin",
+            "ref": "bi.return",
+            "x": 1860,
+            "y": 2000,
+            "inputs": {}
+          },
+          {
+            "id": "h4",
+            "kind": "builtin",
+            "ref": "bi.return",
+            "x": 820,
+            "y": 2320,
+            "inputs": {}
+          },
+          {
+            "id": "h5",
+            "kind": "builtin",
+            "ref": "bi.rawExpr",
+            "x": 560,
+            "y": 2400,
+            "inputs": {},
+            "opts": {
+              "code": "null"
+            }
+          },
+          {
+            "id": "z9",
+            "kind": "comment",
+            "ref": "bi.comment",
+            "x": 40,
+            "y": 40,
+            "inputs": {},
+            "opts": {
+              "text": "Init builds the loot list, then the server spawns one of each. SpawnLoot is this script's own function, called through Self.",
+              "w": "560",
+              "h": "90"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s2_e1",
+            "from": {
+              "node": "b1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "b2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e2",
+            "from": {
+              "node": "b2",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "b3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e3",
+            "from": {
+              "node": "b2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "b3",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s2_e4",
+            "from": {
+              "node": "b3",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "b4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e5",
+            "from": {
+              "node": "b4",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "b5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e6",
+            "from": {
+              "node": "b5",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "b6",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e7",
+            "from": {
+              "node": "b6",
+              "pin": "then0"
+            },
+            "to": {
+              "node": "c1",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e8",
+            "from": {
+              "node": "c2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "c1",
+              "pin": "array"
+            }
+          },
+          {
+            "id": "s2_e9",
+            "from": {
+              "node": "c1",
+              "pin": "body"
+            },
+            "to": {
+              "node": "c4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e10",
+            "from": {
+              "node": "c3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "c4",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e11",
+            "from": {
+              "node": "c1",
+              "pin": "item"
+            },
+            "to": {
+              "node": "c4",
+              "pin": "p0"
+            }
+          },
+          {
+            "id": "s2_e12",
+            "from": {
+              "node": "c4",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "c5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e13",
+            "from": {
+              "node": "c7",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "c6",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e14",
+            "from": {
+              "node": "c1",
+              "pin": "index"
+            },
+            "to": {
+              "node": "c6",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e15",
+            "from": {
+              "node": "c6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "c5",
+              "pin": "value"
+            }
+          },
+          {
+            "id": "s2_e16",
+            "from": {
+              "node": "b6",
+              "pin": "then1"
+            },
+            "to": {
+              "node": "d1",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e17",
+            "from": {
+              "node": "d2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "d1",
+              "pin": "last"
+            }
+          },
+          {
+            "id": "s2_e18",
+            "from": {
+              "node": "d1",
+              "pin": "body"
+            },
+            "to": {
+              "node": "d3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e19",
+            "from": {
+              "node": "d5",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "d4",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e20",
+            "from": {
+              "node": "d6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "d4",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e21",
+            "from": {
+              "node": "d4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "d3",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s2_e22",
+            "from": {
+              "node": "b6",
+              "pin": "then2"
+            },
+            "to": {
+              "node": "e1",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e23",
+            "from": {
+              "node": "e3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e2",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e24",
+            "from": {
+              "node": "e4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e2",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e25",
+            "from": {
+              "node": "e2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e1",
+              "pin": "cond"
+            }
+          },
+          {
+            "id": "s2_e26",
+            "from": {
+              "node": "e1",
+              "pin": "body"
+            },
+            "to": {
+              "node": "e5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e27",
+            "from": {
+              "node": "e7",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e6",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e28",
+            "from": {
+              "node": "e8",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e6",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e29",
+            "from": {
+              "node": "e6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "e5",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s2_e30",
+            "from": {
+              "node": "z1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "z2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e31",
+            "from": {
+              "node": "f1e",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "h3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e32",
+            "from": {
+              "node": "h1",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "h2",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e33",
+            "from": {
+              "node": "h2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "h3",
+              "pin": "cond"
+            }
+          },
+          {
+            "id": "s2_e34",
+            "from": {
+              "node": "h3",
+              "pin": "true"
+            },
+            "to": {
+              "node": "g6",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e35",
+            "from": {
+              "node": "h3",
+              "pin": "false"
+            },
+            "to": {
+              "node": "h4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e36",
+            "from": {
+              "node": "h5",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "h4",
+              "pin": "value"
+            }
+          },
+          {
+            "id": "s2_e37",
+            "from": {
+              "node": "f1e",
+              "pin": "o0"
+            },
+            "to": {
+              "node": "g2",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e38",
+            "from": {
+              "node": "g1",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g2",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e39",
+            "from": {
+              "node": "g2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g4",
+              "pin": "cond"
+            }
+          },
+          {
+            "id": "s2_e40",
+            "from": {
+              "node": "g3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g4",
+              "pin": "a"
+            }
+          },
+          {
+            "id": "s2_e41",
+            "from": {
+              "node": "f1e",
+              "pin": "o0"
+            },
+            "to": {
+              "node": "g4",
+              "pin": "b"
+            }
+          },
+          {
+            "id": "s2_e42",
+            "from": {
+              "node": "g4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g6",
+              "pin": "type"
+            }
+          },
+          {
+            "id": "s2_e43",
+            "from": {
+              "node": "g5",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g6",
+              "pin": "pos"
+            }
+          },
+          {
+            "id": "s2_e44",
+            "from": {
+              "node": "g6",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "g7",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e45",
+            "from": {
+              "node": "g6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g7",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e46",
+            "from": {
+              "node": "g8",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g7",
+              "pin": "p0"
+            }
+          },
+          {
+            "id": "s2_e47",
+            "from": {
+              "node": "g7",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "g10",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e48",
+            "from": {
+              "node": "g6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g10",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e49",
+            "from": {
+              "node": "g11",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g10",
+              "pin": "p0"
+            }
+          },
+          {
+            "id": "s2_e50",
+            "from": {
+              "node": "g10",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "g12",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e51",
+            "from": {
+              "node": "g6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g12",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e52",
+            "from": {
+              "node": "g13",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g12",
+              "pin": "p0"
+            }
+          },
+          {
+            "id": "s2_e53",
+            "from": {
+              "node": "g12",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "g9",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e54",
+            "from": {
+              "node": "g6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "g9",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [
+          {
+            "id": "loot",
+            "name": "m_LootTypes",
+            "type": "TStringArray",
+            "default": "",
+            "sync": false,
+            "persist": false,
+            "ref": true
+          },
+          {
+            "id": "spawned",
+            "name": "m_Spawned",
+            "type": "int",
+            "default": "0",
+            "sync": false,
+            "persist": false
+          }
+        ],
+        "functions": [
+          {
+            "id": "f1",
+            "name": "SpawnLoot",
+            "returns": "EntityAI",
+            "params": [
+              {
+                "name": "typeName",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "activeId": "s1"
+}
