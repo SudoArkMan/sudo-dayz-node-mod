@@ -2062,29 +2062,26 @@ QString patchLabel(const DependencyContext &dc)
     return dc.patchClass.isEmpty() ? QStringLiteral("<your addon>") : dc.patchClass;
 }
 
-// Which dependency a node came from, or null for vanilla. Both matchers are
-// tried because two parties decide the answer: the indexer picks the catalogue
-// key a mod's method lands under, and the mod picks where its scripts live.
-const DependencyFacts *dependencyOf(const Ctx &ctx, const GraphNode &n)
+// The dependency a node's key names, or null for vanilla nodes and builtins.
+//
+// The addon id is read straight out of the key, which moddeps.h defines as
+// "dep.<addon>.<Class>.<Method>". ModIndex::dependencyIdOf is the same read and
+// is deliberately not called: analysis.cpp is linked into the two headless
+// suites without moddeps.cpp, and it stays that way so a model-layer test does
+// not have to drag the mod importer in behind it.
+const ModDependency *dependencyOf(const Ctx &ctx, const GraphNode &n)
 {
-    QString loc;
-    if (const NodeDef *d = ctx.def(n.id)) loc = d->loc;
-    if (loc.isEmpty())
-        if (const MethodSig *m = ctx.sig(n.id)) {
-            const int id = ctx.cat.classId(m->owner);
-            if (id >= 0) loc = ctx.cat.classInfo(id).file;
-        }
+    static const QLatin1String kDepKey("dep.");
+    if (!n.ref.startsWith(kDepKey)) return nullptr;
+    const int end = n.ref.indexOf(QLatin1Char('.'), kDepKey.size());
+    if (end <= kDepKey.size()) return nullptr;
+    const QString id = n.ref.mid(kDepKey.size(), end - kDepKey.size());
 
-    for (const DependencyFacts &d : ctx.depCtx.deps) {
-        for (const QString &p : d.keyPrefixes)
-            if (!p.isEmpty() && n.ref.startsWith(p)) return &d;
-        // Contains rather than startsWith: the same script reads as
-        // "JM/COT/Scripts/..." out of the index and "P:/JM/COT/Scripts/..."
-        // out of a mod folder, and both are the same dependency.
-        for (const QString &p : d.pathPrefixes)
-            if (!p.isEmpty() && !loc.isEmpty() && loc.contains(p, Qt::CaseInsensitive))
-                return &d;
-    }
+    for (const ModDependency &d : ctx.depCtx.deps)
+        if (d.id.compare(id, Qt::CaseInsensitive) == 0) return &d;
+    // A key naming a mod the project no longer lists. DZ101 already reports the
+    // node as unresolved; adding a dependency finding on top would be the same
+    // problem told twice.
     return nullptr;
 }
 
@@ -2093,7 +2090,7 @@ const DependencyFacts *dependencyOf(const Ctx &ctx, const GraphNode &n)
 // with twenty COT calls has one missing addon, not twenty. Unreachable nodes
 // are skipped because they generate no code, the same line DZ111 draws.
 struct DepUse {
-    const DependencyFacts *dep = nullptr;
+    const ModDependency *dep = nullptr;
     QString nodeId;
 };
 
@@ -2102,10 +2099,10 @@ QVector<DepUse> dependenciesUsed(const Ctx &ctx)
     QVector<DepUse> used;
     if (ctx.depCtx.deps.isEmpty()) return used;
 
-    QSet<const DependencyFacts *> seen;
+    QSet<const ModDependency *> seen;
     for (const GraphNode &n : ctx.graph.nodes) {
         if (!ctx.reachable.contains(n.id)) continue;
-        const DependencyFacts *d = dependencyOf(ctx, n);
+        const ModDependency *d = dependencyOf(ctx, n);
         if (!d || seen.contains(d)) continue;
         seen.insert(d);
         used.append({d, n.id});
@@ -2139,18 +2136,18 @@ void undeclaredDependency(const Ctx &ctx, const QVector<DepUse> &used,
     if (!ctx.depCtx.configRead) return;
 
     for (const DepUse &u : used) {
-        if (u.dep->addon.isEmpty()) continue;
-        if (listsAddon(ctx.depCtx.declaredAddons, u.dep->addon)) continue;
+        if (u.dep->id.isEmpty()) continue;
+        if (listsAddon(ctx.depCtx.declaredAddons, u.dep->id)) continue;
 
         out.append(diag(Severity::Error, QStringLiteral("DZ314"),
                         QStringLiteral("This graph calls into %1, but %2 is not one of "
                                        "this mod's required addons.")
-                            .arg(depLabel(*u.dep), u.dep->addon),
+                            .arg(depLabel(*u.dep), u.dep->id),
                         QStringLiteral("Add \"%1\" to requiredAddons[] in "
                                        "class CfgPatches/%2 in %3. Until it is there the "
                                        "engine has no reason to load %4 first, so the "
                                        "class does not resolve when this script compiles.")
-                            .arg(u.dep->addon, patchLabel(ctx.depCtx),
+                            .arg(u.dep->id, patchLabel(ctx.depCtx),
                                  configLabel(ctx.depCtx), depLabel(*u.dep)),
                         u.nodeId));
     }
@@ -2163,18 +2160,18 @@ void unguardedOptionalDependency(const Ctx &ctx, const QVector<DepUse> &used,
                                  QVector<Diagnostic> &out)
 {
     for (const DepUse &u : used) {
-        if (!u.dep->optional || u.dep->guard.isEmpty()) continue;
-        if (guardPresent(ctx, u.dep->guard)) continue;
+        if (!u.dep->optional || u.dep->loadedDefine.isEmpty()) continue;
+        if (guardPresent(ctx, u.dep->loadedDefine)) continue;
 
         out.append(diag(Severity::Warning, QStringLiteral("DZ315"),
                         QStringLiteral("%1 is marked optional, and nothing in this graph "
                                        "sits behind #ifdef %2.")
-                            .arg(depLabel(*u.dep), u.dep->guard),
-                        QStringLiteral("%1 defines %2, so a script can test for it. Put "
-                                       "these calls in a Raw node between "
+                            .arg(depLabel(*u.dep), u.dep->loadedDefine),
+                        QStringLiteral("%1 defines %2 when it loads, so a script can test "
+                                       "for it. Put these calls in a Raw node between "
                                        "`#ifdef %2` and `#endif`, or turn the optional "
                                        "flag off if the mod cannot run without %1.")
-                            .arg(depLabel(*u.dep), u.dep->guard),
+                            .arg(depLabel(*u.dep), u.dep->loadedDefine),
                         u.nodeId));
     }
 }
@@ -2189,7 +2186,7 @@ void dependencyRequirementMissing(const Ctx &ctx, const QVector<DepUse> &used,
     if (!ctx.depCtx.configRead) return;
 
     for (const DepUse &u : used) {
-        for (const QString &need : u.dep->requiredAddons) {
+        for (const QString &need : u.dep->requires) {
             if (bareAddon(need).isEmpty()) continue;
             if (listsAddon(ctx.depCtx.declaredAddons, need)) continue;
 

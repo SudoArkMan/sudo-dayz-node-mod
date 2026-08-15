@@ -1,0 +1,41 @@
+{
+  "_note": "Addon names and requirements read from each framework's own config.cpp, not from memory. Update by re-reading the source, never by recollection.",
+  "mods": [
+    {
+      "id": "JM_CF_Scripts",
+      "displayName": "Community Framework",
+      "shortName": "CF",
+      "addons": ["JM_CF_Scripts"],
+      "requires": [],
+      "badgeColor": "#4da3ff",
+      "why": "General purpose library most serious mods build on. Covers RPC, networked variables, mod storage, a module system, logging, an event handler, localisation, file and stream helpers, cryptography, type converters and an expression VM.",
+      "sourceHint": "JM/CF/Scripts",
+      "docs": ["Cryptography", "Date", "EventHandler", "ExpressionVM", "File",
+               "InputBindings", "LifecycleEvents", "Localiser", "Logging",
+               "ModStorage", "Modules", "NetworkedVariables", "RPC", "Streams",
+               "Surface", "TypeConverters", "Weapons"]
+    },
+    {
+      "id": "JM_COT_Scripts",
+      "displayName": "Community Online Tools",
+      "shortName": "COT",
+      "addons": ["JM_COT_Scripts", "JM_COT_GUI"],
+      "requires": ["JM_CF_Scripts", "JM_COT_GUI", "DZ_Data"],
+      "loadedDefine": "JM_COT_LOADED",
+      "badgeColor": "#e0a53f",
+      "why": "Admin tools with a permissions and roles framework, and a modular design other mods plug their own admin menus into. Built on CF, so depending on COT pulls CF in as well.",
+      "sourceHint": "JM/COT/Scripts",
+      "cfgMods": "JM_CommunityOnlineTools"
+    },
+    {
+      "id": "DF_Scripts",
+      "displayName": "Dabs Framework",
+      "shortName": "DF",
+      "addons": ["DF_Scripts", "DF_GUI"],
+      "requires": ["DZ_Scripts", "DF_GUI"],
+      "badgeColor": "#7ee081",
+      "why": "The other widely used library. The bundled mod template already lists it in Workbench project.cfg as Mods=@Dabs Framework.",
+      "sourceHint": "DabsFramework/Scripts"
+    }
+  ]
+}
