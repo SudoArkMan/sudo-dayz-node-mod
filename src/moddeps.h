@@ -33,6 +33,7 @@
 
 #include <QColor>
 #include <QHash>
+#include <QRegularExpression>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -82,8 +83,10 @@ ModDependency knownDependency(const QString &id);
 // and puts the same mod in the same colour on every machine.
 QColor badgeColorFor(const QString &id);
 
-// A badge-sized name from a display name: its capitals, so "Community Online
-// Tools" gives "COT". Falls back to the first letters when there are none.
+// A badge-sized name. Several words give their initials, so "Community Online
+// Tools" reads COT and the addon name "JM_CF_Scripts" reads JCS. One word gives
+// its capitals, so "ModTemplate" reads MT, and a word with none gives its first
+// letters.
 //
 // Inline because the .sdzn reader falls back to it for a hand-written file that
 // left the short name out, and project.cpp must not have to link this module's
@@ -91,13 +94,20 @@ QColor badgeColorFor(const QString &id);
 // test that opens a project.
 inline QString shortNameFor(const QString &displayName)
 {
+    const QStringList words = displayName.split(QRegularExpression(QStringLiteral("[\\s_\\-]+")),
+                                                Qt::SkipEmptyParts);
+    if (words.size() > 1) {
+        QString initials;
+        for (const QString &w : words) initials.append(w.at(0).toUpper());
+        return initials.left(4);
+    }
+    if (words.isEmpty()) return QString();
+    const QString word = words.first();
     QString caps;
-    for (const QChar c : displayName)
+    for (const QChar c : word)
         if (c.isUpper() || c.isDigit()) caps.append(c);
     if (caps.size() >= 2) return caps.left(4);
-    const QString trimmed = displayName.trimmed();
-    if (trimmed.isEmpty()) return QString();
-    return trimmed.left(3).toUpper();
+    return word.left(3).toUpper();
 }
 
 // ------------------------------------------------------------ reading a folder

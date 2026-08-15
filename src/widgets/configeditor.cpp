@@ -273,6 +273,11 @@ private:
     void refreshMarks()
     {
         if (!m_check) return;
+        // Colouring a row is a change to the row, and the list says so. Without
+        // this the mark set here comes straight back in as an edit, and the
+        // value is written to the model twice for every character typed.
+        const bool outer = m_loading;
+        m_loading = true;
         for (int i = 0; i < m_list->count(); ++i) {
             QListWidgetItem *item = m_list->item(i);
             const QString text = item->text().trimmed();
@@ -281,6 +286,7 @@ private:
             item->setToolTip(ok ? QString()
                                 : tr("Nothing at this path under the mod folder."));
         }
+        m_loading = outer;
     }
 
     // A files[] with two entries in a box sized for ten is dead space in a panel
@@ -564,7 +570,6 @@ ConfigEditor::ConfigEditor(QWidget *parent, Document *doc, const QString &path)
     m_textToggle->setCheckable(true);
     m_textToggle->setChecked(true);
     m_textToggle->setText(tr("File text"));
-    m_textToggle->setToolTipDuration(-1);
     m_textToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     m_textToggle->setArrowType(Qt::DownArrow);
     m_textToggle->setAutoRaise(true);
@@ -676,6 +681,18 @@ ConfigEditor *ConfigEditor::openFile(QWidget *parent, Document *doc, const QStri
 
 bool ConfigEditor::load(QString *error)
 {
+    // A config is a few kilobytes. Anything of this size with a .cpp on the end
+    // is something else wearing the extension, and reading it in to find that
+    // out costs a minute of somebody's afternoon.
+    const QFileInfo info(m_path);
+    if (info.size() > 8 * 1024 * 1024) {
+        if (error)
+            *error = tr("%1 is %2 MB, which is not a config.")
+                         .arg(info.fileName())
+                         .arg(info.size() / (1024.0 * 1024.0), 0, 'f', 1);
+        return false;
+    }
+
     QFile file(m_path);
     if (!file.open(QIODevice::ReadOnly)) {
         if (error) *error = tr("Cannot read %1.").arg(QDir::toNativeSeparators(m_path));
@@ -1004,7 +1021,17 @@ void ConfigEditor::buildFindings()
 
 void ConfigEditor::refreshFindings()
 {
-    m_findings = validateConfig(m_file, m_context);
+    m_findings.clear();
+    // What the parser could not read comes first. The tree only shows what was
+    // understood, so a line it could not place has to be said out loud or the
+    // window quietly claims the file holds less than it does.
+    for (const QString &problem : m_file.errors) {
+        ConfigFinding finding;
+        finding.level = ConfigFinding::Level::Error;
+        finding.text = problem;
+        m_findings.append(finding);
+    }
+    m_findings += validateConfig(m_file, m_context);
     buildFindings();
 }
 
