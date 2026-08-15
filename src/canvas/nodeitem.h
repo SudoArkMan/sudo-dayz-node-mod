@@ -8,6 +8,12 @@
 // itself, highlighted, and size themselves to it. A project can hold hundreds
 // of those, and a fixed box titled "Raw Enforce" tells the reader nothing
 // about which one they are looking at.
+//
+// A node that came from a mod dependency wears its short name in the header,
+// "COT" or "CF", in that dependency's colour. Only those: a vanilla node gets
+// no tag, because 29,000 nodes carrying a "DayZ" badge is noise rather than
+// information, and what a reader needs to know is which of them is the one
+// that will not compile on a server missing a mod.
 #pragma once
 
 #include "analysis.h"
@@ -127,8 +133,18 @@ private:
     double m_codeLineHeight = 0.0;
     bool m_pinsOnHeader = false; // pins share the header row, so it needs clearance
 
+    // The dependency tag, empty on a vanilla node, and the colour it draws in.
+    QString m_sourceTag;
+    QColor m_sourceColor;
+
     void layoutCode(const GraphNode &node);
+    // Reads the dependency a node's key names and sets the two members above.
+    void resolveSource(const GraphNode &node);
     void layoutPins();
+    // Room the dependency tag needs, zero when there is none. Measured here
+    // rather than at each use so the width the layout reserves and the pill the
+    // painter draws cannot disagree.
+    double sourceTagWidth() const;
     // Width the node's own text needs, before the clamp.
     double contentWidth(const QVector<Pin> &dataIn,
                         const QVector<Pin> &dataOut) const;

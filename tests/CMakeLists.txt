@@ -230,3 +230,21 @@ target_include_directories(configeditortest PRIVATE ../src)
 target_link_libraries(configeditortest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )
+
+# The dependency rules DZ314/315/316 were proven in a scratch harness; keeping
+# them covered means keeping the harness.
+add_executable(deprulestest
+  deprulestest.cpp
+  ../src/moddeps.cpp
+  ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
+  ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
+  ../src/config/configtree.cpp
+  ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
+  ../src/enforce/layout.cpp ../src/enforce/import.cpp
+  ../src/codegen.cpp ../src/theme.cpp
+  ../src/analysis.cpp
+)
+target_include_directories(deprulestest PRIVATE ../src)
+target_link_libraries(deprulestest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)

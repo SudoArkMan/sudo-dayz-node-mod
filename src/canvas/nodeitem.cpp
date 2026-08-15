@@ -3,6 +3,7 @@
 #include "catalog.h"
 #include "document.h"
 #include "enforce/lexer.h"
+#include "moddeps.h"
 #include "nodescene.h"
 #include "theme.h"
 
@@ -46,6 +47,22 @@ constexpr double kPinGrab = pinRadius + 11.0;
 // rather than as a second node.
 constexpr double kPinHalo = pinRadius + 7.0;
 constexpr double kBadgeRadius = 4.6;
+// The dependency tag is a lettered pill, not a logo. A mod ships its icon as an
+// .edds, which nothing here can decode, and two or three letters stay readable
+// at the 0.75 zoom a long graph fits at, where a 9 unit image would be mud.
+constexpr double kTagHeight = 9.2;
+constexpr double kTagPadX = 3.2;
+constexpr double kTagRadius = 2.2;
+// Between the tag and the diagnostics badge, and between the tag and the text
+// on its left. Enough that the two markers read as two things, and enough that
+// an elided subtitle does not run into the pill it stops against.
+constexpr double kTagGap = 4.0;
+// How much of the dependency's colour the pill keeps. A solid chip beside the
+// diagnostics dot reads as a second alert; this is low enough that the dot
+// stays the loudest thing on the header and the tag stays a label.
+constexpr int kTagFillAlpha = 46;
+// A source marker, not a name field. Past this the header belongs to the title.
+constexpr int kTagChars = 5;
 // How far outside a value field a press still counts, in SCREEN pixels. The
 // field is nine scene units tall, so measured in scene units the target shrinks
 // with the zoom and lands at three pixels by the time a long graph fits on
@@ -208,6 +225,9 @@ QFont titleFont()
     return f;
 }
 QFont smallFont() { return theme::uiFont(7); }
+// Same size as the glyph inside the diagnostics badge, so the two markers sit
+// on the header as a pair rather than as one loud one and one quiet one.
+QFont tagFont() { return theme::uiFont(6, true); }
 
 Severity worstOf(const QVector<Diagnostic> &diags, bool *any)
 {
@@ -292,10 +312,13 @@ void NodeItem::refresh()
         m_headerHeight = headerHeight;
         m_pinsOnHeader = false;
         m_height = headerHeight + padding * 2;
+        m_sourceTag.clear();
+        m_sourceColor = QColor();
         update();
         return;
     }
 
+    resolveSource(*n);
     m_def = m_doc->defForNode(*n);
     if (m_def.valid) {
         m_title = m_def.title;
@@ -320,6 +343,36 @@ void NodeItem::refresh()
     layoutPins();
     setPos(n->x, n->y);
     update();
+}
+
+// Which mod this node came from, read off the node's own key. Going through the
+// key rather than through ModIndex is deliberate: a project opened on a machine
+// that does not have the mod installed has never indexed it, and the badge is
+// most worth drawing exactly then.
+void NodeItem::resolveSource(const GraphNode &node)
+{
+    m_sourceTag.clear();
+    m_sourceColor = QColor();
+
+    const QString depId = ModIndex::dependencyIdOf(node.ref);
+    if (depId.isEmpty() || !m_doc) return;
+
+    const ModDependency *dep = m_doc->project().dependency(depId);
+    // A key naming a dependency the project has since dropped still says where
+    // the node came from, so the addon id answers for the missing record.
+    const QString tag = dep && !dep->shortName.isEmpty()
+                            ? dep->shortName
+                            : shortNameFor(dep ? dep->displayName : depId);
+    m_sourceTag = tag.isEmpty() ? shortNameFor(depId) : tag.left(kTagChars);
+    m_sourceColor = dep && dep->badgeColor.isValid() ? dep->badgeColor
+                                                     : badgeColorFor(depId);
+}
+
+double NodeItem::sourceTagWidth() const
+{
+    if (m_sourceTag.isEmpty()) return 0.0;
+    const QFontMetricsF fm(tagFont());
+    return qMax(kTagHeight, std::ceil(fm.horizontalAdvance(m_sourceTag) + kTagPadX * 2.0));
 }
 
 void NodeItem::setDiagnostics(const QVector<Diagnostic> &diags)
@@ -436,9 +489,15 @@ double NodeItem::contentWidth(const QVector<Pin> &dataIn,
     const QFontMetricsF sm(smallFont());
     const QFontMetricsF vm(theme::uiFont(7));
 
-    // Header: title, a gap, then the owning class.
+    // Header: title, a gap, then the owning class, then the corner markers.
+    // Room for the diagnostics badge is held whether or not this node has one,
+    // so gaining a finding does not resize the node under the reader. The
+    // dependency tag is measured instead of assumed, because most nodes are
+    // vanilla and would otherwise pay width for a marker they never draw.
+    const double tag = sourceTagWidth();
     double widest = tm.horizontalAdvance(m_title) + padding * 3.0
-                    + sm.horizontalAdvance(m_subtitle) + kBadgeRadius * 2.0;
+                    + sm.horizontalAdvance(m_subtitle) + kBadgeRadius * 2.0
+                    + (tag > 0.0 ? tag + kTagGap : 0.0);
 
     for (int i = 0; i < qMax(dataIn.size(), dataOut.size()); ++i) {
         double row = kLabelInset * 2.0;
@@ -873,7 +932,13 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
     const QFontMetricsF tm(tf);
     const QFontMetricsF sm(sf);
 
-    const double badgeSpace = hasDiags ? kBadgeRadius * 2.0 + 2.0 : 0.0;
+    // The two header markers, right to left: the diagnostics badge keeps the
+    // corner it has always had, and the dependency tag goes to its left. Moving
+    // the badge instead would make a node's own state jump sideways depending
+    // on which mod it came from.
+    const double tagW = sourceTagWidth();
+    const double diagSpace = hasDiags ? kBadgeRadius * 2.0 + 2.0 : 0.0;
+    const double badgeSpace = diagSpace + (tagW > 0.0 ? tagW + kTagGap : 0.0);
     // An output pin drawn on the header would otherwise sit under the marker.
     const double pinClearance = m_pinsOnHeader ? kExecHalfWidth + 3.0 : 0.0;
     const QRectF headText(padding, 0,
@@ -904,13 +969,13 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
         }
     }
 
+    double markerRight = m_width - padding - pinClearance;
     if (hasDiags) {
-        const QPointF c(m_width - padding - pinClearance - kBadgeRadius + 1.0,
-                        m_headerHeight / 2.0);
+        const QPointF c(markerRight - kBadgeRadius + 1.0, m_headerHeight / 2.0);
         p->setPen(Qt::NoPen);
         p->setBrush(severityColor(worst));
         p->drawEllipse(c, kBadgeRadius, kBadgeRadius);
-        p->setFont(theme::uiFont(6, true));
+        p->setFont(tagFont());
         p->setPen(theme::windowBg());
         const QString glyph = worst == Severity::Error ? QStringLiteral("x")
                               : worst == Severity::Warning ? QStringLiteral("!")
@@ -918,6 +983,24 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
         p->drawText(QRectF(c.x() - kBadgeRadius, c.y() - kBadgeRadius,
                            kBadgeRadius * 2, kBadgeRadius * 2),
                     Qt::AlignCenter, glyph);
+        markerRight = c.x() - kBadgeRadius - kTagGap;
+    }
+
+    if (tagW > 0.0) {
+        const QRectF tagRect(markerRight - tagW, (m_headerHeight - kTagHeight) / 2.0,
+                             tagW, kTagHeight);
+        const QColor c = m_sourceColor.isValid() ? m_sourceColor : theme::accent();
+        // Washed rather than filled. The header is already a solid accent, and a
+        // second solid block beside the diagnostics dot would read as a second
+        // alert instead of as a label saying where the node came from.
+        QColor fill = c;
+        fill.setAlpha(kTagFillAlpha);
+        p->setPen(Qt::NoPen);
+        p->setBrush(fill);
+        p->drawRoundedRect(tagRect, kTagRadius, kTagRadius);
+        p->setFont(tagFont());
+        p->setPen(c);
+        p->drawText(tagRect, Qt::AlignCenter, m_sourceTag);
     }
 
     for (const PinLayout &pl : m_pins) {
