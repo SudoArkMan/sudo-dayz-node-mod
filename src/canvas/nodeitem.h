@@ -129,6 +129,9 @@ private:
 
     void layoutCode(const GraphNode &node);
     void layoutPins();
+    // Width the node's own text needs, before the clamp.
+    double contentWidth(const QVector<Pin> &dataIn,
+                        const QVector<Pin> &dataOut) const;
     const PinLayout *layoutForPin(const QString &pinId) const;
     // Acts on one value field the way its type asks: a bool flips, an enum
     // offers its members, everything else prompts for text. `host` parents any

@@ -61,6 +61,11 @@ constexpr double kExecHalfHeight = 3.6;
 constexpr double kExecHalfWidth = 4.4;
 // Below this the title stops being a word and starts being an ellipsis.
 constexpr double kMinTitleWidth = 42.0;
+// Past this a node stops being a node and starts crowding the graph, so a
+// very long label elides rather than growing without end.
+constexpr double kMaxWidth = 340.0;
+// A value field narrower than this is not worth clicking.
+constexpr double kMinFieldWidth = 44.0;
 
 // Code body. The maximum width is a readability limit rather than a technical
 // one: past roughly seventy monospace columns a node stops being a node and
@@ -407,6 +412,38 @@ double NodeItem::codeBlockHeight() const
 
 // Pin geometry is computed here and nowhere else: painting, hit-testing and
 // wire endpoints all read m_pins, so they cannot drift apart.
+// How wide the node has to be for its own text. Inputs and outputs share a row,
+// so the row needs both labels, the gap between them, and the value field when
+// the input carries one.
+double NodeItem::contentWidth(const QVector<Pin> &dataIn,
+                              const QVector<Pin> &dataOut) const
+{
+    const QFontMetricsF tm(titleFont());
+    const QFontMetricsF sm(smallFont());
+    const QFontMetricsF vm(theme::uiFont(7));
+
+    // Header: title, a gap, then the owning class.
+    double widest = tm.horizontalAdvance(m_title) + padding * 3.0
+                    + sm.horizontalAdvance(m_subtitle) + kBadgeRadius * 2.0;
+
+    for (int i = 0; i < qMax(dataIn.size(), dataOut.size()); ++i) {
+        double row = kLabelInset * 2.0;
+        if (i < dataIn.size()) {
+            const Pin &p = dataIn.at(i);
+            row += sm.horizontalAdvance(p.label);
+            // An unconnected literal gets a field on the same row, and the
+            // field has to hold its own text rather than eliding it too.
+            if (p.hasDef && inlineEditorFor(p.type) != InlineEditor::None) {
+                const QString value = p.def.isEmpty() ? QStringLiteral("unset") : p.def;
+                row += padding + qMax(kMinFieldWidth, vm.horizontalAdvance(value) + padding * 2.0);
+            }
+        }
+        if (i < dataOut.size()) row += padding * 2.0 + sm.horizontalAdvance(dataOut.at(i).label);
+        widest = qMax(widest, row);
+    }
+    return std::ceil(widest);
+}
+
 void NodeItem::layoutPins()
 {
     m_pins.clear();
@@ -422,6 +459,12 @@ void NodeItem::layoutPins()
     const int execRows = qMax(execIn.size(), execOut.size());
     const int dataRows = qMax(dataIn.size(), dataOut.size());
     const int rows = execRows + dataRows;
+
+    // Widen to whatever the node has to say. A catalogue call carries its
+    // optional parameters as `name = DEFAULT`, and at the fixed width those
+    // came out as `plugin = LOG_D...`, which names neither the parameter nor
+    // the default. A code node has already sized itself, so leave it alone.
+    if (m_code.isEmpty()) m_width = qBound(width, contentWidth(dataIn, dataOut), kMaxWidth);
 
     // A raw node's pins ride on the header itself: one exec in, one exec out,
     // and nothing to fill a row of their own with. Given a row below the header
@@ -692,6 +735,13 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
     const bool hovered = pl.pin.id == m_hoverEditor;
     const QColor accent = pinColor(pl.pin.type.kind);
 
+    // drawText clips to the rect it is handed, and the box is four units
+    // shorter than its row, which is enough to cut the descender off a 'p' or a
+    // 'g'. The box keeps the height it is drawn at; the text gets the whole row.
+    const auto textRow = [&pl](double x, double w) {
+        return QRectF(x, pl.pos.y() - pinRow / 2.0, w, pinRow);
+    };
+
     QPainterPath field;
     field.addRoundedRect(pl.editor, 2.0, 2.0);
     p->fillPath(field, theme::windowBg());
@@ -723,8 +773,8 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
         const QFontMetricsF sm(sf);
         p->setFont(sf);
         p->setPen(valueColor(pl.pin.type, overridden));
-        const QRectF tr(box.right() + 3.0, pl.editor.top(),
-                        pl.editor.right() - box.right() - 5.0, pl.editor.height());
+        const QRectF tr = textRow(pl, box.right() + 3.0,
+                                  pl.editor.right() - box.right() - 5.0);
         if (tr.width() > 8.0) {
             p->drawText(tr, Qt::AlignLeft | Qt::AlignVCenter,
                         sm.elidedText(isTrueLiteral(value) ? QStringLiteral("true")
@@ -749,7 +799,8 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
     const QFont sf = smallFont();
     const QFontMetricsF sm(sf);
     p->setFont(sf);
-    const QRectF tr = pl.editor.adjusted(3.0, 0, -3.0 - chevron, 0);
+    const QRectF tr = textRow(pl, pl.editor.left() + 3.0,
+                              pl.editor.width() - 6.0 - chevron);
     if (tr.width() <= 0.0) return;
 
     if (value.isEmpty()) {
