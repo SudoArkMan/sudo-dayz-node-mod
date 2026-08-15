@@ -5,6 +5,7 @@
 #pragma once
 
 #include "graph.h"
+#include "moddeps.h"
 
 #include <QString>
 #include <QVector>
@@ -40,10 +41,21 @@ struct Project {
     // project folder can be moved or shared without breaking.
     QString modRoot;
     QString modPrefix;
+    // Mods this one is written against: Community Framework, Community Online
+    // Tools, or anything else the user pointed the tool at. Each one's
+    // scriptRoot is saved relative to the .sdzn the way modRoot is, so a
+    // project folder can be moved without stranding the link, and a project
+    // opened on a machine that does not have the mod installed still knows
+    // what it depends on.
+    QVector<ModDependency> dependencies;
 
     ScriptEntry *script(const QString &id);
     const ScriptEntry *script(const QString &id) const;
     ScriptEntry *active();
+    // The dependency an addon id names, or null. Enough on its own to draw a
+    // node's badge: ModIndex::dependencyIdOf reads the id out of the node's
+    // catalogue key, and this turns it into a name and a colour.
+    const ModDependency *dependency(const QString &id) const;
 };
 
 // Both return false and set `error` on failure; the JSON shape matches the

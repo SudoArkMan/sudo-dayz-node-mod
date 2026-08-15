@@ -469,11 +469,13 @@ struct RawBlock {
 };
 
 struct Ctx {
-    Ctx(const Graph &g, const Catalog &c, const Builtins &b, const QString &sid);
+    Ctx(const Graph &g, const Catalog &c, const Builtins &b, const QString &sid,
+        const DependencyContext &dc);
 
     const Graph &graph;
     const Catalog &cat;
     const Builtins &builtins;
+    const DependencyContext &depCtx;  // empty for a project with no dependencies
     QString scriptId;      // this graph's id in the project, empty when unknown
     // The vanilla class this script's code inherits from: the reopened class
     // for a modded script, the base class otherwise. Every ancestry question
@@ -664,8 +666,9 @@ NodeDef resolveDef(const GraphNode &n, const Graph &g, const Catalog &cat,
     return cat.defFor(n.ref);
 }
 
-Ctx::Ctx(const Graph &g, const Catalog &c, const Builtins &b, const QString &sid)
-    : graph(g), cat(c), builtins(b), scriptId(sid),
+Ctx::Ctx(const Graph &g, const Catalog &c, const Builtins &b, const QString &sid,
+         const DependencyContext &dc)
+    : graph(g), cat(c), builtins(b), depCtx(dc), scriptId(sid),
       ancestorClass(g.modded ? g.className : g.baseClass)
 {
     byId.reserve(g.nodes.size());
@@ -2014,14 +2017,205 @@ void functionOverridesNative(const Ctx &ctx, QVector<Diagnostic> &out)
     }
 }
 
+// ---------------------------------------------------------- dependencies
+
+// An addon name as it will be compared. config.cpp writes them quoted and the
+// caller may hand the items over either way, so the quotes come off here rather
+// than being somebody else's job to remember.
+QString bareAddon(const QString &s)
+{
+    QString t = s.trimmed();
+    if (t.size() >= 2 && t.startsWith(QLatin1Char('"')) && t.endsWith(QLatin1Char('"')))
+        t = t.mid(1, t.size() - 2);
+    return t.trimmed();
+}
+
+// Addon names compare without case. Getting this wrong reports a dependency as
+// missing when it is right there in the file, and a checker that does that
+// stops being read.
+bool listsAddon(const QStringList &addons, const QString &want)
+{
+    const QString target = bareAddon(want);
+    if (target.isEmpty()) return true;
+    for (const QString &a : addons)
+        if (bareAddon(a).compare(target, Qt::CaseInsensitive) == 0) return true;
+    return false;
+}
+
+// What to call a dependency in a message. Falls back through the record rather
+// than printing an empty string, because the addon id alone still names the
+// thing well enough for a modder to act on.
+QString depLabel(const ModDependency &d)
+{
+    if (!d.displayName.isEmpty()) return d.displayName;
+    if (!d.shortName.isEmpty()) return d.shortName;
+    return d.id;
+}
+
+QString configLabel(const DependencyContext &dc)
+{
+    return dc.configPath.isEmpty() ? QStringLiteral("config.cpp") : dc.configPath;
+}
+
+QString patchLabel(const DependencyContext &dc)
+{
+    return dc.patchClass.isEmpty() ? QStringLiteral("<your addon>") : dc.patchClass;
+}
+
+// Which dependency a node came from, or null for vanilla. Both matchers are
+// tried because two parties decide the answer: the indexer picks the catalogue
+// key a mod's method lands under, and the mod picks where its scripts live.
+const DependencyFacts *dependencyOf(const Ctx &ctx, const GraphNode &n)
+{
+    QString loc;
+    if (const NodeDef *d = ctx.def(n.id)) loc = d->loc;
+    if (loc.isEmpty())
+        if (const MethodSig *m = ctx.sig(n.id)) {
+            const int id = ctx.cat.classId(m->owner);
+            if (id >= 0) loc = ctx.cat.classInfo(id).file;
+        }
+
+    for (const DependencyFacts &d : ctx.depCtx.deps) {
+        for (const QString &p : d.keyPrefixes)
+            if (!p.isEmpty() && n.ref.startsWith(p)) return &d;
+        // Contains rather than startsWith: the same script reads as
+        // "JM/COT/Scripts/..." out of the index and "P:/JM/COT/Scripts/..."
+        // out of a mod folder, and both are the same dependency.
+        for (const QString &p : d.pathPrefixes)
+            if (!p.isEmpty() && !loc.isEmpty() && loc.contains(p, Qt::CaseInsensitive))
+                return &d;
+    }
+    return nullptr;
+}
+
+// Every dependency this graph reaches, with the first node that reached it. All
+// three rules report once per dependency rather than once per node: a graph
+// with twenty COT calls has one missing addon, not twenty. Unreachable nodes
+// are skipped because they generate no code, the same line DZ111 draws.
+struct DepUse {
+    const DependencyFacts *dep = nullptr;
+    QString nodeId;
+};
+
+QVector<DepUse> dependenciesUsed(const Ctx &ctx)
+{
+    QVector<DepUse> used;
+    if (ctx.depCtx.deps.isEmpty()) return used;
+
+    QSet<const DependencyFacts *> seen;
+    for (const GraphNode &n : ctx.graph.nodes) {
+        if (!ctx.reachable.contains(n.id)) continue;
+        const DependencyFacts *d = dependencyOf(ctx, n);
+        if (!d || seen.contains(d)) continue;
+        seen.insert(d);
+        used.append({d, n.id});
+    }
+    return used;
+}
+
+// A guard this graph has actually put around something. The search is over the
+// hand-written Enforce it carries, because a preprocessor directive has no node
+// to live in: it is written in a Raw node or in a function body the importer
+// kept verbatim. Every #if spelling counts, #ifndef included, since a mod that
+// writes the fallback branch first has still guarded the call and a warning
+// that is wrong costs more here than one that is missed.
+bool guardPresent(const Ctx &ctx, const QString &symbol)
+{
+    if (symbol.isEmpty()) return false;
+    const QRegularExpression re(
+        QStringLiteral("#\\s*if(?:n?def)?\\b[^\\n]*\\b%1\\b")
+            .arg(QRegularExpression::escape(symbol)));
+    for (const RawBlock &b : ctx.raws)
+        if (re.match(b.code).hasMatch()) return true;
+    return false;
+}
+
+// requiredAddons is what tells the engine to load another mod's PBO before this
+// one. Calling into a mod that is not in the list is not a style problem: the
+// class has not been declared yet when this script compiles.
+void undeclaredDependency(const Ctx &ctx, const QVector<DepUse> &used,
+                          QVector<Diagnostic> &out)
+{
+    if (!ctx.depCtx.configRead) return;
+
+    for (const DepUse &u : used) {
+        if (u.dep->addon.isEmpty()) continue;
+        if (listsAddon(ctx.depCtx.declaredAddons, u.dep->addon)) continue;
+
+        out.append(diag(Severity::Error, QStringLiteral("DZ314"),
+                        QStringLiteral("This graph calls into %1, but %2 is not one of "
+                                       "this mod's required addons.")
+                            .arg(depLabel(*u.dep), u.dep->addon),
+                        QStringLiteral("Add \"%1\" to requiredAddons[] in "
+                                       "class CfgPatches/%2 in %3. Until it is there the "
+                                       "engine has no reason to load %4 first, so the "
+                                       "class does not resolve when this script compiles.")
+                            .arg(u.dep->addon, patchLabel(ctx.depCtx),
+                                 configLabel(ctx.depCtx), depLabel(*u.dep)),
+                        u.nodeId));
+    }
+}
+
+// An optional dependency is one the mod is meant to build without. Unguarded,
+// the generated .c names a class that is not there, and the mod fails to
+// compile on every server that does not run it.
+void unguardedOptionalDependency(const Ctx &ctx, const QVector<DepUse> &used,
+                                 QVector<Diagnostic> &out)
+{
+    for (const DepUse &u : used) {
+        if (!u.dep->optional || u.dep->guard.isEmpty()) continue;
+        if (guardPresent(ctx, u.dep->guard)) continue;
+
+        out.append(diag(Severity::Warning, QStringLiteral("DZ315"),
+                        QStringLiteral("%1 is marked optional, and nothing in this graph "
+                                       "sits behind #ifdef %2.")
+                            .arg(depLabel(*u.dep), u.dep->guard),
+                        QStringLiteral("%1 defines %2, so a script can test for it. Put "
+                                       "these calls in a Raw node between "
+                                       "`#ifdef %2` and `#endif`, or turn the optional "
+                                       "flag off if the mod cannot run without %1.")
+                            .arg(depLabel(*u.dep), u.dep->guard),
+                        u.nodeId));
+    }
+}
+
+// A dependency has requirements of its own. COT without CF is the one this
+// exists for: COT's own CfgPatches lists JM_CF_Scripts, so on a server with no
+// Community Framework, COT does not load and everything built on it goes with
+// it.
+void dependencyRequirementMissing(const Ctx &ctx, const QVector<DepUse> &used,
+                                  QVector<Diagnostic> &out)
+{
+    if (!ctx.depCtx.configRead) return;
+
+    for (const DepUse &u : used) {
+        for (const QString &need : u.dep->requiredAddons) {
+            if (bareAddon(need).isEmpty()) continue;
+            if (listsAddon(ctx.depCtx.declaredAddons, need)) continue;
+
+            out.append(diag(Severity::Warning, QStringLiteral("DZ316"),
+                            QStringLiteral("%1 needs %2, which this mod does not require.")
+                                .arg(depLabel(*u.dep), bareAddon(need)),
+                            QStringLiteral("Add \"%1\" to requiredAddons[] in "
+                                           "class CfgPatches/%2 in %3. %4 lists it in its "
+                                           "own CfgPatches, so without it %4 does not "
+                                           "load and this call goes with it.")
+                                .arg(bareAddon(need), patchLabel(ctx.depCtx),
+                                     configLabel(ctx.depCtx), depLabel(*u.dep)),
+                            u.nodeId));
+        }
+    }
+}
+
 } // namespace
 
 // --------------------------------------------------------------- driver
 
 AnalysisResult analyzeGraph(const Graph &graph, const Catalog &cat,
-                            const Builtins &builtins, const QString &scriptId)
+                            const Builtins &builtins, const QString &scriptId,
+                            const DependencyContext &deps)
 {
-    const Ctx ctx(graph, cat, builtins, scriptId);
+    const Ctx ctx(graph, cat, builtins, scriptId, deps);
 
     AnalysisResult result;
     QVector<Diagnostic> &out = result.diagnostics;
@@ -2061,6 +2255,14 @@ AnalysisResult analyzeGraph(const Graph &graph, const Catalog &cat,
     syncOnNonEntity(ctx, out);
     moddedEngineType(ctx, out);
     functionOverridesNative(ctx, out);
+
+    // Walked once and shared: each of the three asks the same question about
+    // the same set, and resolving which mod a node came from costs a catalogue
+    // lookup per node.
+    const QVector<DepUse> depsUsed = dependenciesUsed(ctx);
+    undeclaredDependency(ctx, depsUsed, out);
+    unguardedOptionalDependency(ctx, depsUsed, out);
+    dependencyRequirementMissing(ctx, depsUsed, out);
 
     // Worst first, then by rule id; stable so findings from one rule keep the
     // order the nodes sit in, which is what makes the problem list read the

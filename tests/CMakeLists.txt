@@ -160,6 +160,40 @@ target_link_libraries(mathtest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )
 
+# Depending on another mod: the COT and CF presets, reading addon names out of a
+# config.cpp, dependencies through a .sdzn round trip, and indexing a mod folder
+# into nodes. Builds its own mod folders in a QTemporaryDir, so it needs no mod
+# installed and runs headless:
+#   ./tests/depstest ../resources
+add_executable(depstest
+  depstest.cpp
+  ../src/moddeps.cpp
+  ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
+  ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
+  ../src/config/configtree.cpp
+  ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
+  ../src/enforce/layout.cpp ../src/enforce/import.cpp
+  ../src/codegen.cpp ../src/theme.cpp
+)
+target_include_directories(depstest PRIVATE ../src)
+# Widgets arrives through theme.cpp, which the layout pass inside the importer
+# links against. No QApplication is built here.
+target_link_libraries(depstest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+# config.cpp as a class tree. Prints the share of real configs that survive
+# parse and write byte for byte, over the repo and over every vanilla config on
+# the work drive when P: is mounted:
+#   ./tests/configtest ../resources [-v]
+add_executable(configtest
+  configtest.cpp
+  ../src/config/configtree.cpp
+  ../src/enforce/lexer.cpp
+)
+target_include_directories(configtest PRIVATE ../src)
+target_link_libraries(configtest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+
 # The typed value editor: one widget per Enforce kind, and the literal it hands
 # back. Builds a QApplication on the offscreen platform, which the test forces
 # itself, so it runs with no display:
@@ -171,5 +205,28 @@ add_executable(valueeditortest
 )
 target_include_directories(valueeditortest PRIVATE ../src)
 target_link_libraries(valueeditortest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+# The config editor's rules, and what a save writes. Builds a QApplication on
+# the offscreen platform, which the test forces itself, so it runs with no
+# display. `--shot <png>` writes a picture of the window on the bundled template:
+#   ./tests/configeditortest ../resources [--shot config.png]
+add_executable(configeditortest
+  configeditortest.cpp
+  ../src/config/configtree.cpp
+  ../src/widgets/configeditor.cpp
+  ../src/widgets/codeeditor.cpp
+  ../src/widgets/valueeditor.cpp
+  ../src/enforce/highlighter.cpp
+  ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
+  ../src/enforce/layout.cpp ../src/enforce/import.cpp
+  ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
+  ../src/moddeps.cpp
+  ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
+  ../src/codegen.cpp ../src/analysis.cpp ../src/document.cpp ../src/theme.cpp
+)
+target_include_directories(configeditortest PRIVATE ../src)
+target_link_libraries(configeditortest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )

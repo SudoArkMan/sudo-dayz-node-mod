@@ -82,6 +82,20 @@ const QLatin1String kCut("...");
 
 QFont codeFont() { return theme::monoFont(kCodeFontSize); }
 
+// Which field a pin gets on the node. Print and the catalogue's `void var`
+// parameters are Any pins: they accept a literal, so they deserve somewhere to
+// type it. inlineEditorFor says None for Any on purpose, because it also
+// decides whether a pin carries a DEFAULT, and a default is emitted code. An
+// Any pin with a default would change what every unwired Print generates, so
+// the field is decided here and the default is left alone.
+InlineEditor fieldFor(const PinType &t)
+{
+    const InlineEditor e = inlineEditorFor(t);
+    if (e != InlineEditor::None) return e;
+    return (!t.isArray && t.kind == PinKind::Any) ? InlineEditor::Text
+                                                  : InlineEditor::None;
+}
+
 // Refs whose real content lives in opts rather than on pins.
 bool carriesCode(const QString &ref)
 {
@@ -433,7 +447,7 @@ double NodeItem::contentWidth(const QVector<Pin> &dataIn,
             row += sm.horizontalAdvance(p.label);
             // An unconnected literal gets a field on the same row, and the
             // field has to hold its own text rather than eliding it too.
-            if (p.hasDef && inlineEditorFor(p.type) != InlineEditor::None) {
+            if (fieldFor(p.type) != InlineEditor::None) {
                 const QString value = p.def.isEmpty() ? QStringLiteral("unset") : p.def;
                 row += padding + qMax(kMinFieldWidth, vm.horizontalAdvance(value) + padding * 2.0);
             }
@@ -491,16 +505,19 @@ void NodeItem::layoutPins()
             }
             const bool editable = left && pl.pin.type.kind != PinKind::Exec
                                   && !pl.connected
-                                  && inlineEditorFor(pl.pin.type) != InlineEditor::None;
+                                  && fieldFor(pl.pin.type) != InlineEditor::None;
             if (editable) {
                 const double h = pinRow - 4.0;
                 pl.editor = QRectF(m_width * 0.46, y - h / 2.0, m_width * 0.48, h);
-                // The whole row band from a little left of the box to the node
-                // edge. The box is four units shorter than its row and stops
-                // six short of the edge, and every one of those units used to
-                // be a press that selected the node instead of editing it.
+                // The row band the box sits in, reaching a little past it on
+                // both sides. The box is four units shorter than its row, and
+                // every one of those units used to be a press that selected the
+                // node instead of editing it. It stops short of the node edge
+                // on purpose: an output pin can share this row, and a press
+                // that just misses one must not edit the input instead.
                 const double left = pl.editor.left() - 4.0;
-                pl.hit = QRectF(left, y - pinRow / 2.0, m_width - left, pinRow);
+                pl.hit = QRectF(left, y - pinRow / 2.0,
+                                pl.editor.right() + 2.0 - left, pinRow);
             }
             m_pins.append(pl);
         }
@@ -544,12 +561,15 @@ QString NodeItem::pinAt(const QPointF &scenePos, PinDir *dirOut, double reach,
 QString NodeItem::editorAt(const QPointF &scenePos, double reach) const
 {
     const QPointF local = mapFromScene(scenePos);
+    // Vertical only. A row is thirteen units tall and the box inside it is
+    // nine, so height is where the misses happen; the box is already eighty
+    // units wide, and growing that direction would reach the pin columns.
     const double grow = qBound(0.0, reach, pinRow);
     QString best;
     double bestDist = std::numeric_limits<double>::max();
     for (const PinLayout &pl : m_pins) {
         if (pl.hit.isEmpty()) continue;
-        if (!pl.hit.adjusted(-grow, -grow, grow, grow).contains(local)) continue;
+        if (!pl.hit.adjusted(0.0, -grow, 0.0, grow).contains(local)) continue;
         // Grown bands overlap their neighbours, so the winner is the row whose
         // centre line the press is nearest rather than whichever comes first.
         const double dist = std::fabs(local.y() - pl.pos.y());
@@ -773,7 +793,7 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
         const QFontMetricsF sm(sf);
         p->setFont(sf);
         p->setPen(valueColor(pl.pin.type, overridden));
-        const QRectF tr = textRow(pl, box.right() + 3.0,
+        const QRectF tr = textRow(box.right() + 3.0,
                                   pl.editor.right() - box.right() - 5.0);
         if (tr.width() > 8.0) {
             p->drawText(tr, Qt::AlignLeft | Qt::AlignVCenter,
@@ -799,7 +819,7 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
     const QFont sf = smallFont();
     const QFontMetricsF sm(sf);
     p->setFont(sf);
-    const QRectF tr = textRow(pl, pl.editor.left() + 3.0,
+    const QRectF tr = textRow(pl.editor.left() + 3.0,
                               pl.editor.width() - 6.0 - chevron);
     if (tr.width() <= 0.0) return;
 

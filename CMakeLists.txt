@@ -20,6 +20,7 @@ add_executable(DAYZSUDONodeMod
   src/builtins.h    src/builtins.cpp
   src/graph.h       src/graph.cpp
   src/project.h     src/project.cpp
+  src/moddeps.h     src/moddeps.cpp
   src/scriptapi.h   src/scriptapi.cpp
   src/events.h      src/events.cpp
   src/templates.h   src/templates.cpp
@@ -35,6 +36,8 @@ add_executable(DAYZSUDONodeMod
   src/enforce/import.h       src/enforce/import.cpp
   src/enforce/layout.h       src/enforce/layout.cpp
   src/enforce/highlighter.h  src/enforce/highlighter.cpp
+  src/config/configtree.h    src/config/configtree.cpp
+  src/widgets/configeditor.h src/widgets/configeditor.cpp
   src/widgets/valueeditor.h  src/widgets/valueeditor.cpp
   src/widgets/codeeditor.h   src/widgets/codeeditor.cpp
   src/widgets/codedialog.h   src/widgets/codedialog.cpp

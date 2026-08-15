@@ -75,6 +75,66 @@ void repairGraph(Graph &g, const QString &where)
     }
 }
 
+// The .sdzn shape of one dependency. Only scriptRoot is rewritten on the way
+// through, relative to the project file the way modRoot is, so moving a project
+// folder does not strand the link to a mod beside it.
+//
+// badgeColor is written when something chose one and left out when nothing did.
+// A file that carries no colour is not broken: badgeColorFor(id) answers for it
+// at draw time, and keeping that call out of here is what stops the .sdzn
+// reader from having to link the theme.
+QJsonObject dependencyToJson(const ModDependency &dep, const QDir &base)
+{
+    QJsonObject o;
+    o.insert("id", dep.id);
+    if (!dep.displayName.isEmpty()) o.insert("displayName", dep.displayName);
+    if (!dep.shortName.isEmpty()) o.insert("shortName", dep.shortName);
+    if (!dep.scriptRoot.isEmpty())
+        o.insert("scriptRoot", base.relativeFilePath(dep.scriptRoot));
+    const auto listOf = [](const QStringList &items) {
+        QJsonArray a;
+        for (const QString &s : items) a.append(s);
+        return a;
+    };
+    if (!dep.addons.isEmpty()) o.insert("addons", listOf(dep.addons));
+    if (!dep.requires.isEmpty()) o.insert("requires", listOf(dep.requires));
+    if (!dep.loadedDefine.isEmpty()) o.insert("loadedDefine", dep.loadedDefine);
+    if (dep.badgeColor.isValid()) o.insert("badgeColor", dep.badgeColor.name());
+    if (dep.optional) o.insert("optional", true);
+    return o;
+}
+
+ModDependency dependencyFromJson(const QJsonObject &o, const QDir &base)
+{
+    ModDependency dep;
+    dep.id = o.value("id").toString().trimmed();
+    dep.displayName = o.value("displayName").toString();
+    dep.shortName = o.value("shortName").toString();
+    const QString rel = o.value("scriptRoot").toString();
+    if (!rel.isEmpty()) dep.scriptRoot = QDir::cleanPath(base.absoluteFilePath(rel));
+    const auto listFrom = [&o](const char *key) {
+        QStringList out;
+        for (const QJsonValue &v : o.value(QLatin1String(key)).toArray()) {
+            const QString s = v.toString();
+            if (!s.isEmpty()) out.append(s);
+        }
+        return out;
+    };
+    dep.addons = listFrom("addons");
+    dep.requires = listFrom("requires");
+    dep.loadedDefine = o.value("loadedDefine").toString();
+    const QColor stored(o.value("badgeColor").toString());
+    if (stored.isValid()) dep.badgeColor = stored;
+    dep.optional = o.value("optional").toBool();
+
+    // A hand-written .sdzn can leave out the parts only a badge needs. Both are
+    // derivable from the addon name, and a badge with no letters on it is worse
+    // than one carrying the mod's initials.
+    if (dep.displayName.isEmpty()) dep.displayName = dep.id;
+    if (dep.shortName.isEmpty()) dep.shortName = shortNameFor(dep.displayName);
+    return dep;
+}
+
 } // namespace
 
 ScriptEntry *Project::script(const QString &id)
@@ -95,6 +155,14 @@ ScriptEntry *Project::active()
 {
     if (ScriptEntry *s = script(activeId)) return s;
     return scripts.isEmpty() ? nullptr : &scripts.first();
+}
+
+const ModDependency *Project::dependency(const QString &id) const
+{
+    if (id.isEmpty()) return nullptr;
+    for (const ModDependency &d : dependencies)
+        if (d.id == id) return &d;
+    return nullptr;
 }
 
 Project newProject()
@@ -188,14 +256,40 @@ bool loadProject(const QString &path, Project &out, QString *error)
     }
     p.activeId = root.value("activeId").toString();
     p.modPrefix = root.value("modPrefix").toString();
+    const QDir base(QFileInfo(path).absolutePath());
     const QString rel = root.value("modRoot").toString();
-    if (!rel.isEmpty()) {
-        const QDir base(QFileInfo(path).absolutePath());
-        p.modRoot = QDir::cleanPath(base.absoluteFilePath(rel));
+    if (!rel.isEmpty()) p.modRoot = QDir::cleanPath(base.absoluteFilePath(rel));
+
+    // A dependency is not content: it is a pointer at another mod, and every
+    // lookup against it (Project::dependency, ModIndex::dependencyOf) takes the
+    // first match on the addon name. One with no name can never be found again
+    // and one that repeats a name hides the entry in front of it, so neither is
+    // kept quietly.
+    QSet<QString> seenAddons;
+    for (const QJsonValue &v : root.value("dependencies").toArray()) {
+        if (!v.isObject()) {
+            qWarning("sdzn: a dependency in %s is not an object; it is dropped",
+                     qPrintable(file));
+            continue;
+        }
+        const ModDependency dep = dependencyFromJson(v.toObject(), base);
+        if (!dep.isValid()) {
+            qWarning("sdzn: a dependency in %s names no addon; it is dropped",
+                     qPrintable(file));
+            continue;
+        }
+        if (seenAddons.contains(dep.id)) {
+            qWarning("sdzn: %s lists the addon \"%s\" twice; the second one is dropped",
+                     qPrintable(file), qPrintable(dep.id));
+            continue;
+        }
+        seenAddons.insert(dep.id);
+        p.dependencies.append(dep);
     }
+
     for (auto it = root.begin(); it != root.end(); ++it) {
         static const QStringList known = {"name", "folders", "scripts", "activeId",
-                                          "modRoot", "modPrefix"};
+                                          "modRoot", "modPrefix", "dependencies"};
         if (!known.contains(it.key())) p.extra.insert(it.key(), it.value());
     }
     if (p.scripts.isEmpty()) {
@@ -247,6 +341,14 @@ bool saveProject(const Project &project, const QString &path, QString *error)
     if (!project.modPrefix.isEmpty()) root.insert("modPrefix", project.modPrefix);
     if (!project.modRoot.isEmpty())
         root.insert("modRoot", base.relativeFilePath(project.modRoot));
+    if (!project.dependencies.isEmpty()) {
+        QJsonArray deps;
+        for (const ModDependency &d : project.dependencies) {
+            if (!d.isValid()) continue;
+            deps.append(dependencyToJson(d, base));
+        }
+        if (!deps.isEmpty()) root.insert("dependencies", deps);
+    }
     for (auto it = project.extra.begin(); it != project.extra.end(); ++it)
         root.insert(it.key(), it.value());
 

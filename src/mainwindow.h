@@ -46,6 +46,10 @@ public slots:
     // Writes the active script back to the .c it was imported from, asking for
     // a file only when it never came from one.
     void saveScriptFile();
+    // The mod's own config.cpp, in the config editor. The file is three folders
+    // deep and is edited far more often than it is found, so it gets a menu
+    // entry rather than a walk through the explorer.
+    void editModConfig();
     void showGeneratedCode();
 
 private slots:
@@ -55,6 +59,10 @@ private slots:
     // openModFile when the importer cannot read it, so no file in the tree is
     // unopenable.
     void openModScript(const QString &path);
+    // A .cpp from the Mod Explorer, opened as a class tree. Falls back to
+    // openModFile the same way, since a config the parser chokes on is exactly
+    // the one the user needs to see.
+    void openModConfig(const QString &path);
     // The raw / comment nodes are the ones whose real content is text the user
     // typed, so they are the ones with something to open an editor on.
     void editSelectedCode();
@@ -118,6 +126,9 @@ private:
     // Where Export scripts writes without being asked: <modRoot>/<prefix>/Scripts.
     // Empty when the project has no mod folder.
     QString scriptsFolder() const;
+    // The project's own config.cpp under that folder. Empty when there is no mod
+    // folder, or when the file is not there yet.
+    QString modConfigPath() const;
     // The add-node search the canvas right-click opens, at the cursor.
     void showAddNodeSearch(const QPointF &scenePos);
     // The Events dock's list, at the cursor. Reached from the same right-click,

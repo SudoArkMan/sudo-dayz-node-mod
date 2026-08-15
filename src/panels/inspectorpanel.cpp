@@ -9,9 +9,9 @@
 #include "widgets/codedialog.h"
 #include "widgets/valueeditor.h"
 
-#include <QCheckBox>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFontMetrics>
 #include <QFormLayout>
@@ -317,7 +317,12 @@ QString findingsHtml(const AnalysisResult &result, const QString &name)
                     .arg(severityColor(d.severity).name(), richText(d.message),
                          theme::textDim().name(), richText(d.hint));
     }
-    return rows;
+    if (rows.isEmpty()) return rows;
+    // A heading, because an Info finding is the same dim grey as the notes above
+    // it and would otherwise read as one more of them.
+    return QStringLiteral("<p style=\"margin:0 0 4px 0; color:%1\"><b>%2</b></p>")
+               .arg(theme::text().name(), QStringLiteral("Findings"))
+           + rows;
 }
 
 } // namespace
@@ -499,7 +504,10 @@ void InspectorPanel::buildVariableForm()
     identity->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     identity->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
+    // Named, like the node-side controls above, so the panel and anything that
+    // drives it can find a field without carrying a pointer to it.
     m_varName = new QLineEdit(form);
+    m_varName->setObjectName(QStringLiteral("varName"));
     // An Enforce member name is a C-style identifier, so the field refuses
     // anything that could not be one rather than letting it reach the generator.
     m_varName->setValidator(new QRegularExpressionValidator(
@@ -507,6 +515,7 @@ void InspectorPanel::buildVariableForm()
     identity->addRow(tr("Name"), m_varName);
 
     m_varType = new QComboBox(form);
+    m_varType->setObjectName(QStringLiteral("varType"));
     configureVariableTypeCombo(m_varType, m_doc);
     identity->addRow(tr("Type"), m_varType);
     layout->addLayout(identity);
@@ -522,10 +531,12 @@ void InspectorPanel::buildVariableForm()
     layout->addSpacing(4);
     layout->addWidget(sectionLabel(tr("Default value"), form));
 
-    // The editor picks its own widget from the type, and it is the same one the
-    // variable table uses, so a bool is a box here and there and a vector is
-    // three fields in both.
+    // The editor picks its own widget from the type: a box for a bool, a list
+    // for an enum, three fields for a vector. It also keeps a literal it cannot
+    // represent rather than normalising it away, which is what makes it safe to
+    // point at a member imported from someone else's file.
     m_varValue = new ValueEditor(m_doc ? &m_doc->catalog() : nullptr, form);
+    m_varValue->setObjectName(QStringLiteral("varValue"));
     layout->addWidget(m_varValue);
 
     layout->addWidget(noteLabel(
@@ -545,6 +556,7 @@ void InspectorPanel::buildVariableForm()
     layout->addSpacing(4);
     layout->addWidget(sectionLabel(tr("Declaration"), form));
     m_varPreview = new QPlainTextEdit(form);
+    m_varPreview->setObjectName(QStringLiteral("varPreview"));
     m_varPreview->setReadOnly(true);
     m_varPreview->setFont(theme::monoFont(8));
     m_varPreview->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -596,6 +608,7 @@ void InspectorPanel::buildVariableForm()
     layout->addSpacing(4);
     layout->addWidget(sectionLabel(tr("Reference"), form));
     m_varRef = new QComboBox(form);
+    m_varRef->setObjectName(QStringLiteral("varRef"));
     m_varRef->addItem(tr("Infer from the type"), RefInfer);
     m_varRef->addItem(tr("Always ref"), RefAlways);
     m_varRef->addItem(tr("Never ref"), RefNever);
@@ -604,6 +617,7 @@ void InspectorPanel::buildVariableForm()
     layout->addWidget(m_varRefNote);
 
     m_varFindings = new QLabel(form);
+    m_varFindings->setObjectName(QStringLiteral("varFindings"));
     m_varFindings->setWordWrap(true);
     m_varFindings->setFont(theme::uiFont(8));
     m_varFindings->setTextFormat(Qt::RichText);

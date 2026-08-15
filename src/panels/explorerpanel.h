@@ -23,12 +23,17 @@ public:
     QString modRoot() const { return m_root; }
 
 signals:
-    // A text file the app can edit itself (.cpp, .xml, .json, .csv, .cfg).
+    // A text file the app can edit itself (.xml, .json, .csv, .cfg).
     void fileActivated(const QString &path);
     // A .c, which is Enforce Script. This is a visual editor, so the main
     // window imports it and opens the graph; the text editor is the fallback
     // and sits on the context menu as "Edit as text".
     void scriptActivated(const QString &path);
+    // A .cpp, which inside a mod folder is a config rather than C++. It opens
+    // in the config editor, where the class tree is checked against the folder
+    // it sits in; the text editor is the fallback, on the same menu entry the
+    // scripts use.
+    void configActivated(const QString &path);
     // A .sdzn project, which the main window opens as a project rather than text.
     void projectActivated(const QString &path);
 

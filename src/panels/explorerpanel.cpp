@@ -67,6 +67,15 @@ bool isEnforceScript(const QString &path)
     return QFileInfo(path).suffix().compare(QLatin1String("c"), Qt::CaseInsensitive) == 0;
 }
 
+// A .cpp under a mod folder is a config: nested classes, properties and arrays,
+// never C++. config.cpp is the one every mod has, but the same shape turns up in
+// a mod.cpp or a config split per addon, and all of them read better as a tree
+// than as braces.
+bool isModConfig(const QString &path)
+{
+    return QFileInfo(path).suffix().compare(QLatin1String("cpp"), Qt::CaseInsensitive) == 0;
+}
+
 // The shell icons QFileSystemModel uses by default are drawn for a light
 // explorer window and can stall on a network path. The style's own pair sits
 // with the docks and costs nothing. Not a QObject, and the model does not take
@@ -483,6 +492,10 @@ void ExplorerPanel::onActivated(const QModelIndex &index)
         emit scriptActivated(path);
         return;
     }
+    if (isModConfig(path)) {
+        emit configActivated(path);
+        return;
+    }
     if (isEditableText(path)) {
         emit fileActivated(path);
         return;
@@ -513,8 +526,9 @@ void ExplorerPanel::onContextMenu(const QPoint &pos)
                            [this]() { onActivated(m_tree->currentIndex()); });
             // Opening a script gives you the graph, and the graph cannot show
             // everything a file can hold: a #ifdef, a stray brace, whatever the
-            // importer had to keep as text. This is the way back to the file.
-            if (isEnforceScript(path))
+            // importer had to keep as text. The config tree has the same limit
+            // for the same reason. This is the way back to the file.
+            if (isEnforceScript(path) || isModConfig(path))
                 menu.addAction(tr("Edit as text"), this,
                                [this, path]() { emit fileActivated(path); });
         }

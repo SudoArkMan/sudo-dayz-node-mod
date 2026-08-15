@@ -17,6 +17,7 @@
 #include "panels/variablespanel.h"
 #include "theme.h"
 #include "widgets/codedialog.h"
+#include "widgets/configeditor.h"
 #include "widgets/filedialog.h"
 #include "widgets/newmoddialog.h"
 
@@ -588,6 +589,9 @@ void MainWindow::buildMenus()
                     this, &MainWindow::saveScriptFile);
     file->addAction(QStringLiteral("Export scripts..."), this, &MainWindow::exportScripts);
     file->addSeparator();
+    file->addAction(QStringLiteral("Edit mod config..."), this,
+                    &MainWindow::editModConfig);
+    file->addSeparator();
     file->addAction(QStringLiteral("Exit"), QKeySequence::Quit, this, &QWidget::close);
 
     QMenu *edit = menuBar()->addMenu(QStringLiteral("&Edit"));
@@ -831,11 +835,12 @@ void MainWindow::buildDocks()
         if (sel.size() == 1) m_codeView->revealNode(sel.first());
     });
 
-    // A .c is a graph, a .sdzn is a project, and everything else is text, so the
-    // explorer says which of the three it found and the main window opens it the
-    // right way.
+    // A .c is a graph, a .cpp is a config tree, a .sdzn is a project, and
+    // everything else is text, so the explorer says which of the four it found
+    // and the main window opens it the right way.
     connect(m_explorer, &ExplorerPanel::fileActivated, this, &MainWindow::openModFile);
     connect(m_explorer, &ExplorerPanel::scriptActivated, this, &MainWindow::openModScript);
+    connect(m_explorer, &ExplorerPanel::configActivated, this, &MainWindow::openModConfig);
     connect(m_explorer, &ExplorerPanel::projectActivated,
             this, &MainWindow::openProjectPath);
     syncExplorerRoot();
@@ -907,6 +912,14 @@ QString MainWindow::scriptsFolder() const
     const QString prefix = p.modPrefix.isEmpty() ? prefixOfModFolder(p.modRoot)
                                                  : p.modPrefix;
     return QDir::cleanPath(root.filePath(prefix + QStringLiteral("/Scripts")));
+}
+
+QString MainWindow::modConfigPath() const
+{
+    const QString scripts = scriptsFolder();
+    if (scripts.isEmpty()) return {};
+    const QString path = QDir(scripts).filePath(QStringLiteral("config.cpp"));
+    return QFileInfo(path).isFile() ? QDir::cleanPath(path) : QString();
 }
 
 void MainWindow::onGraphChanged()
@@ -1197,6 +1210,46 @@ void MainWindow::openModFile(const QString &path)
     QString error;
     if (!FileDialog::openFile(this, m_doc, path, &error))
         QMessageBox::warning(this, QStringLiteral("Open file"), error);
+}
+
+void MainWindow::openModConfig(const QString &path)
+{
+    QString error;
+    if (ConfigEditor::openFile(this, m_doc, path, &error)) return;
+
+    // A config that cannot be read as a tree is the one the user most needs in
+    // front of them, so the text editor takes over rather than the app stopping
+    // at a warning.
+    QMessageBox::warning(this, QStringLiteral("Open config"),
+                         QStringLiteral("%1 could not be read as a class tree.\n\n%2\n\n"
+                                        "Opening it as text instead.")
+                             .arg(QFileInfo(path).fileName(), error));
+    openModFile(path);
+}
+
+void MainWindow::editModConfig()
+{
+    const QString path = modConfigPath();
+    if (!path.isEmpty()) {
+        openModConfig(path);
+        return;
+    }
+
+    const Project &p = m_doc->project();
+    if (p.modRoot.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("Edit mod config"),
+            QStringLiteral("This project has no mod folder yet. Use File > New mod "
+                           "to scaffold one, or Set mod folder to point at one you "
+                           "already have."));
+        return;
+    }
+    // The folder is there and the config is not, which is worth saying with the
+    // path in it: it is nearly always a prefix that does not match the folder.
+    QMessageBox::information(
+        this, QStringLiteral("Edit mod config"),
+        QStringLiteral("There is no config.cpp under\n\n%1")
+            .arg(QDir::toNativeSeparators(scriptsFolder())));
 }
 
 void MainWindow::openModScript(const QString &path)
