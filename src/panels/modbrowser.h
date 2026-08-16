@@ -3,7 +3,9 @@
 // Reading somebody else's mod is how most people learn this engine, and the
 // answer to "how did they do that" is a folder full of pbos you cannot open. So
 // this lists every mod on the machine, and opening one shows its classes as
-// graphs.
+// graphs. A mod that is not installed is opened by pointing at it: a loose
+// .pbo, a mod folder, or a tree somebody has already unpacked all read the same
+// way.
 //
 // The panel is honest about coverage on purpose. The importer models most
 // Enforce, not all of it, and a mod whose methods mostly stay text is worth
@@ -26,6 +28,8 @@ struct ModEntry;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSplitter;
+class QStackedWidget;
 class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -45,11 +49,26 @@ public:
     // what says whether there is more to do.
     bool isOpening() const;
 
+    // Puts the keyboard where the panel is worked from, which is the filter box
+    // while there is a list to narrow and the mod list once one is picked. The
+    // window calls this after raising the dock, so the menu entry lands the user
+    // somewhere they can type rather than merely showing them a panel.
+    void takeFocus();
+
 public slots:
     void refresh(bool force = false);
     // Adds a folder of mods to the library and rescans. Asks for one when the
     // path is empty, which is what the toolbar button does.
     void addFolder(const QString &folder = QString());
+    // Opens what is at `path`: a .pbo, a mod folder, or a folder of unpacked
+    // script. A folder holding several mods is added as a folder to scan
+    // instead, because that is what it is. Asks for a path when given none.
+    //
+    // Everything it opens goes through the same stepped import the mod list
+    // uses, so every graph it produces carries the read only mark, and it must
+    // stay that way: a second import path is a second way to write somebody
+    // else's class into the user's mod.
+    bool openFromDisk(const QString &path = QString());
     // Selects a mod by folder and starts reading it. False when the scan has
     // not turned that folder up, or the filter is hiding its row.
     bool selectMod(const QString &folder);
@@ -93,6 +112,15 @@ private:
     void elideStatus();
     // Drops the columns a narrow dock has no room for.
     void fitColumns();
+    // Which way the two lists stack. Side by side in a dock that is wide and
+    // short, one over the other in a tall narrow column: stacked in a two
+    // hundred pixel bottom dock, each list would show three rows out of 266.
+    void fitOrientation();
+    // Swaps each list for the line that says what it is for while it is empty.
+    void updateEmptyStates();
+    // The dialog behind openFromDisk, which takes a .pbo or the folder it is
+    // showing. Empty when the user backed out.
+    QString askForModPath();
     QString filterText() const;
 
     Document *m_doc;
@@ -100,9 +128,14 @@ private:
 
     QLineEdit *m_filter;
     QPushButton *m_refresh;
-    QPushButton *m_addFolder;
+    QPushButton *m_open;
+    QSplitter *m_split;
+    QStackedWidget *m_modsStack;
+    QStackedWidget *m_classesStack;
     QTreeWidget *m_mods;
     QTreeWidget *m_classes;
+    QLabel *m_modsEmpty;
+    QLabel *m_classesEmpty;
     QLabel *m_status;
     QString m_statusText;
     QPushButton *m_notes;

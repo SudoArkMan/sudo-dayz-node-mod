@@ -82,6 +82,148 @@ int main(int argc, char *argv[])
     }
     check(eventShapeOk, QStringLiteral("event nodes have exec out and no exec in"));
 
+    // ---------------------------------------------------------------- access
+    //
+    // The bug this covers: the palette offered TimerBase::SetRunning, the user
+    // wired it, and the graph generated `m_Timer.SetRunning(false);` from a
+    // MissionServer, which does not compile. Nothing warned.
+    out << "access" << Qt::endl;
+    {
+        // Every entry the catalogue holds is public or protected. Private is
+        // not a flag here because a private method is dropped before it lands.
+        int methodTotal = cat.totals().value(QStringLiteral("methods"));
+        int protectedTotal = 0, reachableFromMission = 0, reachableFromOwner = 0;
+        for (int i = 0; i < methodTotal; ++i) {
+            const MethodSig m = cat.method(QStringLiteral("m%1").arg(i));
+            if (!m.valid || !(m.flags & flag::Protected)) continue;
+            protectedTotal++;
+            if (cat.accessAllowed(m.owner, m.flags, QStringLiteral("MissionServer")))
+                reachableFromMission++;
+            if (cat.accessAllowed(m.owner, m.flags, m.owner)) reachableFromOwner++;
+        }
+        out << "       protected methods:        " << protectedTotal << Qt::endl;
+        out << "       reachable from their own class: " << reachableFromOwner
+            << Qt::endl;
+        out << "       reachable from MissionServer:   " << reachableFromMission
+            << Qt::endl;
+        check(protectedTotal > 2000,
+              QStringLiteral("%1 methods carry the protected flag").arg(protectedTotal));
+        check(reachableFromOwner == protectedTotal,
+              QStringLiteral("every protected method is reachable from its own class"));
+        check(reachableFromMission < protectedTotal / 4,
+              QStringLiteral("most of them are out of reach from an unrelated class "
+                             "(%1 of %2)").arg(reachableFromMission).arg(protectedTotal));
+
+        // A private method is not offered as a hidden node, it is not there at
+        // all. func::SetInstance is `private static void SetInstance(func fn)`
+        // in 1_core, and it is the whole entry that is missing rather than a
+        // flag on it.
+        bool privateFound = false;
+        for (const SearchHit &h : cat.search(QStringLiteral("SetInstance")))
+            if (h.subtitle == QLatin1String("func")) privateFound = true;
+        check(!privateFound, QStringLiteral("a private method is not in the catalogue"));
+
+        // An event row is titled "Event <name>", the same two spellings
+        // codegen's ancestryDeclares has to accept. Timer::Run is one of them,
+        // because the catalogue derives Event from a name declared `override`
+        // anywhere at all and six Workbench plugins declare `override void
+        // Run()`. That is a separate defect; what matters here is that Run is
+        // public and stays offered.
+        const auto titleMatches = [](const QString &title, const QString &name) {
+            return title == name || title == QStringLiteral("Event ") + name;
+        };
+        const auto keyOf = [&cat, &titleMatches](const QString &owner,
+                                                 const QString &name) {
+            SearchOptions opts;
+            opts.limit = 200;
+            for (const SearchHit &h : cat.search(name, opts))
+                if (h.subtitle == owner && titleMatches(h.title, name)) return h.key;
+            return QString();
+        };
+        const QString setRunning = keyOf(QStringLiteral("TimerBase"),
+                                         QStringLiteral("SetRunning"));
+        const QString run = keyOf(QStringLiteral("Timer"), QStringLiteral("Run"));
+        check(!setRunning.isEmpty(), QStringLiteral("TimerBase::SetRunning is catalogued"));
+        check(!run.isEmpty(), QStringLiteral("Timer::Run is catalogued"));
+
+        const MethodSig sr = cat.method(setRunning);
+        const MethodSig rn = cat.method(run);
+        check(sr.valid && (sr.flags & flag::Protected),
+              QStringLiteral("SetRunning is recorded as protected"));
+        check(rn.valid && !(rn.flags & flag::Protected),
+              QStringLiteral("Run is recorded as public"));
+
+        // The palette's own question, asked the way the palette asks it.
+        const auto offers = [&cat, &titleMatches](const QString &self,
+                                                  const QString &query,
+                                                  const QString &owner,
+                                                  const QString &name) {
+            SearchOptions opts;
+            opts.limit = 200;
+            opts.selfClass = self;
+            opts.respectAccess = true;
+            for (const SearchHit &h : cat.search(query, opts))
+                if (h.subtitle == owner && titleMatches(h.title, name)) return true;
+            return false;
+        };
+        check(!offers(QStringLiteral("MissionServer"), QStringLiteral("SetRunning"),
+                      QStringLiteral("TimerBase"), QStringLiteral("SetRunning")),
+              QStringLiteral("SetRunning is not offered to a MissionServer graph"));
+        check(offers(QStringLiteral("Timer"), QStringLiteral("SetRunning"),
+                     QStringLiteral("TimerBase"), QStringLiteral("SetRunning")),
+              QStringLiteral("SetRunning is still offered to a graph that inherits it"));
+        check(offers(QStringLiteral("MissionServer"), QStringLiteral("Run"),
+                     QStringLiteral("Timer"), QStringLiteral("Run")),
+              QStringLiteral("Run is still offered, and still public"));
+        // A public method on the same class must not be caught by the filter.
+        check(offers(QStringLiteral("MissionServer"), QStringLiteral("IsRunning"),
+                     QStringLiteral("TimerBase"), QStringLiteral("IsRunning")),
+              QStringLiteral("a public method on the same class is untouched"));
+
+        // And the graph the user actually built: a Timer being driven from a
+        // modded MissionServer.
+        Builtins accessBuiltins;
+        Graph mission;
+        mission.className = QStringLiteral("MissionServer");
+        mission.baseClass.clear();
+        mission.modded = true;
+        GraphNode bad;
+        bad.id = QStringLiteral("nBad");
+        bad.kind = NodeKind::Call;
+        bad.ref = setRunning;
+        GraphNode good;
+        good.id = QStringLiteral("nGood");
+        good.kind = NodeKind::Call;
+        good.ref = run;
+        mission.nodes << bad << good;
+
+        const AnalysisResult missionResult = analyzeGraph(mission, cat, accessBuiltins);
+        int flagged = 0;
+        QString message;
+        for (const Diagnostic &d : missionResult.diagnostics) {
+            if (d.rule != QLatin1String("DZ118")) continue;
+            flagged++;
+            if (d.nodeId == QLatin1String("nBad")) message = d.message;
+        }
+        check(flagged == 1,
+              QStringLiteral("one DZ118 on the MissionServer graph, got %1").arg(flagged));
+        check(message.contains(QStringLiteral("SetRunning"))
+                  && message.contains(QStringLiteral("TimerBase"))
+                  && message.contains(QStringLiteral("MissionServer")),
+              QStringLiteral("the warning names the node, its class and ours"));
+        check(missionResult.warnings > 0,
+              QStringLiteral("it lands in the warnings, not the errors"));
+
+        // The same call from a class that does inherit it is correct Enforce
+        // and must stay quiet.
+        Graph timer = mission;
+        timer.className = QStringLiteral("Timer");
+        int quiet = 0;
+        for (const Diagnostic &d : analyzeGraph(timer, cat, accessBuiltins).diagnostics)
+            if (d.rule == QLatin1String("DZ118")) quiet++;
+        check(quiet == 0, QStringLiteral("a modded Timer calling it is not warned about"));
+    }
+
     out << "pin types" << Qt::endl;
     const auto isEnum = [&cat](const QString &n) { return cat.isEnum(n); };
     const PinType arr = pinTypeOf(QStringLiteral("array<ref ItemBase>"), isEnum);

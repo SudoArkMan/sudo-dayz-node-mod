@@ -11,6 +11,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -127,6 +128,64 @@ qint64 msecsOf(const QFileInfo &info)
     return when.isValid() ? when.toMSecsSinceEpoch() : 0;
 }
 
+// ------------------------------------------------------ what a path on disk is
+
+// The pbos that belong to this folder itself, rather than to a mod inside it.
+// Deliberately shallow: pbosUnder walks four levels, so asking it about a
+// workshop folder answers with every mod's archives at once and a root then
+// looks like one enormous mod.
+QStringList ownPbos(const QString &folder)
+{
+    QStringList out;
+    for (const QString &where : {folder, folder + QStringLiteral("/Addons")}) {
+        const QDir dir(where);
+        if (!dir.exists()) continue;
+        const QStringList names =
+            dir.entryList({QStringLiteral("*.pbo")}, QDir::Files, QDir::Name);
+        for (const QString &name : names) out.append(QDir::cleanPath(dir.filePath(name)));
+    }
+    return out;
+}
+
+// Enough of a folder's .c files to open it, newest layout first. Capped: a
+// script folder is nearly always a mod's Scripts tree, and being pointed at a
+// whole drive has to come back rather than walk it.
+constexpr int kMaxLooseScripts = 4000;
+
+QStringList scriptsUnder(const QString &folder)
+{
+    QStringList out;
+    QDirIterator it(folder, {QStringLiteral("*.c")}, QDir::Files | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext() && out.size() < kMaxLooseScripts)
+        out.append(QDir::cleanPath(it.next()));
+    out.sort(Qt::CaseInsensitive);
+    return out;
+}
+
+// True when a .c lives anywhere under this folder. Stops at the first one,
+// because the question is whether the folder is worth opening at all.
+bool hasAnyScript(const QString &folder)
+{
+    QDirIterator it(folder, {QStringLiteral("*.c")}, QDir::Files | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    return it.hasNext();
+}
+
+// Whoever signed a pbo, read off the .bisign files beside it.
+QString signerBeside(const QString &pboPath)
+{
+    const QFileInfo info(pboPath);
+    const QStringList signs =
+        QDir(info.absolutePath())
+            .entryList({info.fileName() + QStringLiteral(".*.bisign")}, QDir::Files);
+    for (const QString &sign : signs) {
+        const QString who = signerOf(sign);
+        if (!who.isEmpty()) return who;
+    }
+    return {};
+}
+
 // ------------------------------------------------------------- the extraction
 
 QString sanitise(const QString &name)
@@ -195,6 +254,15 @@ int percentOf(int part, int whole)
     return int(qRound(100.0 * double(part) / double(whole)));
 }
 
+// How a note names the file it is about. A script read straight off disk has no
+// archive behind it, and "/scripts/4_World/player.c" with a leading slash reads
+// as a path that is not one.
+QString whereFrom(const ModScriptFile &file)
+{
+    if (file.pbo.isEmpty()) return file.entry;
+    return file.pbo + QLatin1Char('/') + file.entry;
+}
+
 const QString kReadOnlyKey = QStringLiteral("readOnly");
 const QString kOriginKey = QStringLiteral("origin");
 
@@ -204,7 +272,7 @@ const QString kOriginKey = QStringLiteral("origin");
 
 int ModEntry::scriptCount() const
 {
-    int n = 0;
+    int n = looseScripts.size();
     for (const ModPbo &pbo : pbos) n += pbo.scriptCount;
     return n;
 }
@@ -328,14 +396,7 @@ ModEntry ModLibrary::readMod(const QString &folder)
     // Whoever signed the pbos, used only when nothing says who wrote the mod.
     QString signer;
     for (const QString &pboPath : pboPaths) {
-        const QFileInfo dir(pboPath);
-        const QStringList signs = QDir(dir.absolutePath())
-                                      .entryList({dir.fileName() + QStringLiteral(".*.bisign")},
-                                                 QDir::Files);
-        for (const QString &sign : signs) {
-            const QString who = signerOf(sign);
-            if (!who.isEmpty()) { signer = who; break; }
-        }
+        signer = signerBeside(pboPath);
         if (!signer.isEmpty()) break;
     }
 
@@ -449,6 +510,149 @@ QVector<ModEntry> ModLibrary::scanRoots(const QStringList &roots,
     return out;
 }
 
+// ------------------------------------------------------- a path from disk
+
+ModPathKind classifyModPath(const QString &path)
+{
+    const QFileInfo info(path);
+    if (path.isEmpty() || !info.exists()) return ModPathKind::None;
+
+    if (info.isFile()) {
+        return info.suffix().compare(QLatin1String("pbo"), Qt::CaseInsensitive) == 0
+                   ? ModPathKind::Pbo
+                   : ModPathKind::None;
+    }
+
+    const QString folder = QDir::cleanPath(info.absoluteFilePath());
+    // Its own archives first. A mod folder inside a workshop folder would
+    // otherwise answer the same as the workshop folder around it.
+    if (!ownPbos(folder).isEmpty()) return ModPathKind::ModFolder;
+
+    const QFileInfoList children =
+        QDir(folder).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo &child : children)
+        if (!ownPbos(QDir::cleanPath(child.absoluteFilePath())).isEmpty())
+            return ModPathKind::ModRoot;
+
+    // A layout neither of those caught, with archives somewhere below.
+    if (!pbosUnder(folder).isEmpty()) return ModPathKind::ModFolder;
+    if (hasAnyScript(folder)) return ModPathKind::ScriptFolder;
+    return ModPathKind::None;
+}
+
+namespace {
+
+// A mod whose whole content is one archive. `folder` carries the pbo's own path
+// rather than the directory holding it, because that is the key the rest of the
+// library uses and two pbos side by side are two mods.
+ModEntry readPboAsMod(const QString &path, QString *error)
+{
+    const QFileInfo info(path);
+    ModEntry entry;
+    entry.folder = QDir::cleanPath(info.absoluteFilePath());
+    entry.folderName = info.fileName();
+    entry.modified = msecsOf(info);
+
+    // A pbo under @Something/Addons belongs to that mod, and the folder's name
+    // is what its author and its user both call it. Both are shown: the mod on
+    // its own would be the same row the scan already lists, and one archive out
+    // of a mod that ships four is not that mod.
+    entry.name = info.completeBaseName();
+    const QDir parent = info.absoluteDir();
+    if (parent.dirName().compare(QLatin1String("Addons"), Qt::CaseInsensitive) == 0) {
+        QDir up = parent;
+        if (up.cdUp()) {
+            QString modFolder = up.dirName();
+            if (modFolder.startsWith(QLatin1Char('@'))) modFolder = modFolder.mid(1);
+            if (!modFolder.isEmpty() && modFolder != entry.name)
+                entry.name = QStringLiteral("%1 (%2)").arg(modFolder, entry.name);
+        }
+    }
+
+    const PboHeaderInfo header = readPboHeader(entry.folder);
+    if (!header.ok) {
+        if (error)
+            *error = QStringLiteral("%1 could not be read as a pbo: %2")
+                         .arg(info.fileName(), header.error);
+        return {};
+    }
+
+    ModPbo pbo;
+    pbo.path = entry.folder;
+    pbo.size = info.size();
+    pbo.readable = true;
+    pbo.prefix = header.prefix;
+    pbo.entryCount = header.entryCount;
+    pbo.scriptCount = header.scripts.size();
+    entry.pbos.append(pbo);
+
+    const QString signer = signerBeside(entry.folder);
+    if (!signer.isEmpty()) {
+        entry.author = signer;
+        entry.authorIsSigner = true;
+    }
+    return entry;
+}
+
+// A mod somebody has already unpacked, or a bare Scripts tree.
+ModEntry readScriptFolderAsMod(const QString &path, QString *error)
+{
+    const QFileInfo info(path);
+    ModEntry entry;
+    entry.folder = QDir::cleanPath(info.absoluteFilePath());
+    entry.folderName = info.fileName();
+    entry.name = entry.folderName.startsWith(QLatin1Char('@')) ? entry.folderName.mid(1)
+                                                               : entry.folderName;
+    entry.modified = msecsOf(info);
+    entry.looseScripts = scriptsUnder(entry.folder);
+    if (entry.looseScripts.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("there is no .c file under %1").arg(entry.folderName);
+        return {};
+    }
+    if (entry.looseScripts.size() >= kMaxLooseScripts)
+        entry.notes.append(QStringLiteral("stopped at %1 script files; point this at a "
+                                          "mod folder rather than at a whole drive")
+                               .arg(kMaxLooseScripts));
+    return entry;
+}
+
+} // namespace
+
+ModEntry readModPath(const QString &path, QString *error)
+{
+    if (error) error->clear();
+    switch (classifyModPath(path)) {
+    case ModPathKind::Pbo:
+        return readPboAsMod(path, error);
+    case ModPathKind::ScriptFolder:
+        return readScriptFolderAsMod(path, error);
+    case ModPathKind::ModFolder: {
+        ModEntry entry = ModLibrary::readMod(path);
+        if (!entry.isValid() || entry.pbos.isEmpty()) {
+            if (error)
+                *error = QStringLiteral("%1 holds no pbo this can read")
+                             .arg(QFileInfo(path).fileName());
+            return {};
+        }
+        return entry;
+    }
+    case ModPathKind::ModRoot:
+        if (error)
+            *error = QStringLiteral("%1 holds several mods, so it is a folder to scan "
+                                    "rather than a mod to open")
+                         .arg(QFileInfo(path).fileName());
+        return {};
+    case ModPathKind::None:
+        break;
+    }
+    if (error)
+        *error = QStringLiteral("%1 is not a pbo, a mod folder, or a folder with script "
+                                "in it")
+                     .arg(QDir::toNativeSeparators(path));
+    return {};
+}
+
 // ------------------------------------------------------------------- opening
 
 ModOpenJob beginOpen(const ModEntry &mod, const ModOpenOptions &opts)
@@ -559,6 +763,39 @@ ModOpenJob beginOpen(const ModEntry &mod, const ModOpenOptions &opts)
         if (job.m_result.truncated) break;
     }
 
+    // Scripts already unpacked on disk. Nothing is copied for these: they are
+    // read where they lie and never written to, which is the same promise the
+    // extraction above keeps by landing in the app's own cache.
+    for (const QString &script : mod.looseScripts) {
+        if (job.m_result.truncated) break;
+        if (opts.maxFiles > 0 && job.m_files.size() >= opts.maxFiles) {
+            job.m_result.truncated = true;
+            break;
+        }
+        if (opts.maxBytes > 0 && bytes >= opts.maxBytes) {
+            job.m_result.truncated = true;
+            break;
+        }
+        const QFileInfo fi(script);
+        const qint64 size = fi.size();
+        if (opts.maxFileBytes > 0 && size > opts.maxFileBytes) {
+            addNote(&job.m_result,
+                    QStringLiteral("%1: %2 KB of script, too big to lay out, skipped")
+                        .arg(fi.fileName())
+                        .arg(size / 1024));
+            continue;
+        }
+
+        ModScriptFile file;
+        // No pbo behind it, and the origin line reads better saying so than
+        // naming an archive that does not exist.
+        file.entry = QDir(mod.folder).relativeFilePath(script);
+        file.path = script;
+        file.size = size;
+        job.m_files.append(file);
+        bytes += size;
+    }
+
     job.m_result.files = job.m_files;
     job.m_result.filesExtracted = job.m_files.size();
     job.m_result.ok = !job.m_files.isEmpty();
@@ -584,15 +821,15 @@ bool openModStep(ModOpenJob &job, const Catalog &cat, const Builtins &builtins,
         if (!imported.ok) {
             job.m_result.filesRefused++;
             addNote(&job.m_result,
-                    QStringLiteral("%1/%2: %3").arg(file.pbo, file.entry, imported.error));
+                    QStringLiteral("%1: %2").arg(whereFrom(file), imported.error));
             continue;
         }
         if (imported.scripts.isEmpty()) {
             // A file of enums, defines or global functions. Not a failure, but
             // there is no class in it to open, and saying so beats an empty row.
             addNote(&job.m_result,
-                    QStringLiteral("%1/%2: no class in this file, so there is no graph for it")
-                        .arg(file.pbo, file.entry));
+                    QStringLiteral("%1: no class in this file, so there is no graph for it")
+                        .arg(whereFrom(file)));
             continue;
         }
 
@@ -619,8 +856,7 @@ bool openModStep(ModOpenJob &job, const Catalog &cat, const Builtins &builtins,
             job.m_result.classes.append(view);
         }
         for (const QString &note : imported.notes)
-            addNote(&job.m_result,
-                    QStringLiteral("%1/%2: %3").arg(file.pbo, file.entry, note));
+            addNote(&job.m_result, QStringLiteral("%1: %2").arg(whereFrom(file), note));
     }
 
     if (job.m_next >= job.m_files.size()) job.m_done = true;
@@ -763,12 +999,65 @@ bool ModLibrary::removeRoot(const QString &folder)
     return false;
 }
 
+QVector<ModEntry> ModLibrary::mods() const
+{
+    if (m_opened.isEmpty()) return m_mods;
+    // Opened first: a mod the user pointed at by hand is the one they are here
+    // for, and a list sorted by name would otherwise bury it among 266 others
+    // until the sort is changed.
+    QVector<ModEntry> out = m_opened;
+    QSet<QString> keys;
+    for (const ModEntry &entry : m_opened) keys.insert(entry.folder.toLower());
+    for (const ModEntry &entry : m_mods)
+        if (!keys.contains(entry.folder.toLower())) out.append(entry);
+    return out;
+}
+
 const ModEntry *ModLibrary::mod(const QString &folder) const
 {
     const QString path = QDir::cleanPath(folder);
+    for (const ModEntry &entry : m_opened)
+        if (entry.folder.compare(path, Qt::CaseInsensitive) == 0) return &entry;
     for (const ModEntry &entry : m_mods)
         if (entry.folder.compare(path, Qt::CaseInsensitive) == 0) return &entry;
     return nullptr;
+}
+
+QString ModLibrary::addOpened(const ModEntry &entry)
+{
+    if (!entry.isValid()) return {};
+    const QString key = entry.folder;
+
+    // Already found by the scan, so the row is there and adding a second copy
+    // would list one mod twice.
+    for (const ModEntry &known : m_mods)
+        if (known.folder.compare(key, Qt::CaseInsensitive) == 0) return key;
+
+    bool replaced = false;
+    for (ModEntry &held : m_opened) {
+        if (held.folder.compare(key, Qt::CaseInsensitive) != 0) continue;
+        held = entry;
+        replaced = true;
+        break;
+    }
+    if (!replaced) m_opened.prepend(entry);
+
+    saveCache();
+    emit modsChanged();
+    return key;
+}
+
+bool ModLibrary::removeOpened(const QString &folder)
+{
+    const QString path = QDir::cleanPath(folder);
+    for (int i = 0; i < m_opened.size(); ++i) {
+        if (m_opened.at(i).folder.compare(path, Qt::CaseInsensitive) != 0) continue;
+        m_opened.removeAt(i);
+        saveCache();
+        emit modsChanged();
+        return true;
+    }
+    return false;
 }
 
 bool ModLibrary::isScanning() const
@@ -878,6 +1167,53 @@ ModPbo pboFromJson(const QJsonObject &o)
     return pbo;
 }
 
+QJsonObject entryToJson(const ModEntry &entry)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("folder"), entry.folder);
+    o.insert(QStringLiteral("folderName"), entry.folderName);
+    o.insert(QStringLiteral("name"), entry.name);
+    if (!entry.author.isEmpty()) o.insert(QStringLiteral("author"), entry.author);
+    if (entry.authorIsSigner) o.insert(QStringLiteral("authorIsSigner"), true);
+    if (!entry.version.isEmpty()) o.insert(QStringLiteral("version"), entry.version);
+    if (!entry.picture.isEmpty()) o.insert(QStringLiteral("picture"), entry.picture);
+    if (!entry.overview.isEmpty()) o.insert(QStringLiteral("overview"), entry.overview);
+    if (!entry.publishedId.isEmpty())
+        o.insert(QStringLiteral("publishedId"), entry.publishedId);
+    o.insert(QStringLiteral("modified"), double(entry.modified));
+    QJsonArray pbos;
+    for (const ModPbo &pbo : entry.pbos) pbos.append(pboToJson(pbo));
+    o.insert(QStringLiteral("pbos"), pbos);
+    if (!entry.looseScripts.isEmpty())
+        o.insert(QStringLiteral("scripts"), QJsonArray::fromStringList(entry.looseScripts));
+    if (!entry.notes.isEmpty())
+        o.insert(QStringLiteral("notes"), QJsonArray::fromStringList(entry.notes));
+    return o;
+}
+
+ModEntry entryFromJson(const QJsonObject &o)
+{
+    ModEntry entry;
+    entry.folder = o.value(QStringLiteral("folder")).toString();
+    if (entry.folder.isEmpty()) return entry;
+    entry.folderName = o.value(QStringLiteral("folderName")).toString();
+    entry.name = o.value(QStringLiteral("name")).toString();
+    entry.author = o.value(QStringLiteral("author")).toString();
+    entry.authorIsSigner = o.value(QStringLiteral("authorIsSigner")).toBool();
+    entry.version = o.value(QStringLiteral("version")).toString();
+    entry.picture = o.value(QStringLiteral("picture")).toString();
+    entry.overview = o.value(QStringLiteral("overview")).toString();
+    entry.publishedId = o.value(QStringLiteral("publishedId")).toString();
+    entry.modified = qint64(o.value(QStringLiteral("modified")).toDouble());
+    for (const QJsonValue &p : o.value(QStringLiteral("pbos")).toArray())
+        entry.pbos.append(pboFromJson(p.toObject()));
+    for (const QJsonValue &s : o.value(QStringLiteral("scripts")).toArray())
+        entry.looseScripts.append(s.toString());
+    for (const QJsonValue &n : o.value(QStringLiteral("notes")).toArray())
+        entry.notes.append(n.toString());
+    return entry;
+}
+
 } // namespace
 
 bool ModLibrary::saveCache(QString *error) const
@@ -890,31 +1226,15 @@ bool ModLibrary::saveCache(QString *error) const
     QDir().mkpath(QFileInfo(path).absolutePath());
 
     QJsonArray mods;
-    for (const ModEntry &entry : m_mods) {
-        QJsonObject o;
-        o.insert(QStringLiteral("folder"), entry.folder);
-        o.insert(QStringLiteral("folderName"), entry.folderName);
-        o.insert(QStringLiteral("name"), entry.name);
-        if (!entry.author.isEmpty()) o.insert(QStringLiteral("author"), entry.author);
-        if (entry.authorIsSigner) o.insert(QStringLiteral("authorIsSigner"), true);
-        if (!entry.version.isEmpty()) o.insert(QStringLiteral("version"), entry.version);
-        if (!entry.picture.isEmpty()) o.insert(QStringLiteral("picture"), entry.picture);
-        if (!entry.overview.isEmpty()) o.insert(QStringLiteral("overview"), entry.overview);
-        if (!entry.publishedId.isEmpty())
-            o.insert(QStringLiteral("publishedId"), entry.publishedId);
-        o.insert(QStringLiteral("modified"), double(entry.modified));
-        QJsonArray pbos;
-        for (const ModPbo &pbo : entry.pbos) pbos.append(pboToJson(pbo));
-        o.insert(QStringLiteral("pbos"), pbos);
-        if (!entry.notes.isEmpty())
-            o.insert(QStringLiteral("notes"), QJsonArray::fromStringList(entry.notes));
-        mods.append(o);
-    }
+    for (const ModEntry &entry : m_mods) mods.append(entryToJson(entry));
+    QJsonArray opened;
+    for (const ModEntry &entry : m_opened) opened.append(entryToJson(entry));
 
     QJsonObject root;
     root.insert(QStringLiteral("version"), 1);
     root.insert(QStringLiteral("roots"), QJsonArray::fromStringList(m_roots));
     root.insert(QStringLiteral("mods"), mods);
+    root.insert(QStringLiteral("opened"), opened);
 
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
@@ -961,29 +1281,22 @@ bool ModLibrary::loadCache(QString *error)
     }
 
     QVector<ModEntry> mods;
-    const QJsonArray array = root.value(QStringLiteral("mods")).toArray();
-    for (const QJsonValue &v : array) {
-        const QJsonObject o = v.toObject();
-        ModEntry entry;
-        entry.folder = o.value(QStringLiteral("folder")).toString();
-        if (entry.folder.isEmpty()) continue;
-        entry.folderName = o.value(QStringLiteral("folderName")).toString();
-        entry.name = o.value(QStringLiteral("name")).toString();
-        entry.author = o.value(QStringLiteral("author")).toString();
-        entry.authorIsSigner = o.value(QStringLiteral("authorIsSigner")).toBool();
-        entry.version = o.value(QStringLiteral("version")).toString();
-        entry.picture = o.value(QStringLiteral("picture")).toString();
-        entry.overview = o.value(QStringLiteral("overview")).toString();
-        entry.publishedId = o.value(QStringLiteral("publishedId")).toString();
-        entry.modified = qint64(o.value(QStringLiteral("modified")).toDouble());
-        for (const QJsonValue &p : o.value(QStringLiteral("pbos")).toArray())
-            entry.pbos.append(pboFromJson(p.toObject()));
-        for (const QJsonValue &n : o.value(QStringLiteral("notes")).toArray())
-            entry.notes.append(n.toString());
-        mods.append(entry);
+    for (const QJsonValue &v : root.value(QStringLiteral("mods")).toArray()) {
+        const ModEntry entry = entryFromJson(v.toObject());
+        if (entry.isValid()) mods.append(entry);
+    }
+
+    QVector<ModEntry> opened;
+    for (const QJsonValue &v : root.value(QStringLiteral("opened")).toArray()) {
+        const ModEntry entry = entryFromJson(v.toObject());
+        // A pbo on a stick that is no longer plugged in. Dropped rather than
+        // listed, because a row that answers "not there any more" on every
+        // click is worse than the row not being there.
+        if (entry.isValid() && QFileInfo::exists(entry.folder)) opened.append(entry);
     }
 
     m_mods = mods;
+    m_opened = opened;
     emit modsChanged();
     return true;
 }

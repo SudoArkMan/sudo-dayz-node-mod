@@ -20,6 +20,7 @@
 
 class RecentProjects;
 
+class QAbstractButton;
 class QHBoxLayout;
 class QLabel;
 class QListWidget;
@@ -67,11 +68,20 @@ public:
     // The templates column on its own, for a screenshot of the gallery.
     QWidget *gallery() const { return m_gallery; }
 
+    // The second line of the Read a mod card. The window pushes what the mod
+    // library has actually found, because "266 mods installed on this machine"
+    // is an invitation and "read a mod" on its own is a label.
+    void setModLibraryLine(const QString &text);
+
 signals:
     void openRequested(const QString &path);
     void browseRequested();
     void newProjectRequested();
     void newModRequested();
+    // Somebody else's mod, read rather than started. The route into this app is
+    // as often "show me how they did it" as it is "start something", so it sits
+    // beside New and Open rather than behind a dock tab.
+    void browseModsRequested();
     // Connect directly. StartTemplate is not registered as a metatype, so a
     // queued connection would drop it.
     void templateRequested(const StartTemplate &tpl);
@@ -103,5 +113,6 @@ private:
     QLabel *m_missingNote;    // footer, only while some entry has moved
     QWidget *m_gallery;
     QWidget *m_firstAction;  // where the keyboard lands when there are no rows
+    QAbstractButton *m_readModCard;  // a StartCard, whose summary the window sets
     QVector<StartTemplate> m_templates;
 };

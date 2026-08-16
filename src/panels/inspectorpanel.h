@@ -48,6 +48,7 @@ protected:
 private slots:
     void onBeginModeChanged(int index);
     void onSuperToggled(bool checked);
+    void onClassCommitted();
     void onNodeSelectionChanged();
     void onNameCommitted();
     void onTypeCommitted();
@@ -62,6 +63,16 @@ private:
     QTextBrowser *m_body;
     QComboBox *m_beginMode;
     QCheckBox *m_callSuper;
+    // Cast To and New Object carry their target class in opts. Until this
+    // existed nothing in the app wrote that key, so a node placed by hand
+    // stayed on `new Class()` for ever while its own help said to set it here.
+    QComboBox *m_classPick;
+    bool m_classesLoaded = false;
+    // Which node the class box is currently showing. editingFinished fires on
+    // focus leaving, and clicking straight from one node to another can deliver
+    // that after the selection has already moved, which would write the old
+    // node's class onto the new one.
+    QString m_classNodeId;
     QString m_nodeId;
 
     // Variable details. Empty id means the panel is on a node, or on nothing.

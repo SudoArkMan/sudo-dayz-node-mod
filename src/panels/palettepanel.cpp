@@ -200,6 +200,10 @@ PalettePanel::PalettePanel(Document *doc, QWidget *parent)
     if (m_doc) {
         connect(m_doc, &Document::projectChanged, this,
                 [this] { populate(m_search->text()); });
+        // Which class the results are legal for changes with the script, so
+        // the list has to be rebuilt when the editor points somewhere else.
+        connect(m_doc, &Document::activeScriptChanged, this,
+                [this] { populate(m_search->text()); });
     }
 
     setFocusProxy(m_search);
@@ -273,6 +277,15 @@ void PalettePanel::populate(const QString &query)
         SearchOptions opts;
         opts.limit = 80;
         opts.ofClass = m_classFilter;
+        // A protected method is a real node, but only for a graph that
+        // inherits the class declaring it. Offering it to everybody is how
+        // `m_Timer.SetRunning(false)` got built: the palette said yes, and the
+        // compiler said no once the mod was packed. Read fresh on every
+        // populate rather than cached, so editing the class header in the
+        // inspector takes effect on the next keystroke here.
+        const Graph *g = m_doc->activeGraph();
+        opts.selfClass = g ? selfClassOf(*g) : QString();
+        opts.respectAccess = true;
         Grouped hits;
         for (const SearchHit &hit : m_doc->catalog().search(q, opts))
             hits.add(hit.category.isEmpty() ? tr("Results") : hit.category,
@@ -283,10 +296,33 @@ void PalettePanel::populate(const QString &query)
     }
 
     if (m_tree->topLevelItemCount() == 0) {
+        // Nothing found may mean nothing exists, or it may mean everything
+        // that matched was protected and out of this class's reach. Those are
+        // different problems and a user who is told the first one when it was
+        // the second goes looking for a spelling mistake that is not there.
+        QString hidden;
+        if (!browsing && m_doc) {
+            SearchOptions plain;
+            plain.limit = 1;
+            plain.ofClass = m_classFilter;
+            const QVector<SearchHit> any = m_doc->catalog().search(q, plain);
+            if (!any.isEmpty()) {
+                const Graph *g = m_doc->activeGraph();
+                const QString self = g ? selfClassOf(*g) : QString();
+                hidden = self.isEmpty()
+                             ? tr("%1 is declared protected. Give this script a base "
+                                  "class to reach it.").arg(any.first().title)
+                             : tr("%1 is declared protected on %2, and %3 does not "
+                                  "inherit it.").arg(any.first().title,
+                                                     any.first().subtitle, self);
+            }
+        }
         auto *empty = new QTreeWidgetItem(m_tree);
-        empty->setText(0, m_classFilter.isEmpty()
-                              ? tr("No match. Try a shorter term.")
-                              : tr("Nothing on %1 matches that.").arg(m_classFilter));
+        empty->setText(0, !hidden.isEmpty()
+                              ? hidden
+                              : m_classFilter.isEmpty()
+                                    ? tr("No match. Try a shorter term.")
+                                    : tr("Nothing on %1 matches that.").arg(m_classFilter));
         empty->setFlags(Qt::NoItemFlags);
         empty->setForeground(0, theme::textDim());
         empty->setFirstColumnSpanned(true);

@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
                          : doc.catalog().error()));
         return 1;
     }
-
+    //splash to be used for future loading staging/garbage collection.
     if (splash)
         splash->beginStage(QStringLiteral("Building the editor window"), 0.85);
     MainWindow win(&doc);

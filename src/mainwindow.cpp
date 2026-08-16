@@ -103,6 +103,30 @@ void revealDock(QWidget *panel)
     dock->raise();
 }
 
+// Puts a tabbed dock's own tab in front, which is what raise() is supposed to
+// do and here does not: raise() only asks the tab bar to move when the widget
+// actually changes place in the sibling stack, and a dock that has just been
+// shown is already at the top of it. Measured rather than assumed, by taking a
+// picture of the window and reading which tab was in front.
+//
+// The tab carries the dock's address in its data, which is Qt's own key for it.
+// Matched on the title as well, because that data is an implementation detail
+// and a build where it is not there should still find the tab.
+void raiseDockTab(QMainWindow *window, QDockWidget *dock)
+{
+    if (!window || !dock) return;
+    const auto address = quintptr(dock);
+    for (QTabBar *bar : window->findChildren<QTabBar *>()) {
+        for (int i = 0; i < bar->count(); ++i) {
+            const bool byData = bar->tabData(i).canConvert<quintptr>()
+                                && bar->tabData(i).value<quintptr>() == address;
+            if (!byData && bar->tabText(i) != dock->windowTitle()) continue;
+            bar->setCurrentIndex(i);
+            return;
+        }
+    }
+}
+
 // One way in for every surface that says "this node". Clicking a node on the
 // canvas, activating a row in the Graph Outliner and clicking a line in the
 // generated file all have to end with the same node selected, framed and open
@@ -590,6 +614,8 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     connect(m_startPage, &StartPage::browseRequested, this, &MainWindow::openProject);
     connect(m_startPage, &StartPage::newProjectRequested, this, &MainWindow::newProject);
     connect(m_startPage, &StartPage::newModRequested, this, &MainWindow::newMod);
+    connect(m_startPage, &StartPage::browseModsRequested,
+            this, &MainWindow::browseInstalledMods);
     connect(m_startPage, &StartPage::templateRequested,
             this, &MainWindow::startFromTemplate);
     connect(m_startPage, &StartPage::statusMessage, this, &MainWindow::flashStatus);
@@ -659,6 +685,15 @@ void MainWindow::buildMenus()
                     this, &MainWindow::newProject);
     file->addAction(QStringLiteral("Open project..."), QKeySequence::Open,
                     this, &MainWindow::openProject);
+    // Beside Open project, because "open somebody else's mod" is the same
+    // question asked about a different file, and it was the one thing in this
+    // app with no way in from the menu bar at all.
+    file->addAction(QStringLiteral("Open mod or pbo..."),
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O),
+                    this, &MainWindow::openModFromDisk);
+    file->addAction(QStringLiteral("Browse installed mods"),
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B),
+                    this, &MainWindow::browseInstalledMods);
     file->addSeparator();
     file->addAction(QStringLiteral("Set mod folder..."), this,
                     &MainWindow::setModFolder);
@@ -964,8 +999,14 @@ void MainWindow::buildDocks()
         makeDock(QStringLiteral("Events"), m_events, Qt::LeftDockWidgetArea);
     QDockWidget *explorerDock =
         makeDock(QStringLiteral("Mod Explorer"), m_explorer, Qt::LeftDockWidgetArea);
+    // A library of 266 mods with a class list under it is two lists, and the
+    // left column has room for about three rows of each. Down here it has the
+    // window's whole width, and the panel puts its two lists side by side once
+    // it is wider than it is tall. Every area is allowed, because the layout is
+    // the user's to rearrange and the panel reads either way round.
     QDockWidget *browserDock =
-        makeDock(QStringLiteral("Mod Browser"), m_modBrowser, Qt::LeftDockWidgetArea);
+        makeDock(QStringLiteral("Mod Browser"), m_modBrowser, Qt::BottomDockWidgetArea,
+                 Qt::AllDockWidgetAreas);
     QDockWidget *varsDock =
         makeDock(QStringLiteral("Variable Manager"), m_variables, Qt::RightDockWidgetArea);
     QDockWidget *inspectorDock =
@@ -982,24 +1023,25 @@ void MainWindow::buildDocks()
     QDockWidget *testDock =
         makeDock(QStringLiteral("Test"), m_testRun, Qt::BottomDockWidgetArea,
                  Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
-    tabifyDockWidget(codeDock, testDock);
+    // The three wide panels, in the order they are reached: what the graph
+    // generates, what somebody else's mod holds, and what happened when it ran.
+    // The generated file is in front, which is the contracted layout.
+    tabifyDockWidget(codeDock, browserDock);
+    tabifyDockWidget(browserDock, testDock);
     codeDock->raise();
 
     splitDockWidget(outlinerDock, paletteDock, Qt::Vertical);
     splitDockWidget(paletteDock, eventsDock, Qt::Vertical);
-    // Three tabs in the last slice rather than three more slices of a column
-    // that was already showing the Mod Explorer one line of prose at a time.
-    // Nothing loses height by this: whichever of the three is up gets the whole
-    // slice, which is more than the Events list had when it sat there alone.
-    // They are also the three you use one at a time, the hooks this class can
-    // override, your own mod's files, and somebody else's.
+    // Two tabs in the last slice rather than two more slices of a column that
+    // was already showing the Mod Explorer one line of prose at a time. They are
+    // the two you use one at a time: the hooks this class can override, and your
+    // own mod's files.
     tabifyDockWidget(eventsDock, explorerDock);
-    tabifyDockWidget(explorerDock, browserDock);
     eventsDock->raise();
     // Queued: the signal arrives while the tab group is still swapping, and a
     // resize asked for there is measured against the layout on its way out.
     connect(browserDock, &QDockWidget::visibilityChanged, this,
-            [this]() { QTimer::singleShot(0, this, [this]() { applyLeftColumnSizes(); }); });
+            [this]() { QTimer::singleShot(0, this, [this]() { applyBottomRowSize(); }); });
     splitDockWidget(varsDock, inspectorDock, Qt::Vertical);
     splitDockWidget(inspectorDock, minimapDock, Qt::Vertical);
 
@@ -1019,6 +1061,11 @@ void MainWindow::buildDocks()
             &MainWindow::openBrowsedGraph, Qt::DirectConnection);
     connect(m_modBrowser, &ModBrowserPanel::statusChanged, this,
             &MainWindow::flashStatus);
+    // The start page's Read a mod card says what is actually installed, which
+    // the library only knows once its cache has loaded and its scan has run.
+    connect(m_modBrowser->library(), &ModLibrary::modsChanged, this,
+            &MainWindow::updateModLibraryLine);
+    updateModLibraryLine();
 
     // A .c is a graph, a .cpp is a config tree, a .sdzn is a project, and
     // everything else is text, so the explorer says which of the four it found
@@ -1045,31 +1092,15 @@ void MainWindow::buildDocks()
 
 void MainWindow::applyDockSizes()
 {
-    // The generated file is a view of what the canvas already holds, so it opens
-    // at the lines the panel asks for and not at the two fifths of the window it
-    // used to take. Capped by the window as well, because a dozen lines of a
-    // large font on a short screen is the canvas's room again.
-    const int usable = qMax(400, height());
-    // A quarter, not a third: at 800 tall a third of the window put more pixels
-    // under the generated file than were left for the canvas, which is the one
-    // thing the app exists to show.
-    const int codeHeight = qBound(160, m_codeView->preferredDockHeight(), usable / 4);
-    resizeDocks({dockOf(m_codeView)}, {codeHeight}, Qt::Vertical);
+    applyBottomRowSize();
 
     // Three slices for the left column, near enough to even that no list is
     // starved to feed another. The last slice keeps a little more because it is
-    // shared by three panels and one of them holds two lists; it is named by the
-    // browser rather than by the tab in front of it, because a tab group has one
-    // height and the browser is what sets it. The old 380 there left the
-    // outliner and the palette under four rows on a short window, which is the
-    // same defect the Events dock used to have when it owned the share.
-    //
-    // The exception is the browser itself. It is the only panel down there that
-    // stacks two lists, so while it is the tab in front it needs about half the
-    // column, and while it is behind another tab that height is the outliner's
-    // and the palette's. A tab group has one height whichever way round it is,
-    // so the share has to follow the tab rather than be picked once.
-    applyLeftColumnSizes();
+    // shared by the Events list and the Mod Explorer tree. The old 380 there
+    // left the outliner and the palette under four rows on a short window, which
+    // is the same defect the Events dock used to have when it owned the share.
+    resizeDocks({dockOf(m_outliner), dockOf(m_palette), dockOf(m_events)},
+                {220, 210, 240}, Qt::Vertical);
 
     // The variable table is the panel; the inspector and the minimap both read
     // fine at their own minimum, so the table is what the spare height goes to.
@@ -1078,22 +1109,34 @@ void MainWindow::applyDockSizes()
     resizeDocks({dockOf(m_outliner), dockOf(m_variables)}, {320, 380}, Qt::Horizontal);
 }
 
-void MainWindow::applyLeftColumnSizes()
+void MainWindow::applyBottomRowSize()
 {
+    // Nothing to divide before the window has been shown, and the first show
+    // calls this itself.
     if (!m_docksSized) return;
-    QDockWidget *browser = dockOf(m_modBrowser);
-    resizeDocks({dockOf(m_outliner), dockOf(m_palette), browser}, {220, 210, 240},
-                Qt::Vertical);
 
-    // While the browser is the tab in front it is the only panel in the column
-    // stacking two lists, so it gets asked for half the column on its own.
-    // On its own deliberately: a three-way list whose sum is over the height
-    // there is gets scaled by Qt, and the largest request takes the largest cut,
-    // so asking for more inside the list of three lands the browser with less.
-    if (browser && browser->isVisible()) {
-        const int column = qMax(360, centralWidget() ? centralWidget()->height() : 500);
-        resizeDocks({browser}, {column * 5 / 9}, Qt::Vertical);
-    }
+    // The generated file is a view of what the canvas already holds, so it opens
+    // at the lines the panel asks for and not at the two fifths of the window it
+    // used to take. Capped by the window as well, because a dozen lines of a
+    // large font on a short screen is the canvas's room again.
+    const int usable = qMax(400, height());
+    // A quarter, not a third: at 800 tall a third of the window put more pixels
+    // under the generated file than were left for the canvas, which is the one
+    // thing the app exists to show.
+    int wanted = qBound(160, m_codeView->preferredDockHeight(), usable / 4);
+
+    // The browser is the one panel down here holding two lists rather than one
+    // scrolling view, so while it is the tab in front the row is worth more. A
+    // tab group has one height whichever tab is up, so the share has to follow
+    // the tab rather than be picked once.
+    QDockWidget *browser = dockOf(m_modBrowser);
+    const bool browsing = browser && browser->isVisible();
+    if (browsing) wanted = qMax(wanted, usable * 2 / 5);
+
+    // Named by whichever tab is up. resizeDocks brings the dock it is given to
+    // the front of its tab group, so naming the code view here while the
+    // browser is the tab the user asked for takes it straight back off them.
+    resizeDocks({browsing ? browser : dockOf(m_codeView)}, {wanted}, Qt::Vertical);
 }
 
 void MainWindow::showEvent(QShowEvent *event)
@@ -1126,7 +1169,9 @@ void MainWindow::browseForScreenshot()
 {
     // "3D Printer" opens that mod's first class; "3D Printer#4" opens the fifth
     // row, because the first class in a mod is often one the importer kept as
-    // text and a picture of an empty canvas says nothing about the browser.
+    // text and a picture of an empty canvas says nothing about the browser. A
+    // value naming something on disk is opened as a path instead, which is the
+    // other half of the feature and needs a picture of its own.
     QString wanted = qEnvironmentVariable("SUDO_UI_BROWSE").trimmed();
     if (wanted.isEmpty() || !m_modBrowser) return;
     int row = 0;
@@ -1136,10 +1181,11 @@ void MainWindow::browseForScreenshot()
         wanted = wanted.left(hash);
     }
 
-    if (QDockWidget *dock = dockOf(m_modBrowser)) {
-        dock->show();
-        dock->raise();
-    }
+    // The same call the File menu makes, so the picture is of what a user gets
+    // rather than of a state only this hook can reach. It also switches to the
+    // editor, and a dock shown over the start page is a dock in a place the app
+    // never puts one.
+    browseInstalledMods();
 
     // The scan is on a worker thread and the import is spread over timer ticks.
     // Both are waited out here rather than hoped for, because a picture taken
@@ -1157,16 +1203,20 @@ void MainWindow::browseForScreenshot()
     ModLibrary *library = m_modBrowser->library();
     settle([library]() { return library->isScanning(); }, 60000);
 
-    QString folder;
-    for (const ModEntry &mod : library->mods()) {
-        if (!mod.hasScripts()) continue;
-        if (!mod.name.contains(wanted, Qt::CaseInsensitive)
-            && !mod.folderName.contains(wanted, Qt::CaseInsensitive))
-            continue;
-        folder = mod.folder;
-        break;
+    if (QFileInfo::exists(wanted)) {
+        if (!m_modBrowser->openFromDisk(wanted)) return;
+    } else {
+        QString folder;
+        for (const ModEntry &mod : library->mods()) {
+            if (!mod.hasScripts()) continue;
+            if (!mod.name.contains(wanted, Qt::CaseInsensitive)
+                && !mod.folderName.contains(wanted, Qt::CaseInsensitive))
+                continue;
+            folder = mod.folder;
+            break;
+        }
+        if (folder.isEmpty() || !m_modBrowser->selectMod(folder)) return;
     }
-    if (folder.isEmpty() || !m_modBrowser->selectMod(folder)) return;
 
     ModBrowserPanel *browser = m_modBrowser;
     settle([browser]() { return browser->isOpening(); }, 60000);
@@ -1664,6 +1714,66 @@ void MainWindow::setModFolder()
     syncExplorerRoot();
     flashStatus(QStringLiteral("Mod folder set to %1")
                     .arg(QDir::toNativeSeparators(p.modRoot)));
+}
+
+void MainWindow::updateModLibraryLine()
+{
+    if (!m_startPage || !m_modBrowser) return;
+    const QVector<ModEntry> mods = m_modBrowser->library()->mods();
+    if (mods.isEmpty()) {
+        m_startPage->setModLibraryLine(
+            QStringLiteral("A .pbo or a mod folder from disk, as graphs to read."));
+        return;
+    }
+    int withScripts = 0;
+    for (const ModEntry &mod : mods)
+        if (mod.hasScripts()) ++withScripts;
+    // One line, and the count is what makes it an invitation rather than a
+    // label: the card sits next to three that start something, and this is the
+    // one that says there are 216 mods here to read.
+    // "on this machine" rather than "installed": the count includes anything
+    // opened by path, which is on the machine but was never installed.
+    m_startPage->setModLibraryLine(
+        QStringLiteral("%1 mods on this machine, %2 with script. Read any of them, or a "
+                       ".pbo from disk, as graphs.")
+            .arg(mods.size())
+            .arg(withScripts));
+}
+
+void MainWindow::browseInstalledMods()
+{
+    if (!m_modBrowser) return;
+    // The docks are put away while the start page is up, so showing one there
+    // would put a panel on a page that has none.
+    showEditor();
+
+    const auto reveal = [this]() {
+        QDockWidget *dock = dockOf(m_modBrowser);
+        if (!dock) return;
+        // Closed from the View menu, so its toggle is off and show() alone
+        // would leave the two out of step.
+        dock->toggleViewAction()->setChecked(true);
+        dock->show();
+        dock->raise();
+        raiseDockTab(this, dock);
+        m_modBrowser->takeFocus();
+    };
+    reveal();
+    // Twice, and the second time is the one that lands. Coming back from the
+    // start page re-shows every dock at once, and the tab bar is only built
+    // once the layout pass after that has run, so the first attempt has no tab
+    // to put in front yet.
+    QTimer::singleShot(0, this, reveal);
+
+    flashStatus(QStringLiteral("Mod Browser. Pick a mod to read its classes, or "
+                               "Open... for a pbo anywhere on disk."));
+}
+
+void MainWindow::openModFromDisk()
+{
+    if (!m_modBrowser) return;
+    browseInstalledMods();
+    m_modBrowser->openFromDisk();
 }
 
 void MainWindow::openBrowsedGraph(const QString &name, const Graph &graph)

@@ -6,9 +6,11 @@
 
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -17,6 +19,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -63,13 +66,31 @@ QString countLabel(int n, const QString &one, const QString &many)
     return QStringLiteral("%1 %2").arg(n).arg(n == 1 ? one : many);
 }
 
+// The line a list shows in place of itself while it has nothing in it. Wrapped,
+// dim, and inset, so it reads as a note about the panel rather than as a row.
+QLabel *placeholder(const QString &text, QWidget *parent)
+{
+    auto *label = new QLabel(text, parent);
+    label->setWordWrap(true);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    label->setContentsMargins(10, 10, 10, 10);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    QPalette dim = label->palette();
+    dim.setColor(QPalette::WindowText, theme::textDim());
+    label->setPalette(dim);
+    return label;
+}
+
 } // namespace
 
 ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     : QWidget(parent), m_doc(doc), m_library(new ModLibrary(this)),
       m_filter(new QLineEdit(this)), m_refresh(new QPushButton(tr("Rescan"), this)),
-      m_addFolder(new QPushButton(tr("Add folder"), this)),
+      m_open(new QPushButton(tr("Open..."), this)),
+      m_split(new QSplitter(Qt::Vertical, this)),
+      m_modsStack(new QStackedWidget(this)), m_classesStack(new QStackedWidget(this)),
       m_mods(new QTreeWidget(this)), m_classes(new QTreeWidget(this)),
+      m_modsEmpty(nullptr), m_classesEmpty(nullptr),
       m_status(new QLabel(this)), m_notes(new QPushButton(tr("Notes"), this)),
       m_openTimer(new QTimer(this))
 {
@@ -87,10 +108,13 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     m_filter->setClearButtonEnabled(true);
     tools->addWidget(m_filter, 1);
     tools->addWidget(m_refresh);
-    tools->addWidget(m_addFolder);
+    m_refresh->setToolTip(tr("Read every mod folder again, headers and all."));
+    m_open->setToolTip(tr("Open a .pbo, a mod folder, or a folder of unpacked script "
+                          "from anywhere on this machine."));
+    tools->addWidget(m_open);
     layout->addLayout(tools);
 
-    auto *split = new QSplitter(Qt::Vertical, this);
+    QSplitter *split = m_split;
 
     m_mods->setColumnCount(4);
     m_mods->setHeaderLabels({tr("Mod"), tr("Author"), tr("Scripts"), tr("Modelled")});
@@ -109,7 +133,13 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     // be shorter than the sum of what its docks demand. One row and a header is
     // a floor, not a target, and the weights in the window decide the rest.
     m_mods->setMinimumHeight(44);
-    split->addWidget(m_mods);
+    // What the panel is, said where a first-time user is looking: at an empty
+    // list, before the scan behind it has come back with anything. The words are
+    // set by updateEmptyStates, which is also the one that decides between them.
+    m_modsEmpty = placeholder(QString(), m_modsStack);
+    m_modsStack->addWidget(m_mods);
+    m_modsStack->addWidget(m_modsEmpty);
+    split->addWidget(m_modsStack);
 
     m_classes->setColumnCount(3);
     m_classes->setHeaderLabels({tr("Class"), tr("Extends"), tr("Modelled")});
@@ -122,7 +152,10 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     m_classes->header()->setSectionResizeMode(1, QHeaderView::Interactive);
     m_classes->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_classes->setMinimumHeight(44);
-    split->addWidget(m_classes);
+    m_classesEmpty = placeholder(QString(), m_classesStack);
+    m_classesStack->addWidget(m_classes);
+    m_classesStack->addWidget(m_classesEmpty);
+    split->addWidget(m_classesStack);
 
     // Even. The mod list is scrolled once to pick a mod and the class list is
     // what you work in after that, so 3:2 in the mod list's favour left the
@@ -151,7 +184,7 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
 
     connect(m_filter, &QLineEdit::textChanged, this, &ModBrowserPanel::onFilterChanged);
     connect(m_refresh, &QPushButton::clicked, this, [this] { refresh(true); });
-    connect(m_addFolder, &QPushButton::clicked, this, [this] { addFolder(); });
+    connect(m_open, &QPushButton::clicked, this, [this] { openFromDisk(); });
     connect(m_notes, &QPushButton::clicked, this, &ModBrowserPanel::onShowNotes);
     connect(m_mods, &QTreeWidget::itemSelectionChanged, this, &ModBrowserPanel::onModSelected);
     connect(m_classes, &QTreeWidget::itemActivated, this, &ModBrowserPanel::onClassActivated);
@@ -175,6 +208,14 @@ ModBrowserPanel::~ModBrowserPanel()
     stopOpen();
 }
 
+void ModBrowserPanel::takeFocus()
+{
+    // The filter is the way into 266 rows and it is where typing does something,
+    // so it takes the keyboard unless there is nothing yet to filter.
+    if (m_mods->topLevelItemCount() > 0) m_filter->setFocus(Qt::OtherFocusReason);
+    else m_open->setFocus(Qt::OtherFocusReason);
+}
+
 // ------------------------------------------------------------------ the list
 
 QString ModBrowserPanel::filterText() const
@@ -185,7 +226,8 @@ QString ModBrowserPanel::filterText() const
 void ModBrowserPanel::refresh(bool force)
 {
     if (m_library->roots().isEmpty()) {
-        setStatus(tr("No mod folder to scan. Use Add folder to point at one."));
+        setStatus(tr("No mod folder to scan. Use Open... to point at one, or at a "
+                     "single pbo."));
         return;
     }
     m_library->refresh(force);
@@ -202,6 +244,80 @@ void ModBrowserPanel::addFolder(const QString &folder)
         return;
     }
     refresh(false);
+}
+
+QString ModBrowserPanel::askForModPath()
+{
+    // Not the native dialog, because the answer here is either a file or the
+    // folder being looked at and no native dialog offers both. The app's own
+    // sheet paints this one, so it also stops being the one white window.
+    QFileDialog dialog(this, tr("Open a mod"));
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setNameFilters({tr("Mod archives (*.pbo)"), tr("Every file (*)")});
+
+    QString folder;
+    // A mod is as often a folder as a file, and the folder wanted is nearly
+    // always the one already on screen. Guarded because this reaches into the
+    // dialog's own layout: without the row the dialog still opens pbos.
+    if (auto *grid = qobject_cast<QGridLayout *>(dialog.layout())) {
+        auto *useFolder = new QPushButton(tr("Open the folder shown above"), &dialog);
+        useFolder->setToolTip(tr("Reads the folder this dialog is showing: a mod "
+                                 "folder, a folder of unpacked script, or a folder "
+                                 "holding several mods."));
+        connect(useFolder, &QPushButton::clicked, &dialog, [&dialog, &folder]() {
+            folder = dialog.directory().absolutePath();
+            dialog.reject();
+        });
+        grid->addWidget(useFolder, grid->rowCount(), 0, 1, qMax(1, grid->columnCount()));
+    }
+
+    const int answer = dialog.exec();
+    if (!folder.isEmpty()) return folder;
+    if (answer != QDialog::Accepted) return {};
+    const QStringList picked = dialog.selectedFiles();
+    return picked.isEmpty() ? QString() : picked.first();
+}
+
+bool ModBrowserPanel::openFromDisk(const QString &path)
+{
+    const QString wanted = path.isEmpty() ? askForModPath() : path;
+    if (wanted.isEmpty()) return false;
+
+    // A folder of mods is a folder to scan, not a mod. Saying so and doing it is
+    // better than refusing something the user was reasonable to point at.
+    if (classifyModPath(wanted) == ModPathKind::ModRoot) {
+        addFolder(wanted);
+        return true;
+    }
+
+    QString error;
+    const ModEntry entry = readModPath(wanted, &error);
+    if (!entry.isValid()) {
+        setStatus(error);
+        return false;
+    }
+
+    const QString folder = m_library->addOpened(entry);
+    if (folder.isEmpty()) {
+        setStatus(tr("%1 could not be added to the library.")
+                      .arg(QDir::toNativeSeparators(wanted)));
+        return false;
+    }
+
+    // A filter left over from a search would hide the row that was just added,
+    // and a mod that opens into nothing is indistinguishable from one that
+    // failed to open.
+    if (!filterText().isEmpty()) {
+        const QSignalBlocker quiet(m_filter);
+        m_filter->clear();
+    }
+    rebuildModList();
+    if (!selectMod(folder)) {
+        setStatus(tr("%1 was added but its row is not showing.").arg(entry.name));
+        return false;
+    }
+    return true;
 }
 
 bool ModBrowserPanel::selectMod(const QString &folder)
@@ -319,6 +435,41 @@ void ModBrowserPanel::rebuildModList()
     }
     if (m_mods->topLevelItemCount() == 0 && !filter.isEmpty())
         setStatus(tr("Nothing matches that filter."));
+    updateEmptyStates();
+}
+
+void ModBrowserPanel::updateEmptyStates()
+{
+    const bool anyMod = m_mods->topLevelItemCount() > 0;
+    if (!anyMod) {
+        const QString filter = filterText();
+        m_modsEmpty->setText(
+            filter.isEmpty()
+                ? tr("Somebody else's mod, opened and read.\n\n"
+                     "Every mod installed on this machine is listed here, and picking "
+                     "one reads the classes inside it as graphs. Use Open... for a "
+                     ".pbo or a mod folder anywhere else on disk.\n\n"
+                     "Nothing here is ever written back: a graph read out of a mod is "
+                     "a reader, and export leaves it out.")
+                : tr("No mod here is called %1.\n\nClear the filter to see the whole "
+                     "list again.").arg(filter));
+    }
+    m_modsStack->setCurrentWidget(anyMod ? static_cast<QWidget *>(m_mods) : m_modsEmpty);
+
+    const bool anyClass = m_classes->topLevelItemCount() > 0;
+    if (!anyClass) {
+        m_classesEmpty->setText(
+            m_openFolder.isEmpty()
+                ? tr("Pick a mod to read what is inside it.\n\n"
+                     "Its classes come up here with the share of each one's methods "
+                     "the editor could turn into nodes. Double click a row to open "
+                     "that class on the canvas.")
+                : tr("No class has come out of this mod yet.\n\nThe line at the "
+                     "bottom says how far the read has got, and Notes says what it "
+                     "would not model."));
+    }
+    m_classesStack->setCurrentWidget(anyClass ? static_cast<QWidget *>(m_classes)
+                                              : m_classesEmpty);
 }
 
 // ---------------------------------------------------------------- opening one
@@ -343,6 +494,7 @@ void ModBrowserPanel::startOpen(const ModEntry &mod)
     // opens the previous mod's notes is worse than one that is greyed out.
     m_notes->setEnabled(false);
     m_openFolder = mod.folder;
+    updateEmptyStates();
 
     if (!mod.hasScripts()) {
         setStatus(tr("%1 ships no script, so there is nothing to open here.").arg(mod.name));
@@ -448,7 +600,10 @@ void ModBrowserPanel::refreshClassList()
         QString entry = view.entry;
         entry.replace('\\', '/');
         QStringList tip;
-        tip << QStringLiteral("%1/%2").arg(view.pbo, entry);
+        // No pbo behind a script read straight off disk, and a leading slash
+        // would read as a path that is not one.
+        tip << (view.pbo.isEmpty() ? entry
+                                   : QStringLiteral("%1/%2").arg(view.pbo, entry));
         tip << tr("%1 of %2 methods became nodes, %3 kept their text")
                    .arg(view.methodsAsNodes)
                    .arg(view.methodsAsNodes + view.methodsAsText)
@@ -459,6 +614,7 @@ void ModBrowserPanel::refreshClassList()
         item->setToolTip(0, tip.join(QLatin1Char('\n')));
     }
     m_classes->setSortingEnabled(true);
+    updateEmptyStates();
 }
 
 void ModBrowserPanel::onClassActivated(QTreeWidgetItem *item, int column)
@@ -517,16 +673,37 @@ void ModBrowserPanel::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     elideStatus();
+    fitOrientation();
     fitColumns();
+}
+
+void ModBrowserPanel::fitOrientation()
+{
+    // Two lists stacked in the bottom dock get three rows each out of 266 mods,
+    // which is not a library anybody can browse. Side by side they get the dock's
+    // whole height, and a bottom dock has width to spare.
+    const bool wideAndShort = width() >= 700 && height() < width() * 3 / 5;
+    const Qt::Orientation want = wideAndShort ? Qt::Horizontal : Qt::Vertical;
+    if (m_split->orientation() == want) return;
+    m_split->setOrientation(want);
+    // The sizes carried over from the other orientation are the wrong axis, so
+    // the two panes come back even rather than at whatever the last drag left.
+    const int half = qMax(1, (want == Qt::Horizontal ? width() : height()) / 2);
+    m_split->setSizes({half, half});
 }
 
 void ModBrowserPanel::fitColumns()
 {
     // Four columns in a dock this narrow leaves the name, which is the column
-    // you are reading, about thirty pixels and an ellipsis. The name and the
+    // you are reading, about thirty pixels and three dots. The name and the
     // share modelled are what the list is for; the rest go when there is no
     // room for them, and the row's tooltip still carries the author.
-    const int w = width();
+    //
+    // Measured off what a list is about to be given rather than off its current
+    // width: the panel is resized before the splitter has handed its children
+    // theirs, so reading the tree back here is reading the previous layout.
+    const int lists = m_split->orientation() == Qt::Horizontal ? 2 : 1;
+    const int w = width() / lists;
     m_mods->setColumnHidden(1, w < 440);
     m_mods->setColumnHidden(2, w < 360);
     m_classes->setColumnHidden(1, w < 400);

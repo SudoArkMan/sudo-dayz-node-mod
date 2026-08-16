@@ -669,7 +669,7 @@ NodeDef resolveDef(const GraphNode &n, const Graph &g, const Catalog &cat,
 Ctx::Ctx(const Graph &g, const Catalog &c, const Builtins &b, const QString &sid,
          const DependencyContext &dc)
     : graph(g), cat(c), builtins(b), depCtx(dc), scriptId(sid),
-      ancestorClass(g.modded ? g.className : g.baseClass)
+      ancestorClass(selfClassOf(g))
 {
     byId.reserve(g.nodes.size());
     defs.reserve(g.nodes.size());
@@ -993,6 +993,46 @@ void cannotOverrideNative(const Ctx &ctx, QVector<Diagnostic> &out)
                             .arg(m->owner, m->name),
                         QStringLiteral("Call it from another event instead. A modded "
                                        "override of a native method will not compile."),
+                        n.id));
+    }
+}
+
+// A protected method is reachable from inside the class that declares it and
+// from anything that inherits it, and from nowhere else.
+//
+// The palette withholds these now, so a graph cannot pick one up any more. A
+// graph already on disk can still be holding one, and making that node quietly
+// disappear on open would be worse than saying so: this is the rule that says
+// so. It stays quiet whenever the ancestry cannot be established, which is the
+// same benefit of the doubt callTarget gives in the generator.
+//
+// Checked against the vanilla tree rather than assumed: over 2,810 files there
+// are nine receiver calls to a name that is only ever declared protected, and
+// every one that is live sits in a class that inherits an owner. The two that
+// do not are both commented out.
+void protectedCallFromOutside(const Ctx &ctx, QVector<Diagnostic> &out)
+{
+    const QString self = ctx.ancestorClass;
+    if (self.isEmpty() || ctx.cat.classId(self) < 0) return;
+
+    for (const GraphNode &n : ctx.graph.nodes) {
+        // An event node is an override, not a call, and a protected hook this
+        // class has no business overriding is eventNotInherited's finding.
+        if (n.kind == NodeKind::Event) continue;
+        const MethodSig *m = ctx.sig(n.id);
+        if (!m || !(m->flags & flag::Protected)) continue;
+        if (ctx.cat.accessAllowed(m->owner, m->flags, self)) continue;
+
+        const NodeDef *d = ctx.def(n.id);
+        const QString title = d && d->valid ? d->title : m->name;
+        out.append(diag(Severity::Warning, QStringLiteral("DZ118"),
+                        QStringLiteral("\"%1\" is declared `protected` on %2, so only "
+                                       "%2 and classes that inherit it may call it. "
+                                       "%3 does not, so this call will not compile.")
+                            .arg(title, m->owner, self),
+                        QStringLiteral("Use a public method that does the same job, or "
+                                       "move the call into a class that inherits %1.")
+                            .arg(m->owner),
                         n.id));
     }
 }
@@ -2224,6 +2264,7 @@ AnalysisResult analyzeGraph(const Graph &graph, const Catalog &cat,
     execCycle(ctx, out);
     functionMustReturn(ctx, out);
     cannotOverrideNative(ctx, out);
+    protectedCallFromOutside(ctx, out);
     entityConstruction(ctx, out);
     discardedConstruction(ctx, out);
     guardedApiInShippingCode(ctx, out);

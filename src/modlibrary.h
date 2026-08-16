@@ -69,6 +69,11 @@ struct ModEntry {
     QString overview;      // mod.cpp `tooltip` or `overview`, one line
     QString publishedId;   // meta.cpp `publishedid`, empty for a local mod
     QVector<ModPbo> pbos;
+    // Scripts already sitting on disk rather than packed into a pbo: a mod
+    // somebody has unpacked, or a bare Scripts folder. Absolute paths, and only
+    // ever filled by readModPath below. The scan never produces one, because a
+    // folder of loose .c files under a mod root is not a mod anyone installed.
+    QStringList looseScripts;
     qint64 modified = 0;   // newest mtime under the folder, ms since epoch
     QStringList notes;     // what the scan could not read, per mod
 
@@ -76,6 +81,29 @@ struct ModEntry {
     bool hasScripts() const { return scriptCount() > 0; }
     bool isValid() const { return !folder.isEmpty(); }
 };
+
+// -------------------------------------------------------- a path from disk
+//
+// The library scans known roots, which answers "what is installed" and nothing
+// else. A mod handed over on a stick, a pbo pulled out of a workshop download,
+// or a folder somebody has already unpacked are all things a person wants to
+// read, and none of them are under a root. These turn any such path into the
+// same ModEntry the scan produces, so opening it costs the same code.
+
+enum class ModPathKind {
+    None,          // not there, or nothing in it this can read
+    Pbo,           // one .pbo
+    ModFolder,     // a mod: pbos directly under it or under its Addons folder
+    ScriptFolder,  // .c files on disk, a mod somebody has unpacked
+    ModRoot,       // a folder of mods, which is a root to scan rather than a mod
+};
+
+ModPathKind classifyModPath(const QString &path);
+
+// A mod record for a path the scan did not turn up. A ModRoot comes back
+// invalid with the reason set, because a folder holding mods is added as a root
+// rather than opened as one mod.
+ModEntry readModPath(const QString &path, QString *error = nullptr);
 
 // --------------------------------------------------------------- opening one
 
@@ -177,6 +205,11 @@ private:
 // job standing at the first of them. Extraction is the part that touches no
 // Catalog, so it is done here in one go; the importing is what gets spread out.
 // A mod with no readable pbo comes back done, with ok = false and the reason.
+//
+// A mod carrying looseScripts is read where those files already are. Nothing is
+// copied for them, which keeps the same promise the pbo path keeps by
+// extracting into the app's own cache: opening somebody's mod does not write
+// anything into their folder.
 ModOpenJob beginOpen(const ModEntry &mod, const ModOpenOptions &opts = {});
 
 // Imports up to `budget` more files. Returns true while there is more to do.
@@ -262,8 +295,19 @@ public:
     bool addRoot(const QString &folder);
     bool removeRoot(const QString &folder);
 
-    QVector<ModEntry> mods() const { return m_mods; }
+    // The scan's mods, with anything opened by path in front of them. One list,
+    // because a row is a row whichever way it got here.
+    QVector<ModEntry> mods() const;
     const ModEntry *mod(const QString &folder) const;
+
+    // A mod opened by path rather than found by the scan. Held apart from the
+    // scan so a rescan cannot drop the row the user is looking at, and written
+    // to the cache so it is still listed next launch. Returns the entry's
+    // folder, which is the key every other call here takes, or empty when the
+    // entry is not valid. Re-adding a path replaces what was there.
+    QString addOpened(const ModEntry &entry);
+    bool removeOpened(const QString &folder);
+    QVector<ModEntry> openedMods() const { return m_opened; }
 
     // Starts a scan on the worker thread and returns at once. Entries whose
     // folder and modified time match the cache are reused rather than re-read,
@@ -306,6 +350,7 @@ private slots:
 private:
     QStringList m_roots;
     QVector<ModEntry> m_mods;
+    QVector<ModEntry> m_opened;
     // A ScanThread, which is declared in the .cpp because nothing outside it
     // needs the type. Null whenever no scan is in flight.
     QThread *m_scan = nullptr;

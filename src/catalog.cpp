@@ -217,6 +217,17 @@ bool Catalog::isA(const QString &child, const QString &base) const
     return false;
 }
 
+bool Catalog::accessAllowed(const QString &owner, int flags,
+                            const QString &fromClass) const
+{
+    if (!(flags & flag::Protected)) return true;
+    // A global function has no owner and cannot carry access anyway, so an
+    // empty owner is a class the packed entry never named rather than a
+    // permission to call.
+    if (owner.isEmpty() || fromClass.isEmpty()) return false;
+    return isA(fromClass, owner);
+}
+
 Pin Catalog::makePin(const QString &id, const QString &label, PinDir dir,
                      const PinType &type) const
 {
@@ -628,7 +639,7 @@ void Catalog::buildSearchIndex()
     const auto push = [this](const QString &key, const QString &name,
                              const QString &title, const QString &sub,
                              const QString &sig, const QString &cat,
-                             const QString &guards) {
+                             const QString &guards, int flags = 0) {
         SearchRow row;
         row.key = key;
         row.name = name;
@@ -638,6 +649,7 @@ void Catalog::buildSearchIndex()
         row.sig = sig;
         row.cat = cat;
         row.guards = guards;
+        row.flags = flags;
         m_search.append(row);
     };
 
@@ -661,7 +673,7 @@ void Catalog::buildSearchIndex()
              isEvent ? QStringLiteral("Events")
                      : (m.flags & flag::Pure) ? QStringLiteral("Pure")
                                               : QStringLiteral("Functions"),
-             s(m.guards));
+             s(m.guards), m.flags);
     }
     for (int i = 0; i < m_globals.size(); ++i) {
         const Global &g = m_globals.at(i);
@@ -699,6 +711,8 @@ QVector<SearchHit> Catalog::search(const QString &query, const SearchOptions &op
     for (const SearchRow &e : m_search) {
         if (!allowed.isEmpty() && !allowed.contains(e.sub.toLower())) continue;
         if (!opts.category.isEmpty() && e.cat != opts.category) continue;
+        if (opts.respectAccess && !accessAllowed(e.sub, e.flags, opts.selfClass))
+            continue;
 
         if (q.isEmpty()) {
             out.append({e.key, e.title, e.sub, e.sig, e.cat, 0, e.guards});

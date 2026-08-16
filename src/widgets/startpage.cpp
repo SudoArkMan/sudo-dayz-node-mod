@@ -180,6 +180,17 @@ public:
         update();
     }
 
+    // The card's own height is measured from this, so the layout has to be told
+    // the answer has changed.
+    void setSummary(const QString &text)
+    {
+        if (m_summary == text) return;
+        m_summary = text;
+        setToolTip(m_summary);
+        updateGeometry();
+        update();
+    }
+
     // Measured at the card's own width once it has one. The narrow figure is
     // only for a card that has never been laid out.
     //
@@ -460,7 +471,7 @@ StartPage::StartPage(RecentProjects *recent, QWidget *parent)
     : QWidget(parent), m_recent(recent), m_lockup(nullptr), m_columns(nullptr),
       m_recentPanel(nullptr), m_list(nullptr), m_empty(nullptr),
       m_missingNote(nullptr), m_gallery(nullptr),
-      m_firstAction(nullptr), m_templates(startTemplates())
+      m_firstAction(nullptr), m_readModCard(nullptr), m_templates(startTemplates())
 {
     setObjectName(QStringLiteral("startPage"));
     // The lockup is drawn on the pack's own ground, so the page has to be that
@@ -623,7 +634,26 @@ QWidget *StartPage::buildStartPanel()
     connect(open, &QAbstractButton::clicked, this, &StartPage::browseRequested);
     body->addWidget(open);
 
+    // Last of the four, because it is the one that starts nothing. It is here at
+    // all because reading somebody else's mod is how most people learn this
+    // engine, and it used to be a dock tab nobody could find.
+    auto *readMod = new StartCard(
+        QStringLiteral("Read a mod"),
+        QStringLiteral("Any installed mod, or a .pbo from disk, as graphs to read."),
+        panel);
+    connect(readMod, &QAbstractButton::clicked, this, &StartPage::browseModsRequested);
+    body->addWidget(readMod);
+    m_readModCard = readMod;
+
     return panel;
+}
+
+void StartPage::setModLibraryLine(const QString &text)
+{
+    // static_cast rather than qobject_cast: StartCard is local to this file and
+    // declares no meta object of its own, so a qobject_cast would only ever be
+    // checking that this is a button.
+    if (m_readModCard) static_cast<StartCard *>(m_readModCard)->setSummary(text);
 }
 
 QWidget *StartPage::buildTemplatesPanel()

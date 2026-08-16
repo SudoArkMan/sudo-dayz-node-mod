@@ -59,6 +59,35 @@ int main(int argc, char *argv[])
           QStringLiteral("nothing dropped: %1 ranked vs %2 in the catalogue")
               .arg(item.size()).arg(rawCount));
 
+    // Access filtering must not touch this list. Every row here is declared on
+    // ItemBase or one of its ancestors, so a protected one among them is a hook
+    // ItemBase inherits and is legal to override; withholding it would take
+    // real work away from the user rather than prevent a compile error.
+    SearchOptions gated = opts;
+    gated.selfClass = QStringLiteral("ItemBase");
+    gated.respectAccess = true;
+    check(cat.search(QString(), gated).size() == rawCount,
+          QStringLiteral("an ItemBase graph is offered all %1 of its events")
+              .arg(rawCount));
+
+    // Point the same rows at a class that inherits none of them and the
+    // protected ones drop out, which is the half of the rule that stops
+    // `m_Timer.SetRunning(false)` being buildable.
+    SearchOptions foreign = gated;
+    foreign.selfClass = QStringLiteral("Mission");
+    const int foreignCount = cat.search(QString(), foreign).size();
+    int protectedRows = 0;
+    for (const SearchHit &h : cat.search(QString(), opts))
+        if (cat.method(h.key).flags & flag::Protected) protectedRows++;
+    out << "       ItemBase events: " << rawCount << ", protected among them "
+        << protectedRows << Qt::endl;
+    check(protectedRows > 0,
+          QStringLiteral("%1 of ItemBase's events are protected").arg(protectedRows));
+    check(foreignCount == rawCount - protectedRows,
+          QStringLiteral("a class that inherits none of them loses exactly those "
+                         "%1 (%2 left of %3)")
+              .arg(protectedRows).arg(foreignCount).arg(rawCount));
+
     // The names a mod actually starts from all have to be present.
     for (const QString &name : {QStringLiteral("EEInit"),
                                 QStringLiteral("EEDelete"),

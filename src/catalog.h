@@ -29,6 +29,16 @@ QColor cast();
 QColor comment();
 } // namespace accents
 
+// Method flags, packed into one int per entry in catalog.json.
+//
+// Access lives here too, and it decides whether a call compiles at all.
+// `Protected` is carried by every protected declaration the catalogue holds,
+// 2,204 of them, checked entry for entry against the dayz-script-api index.
+// There is no `Private` bit because a private method never reaches the
+// catalogue: all 344 callable ones are dropped where it is built, since a
+// `modded class` inherits rather than reopens and cannot see them either. So
+// everything in here is public or protected, and nothing else.
+// tools/catalog_access.mjs proves both after a rebuild.
 namespace flag {
 constexpr int Static = 1;
 constexpr int Proto = 2;
@@ -66,6 +76,15 @@ struct SearchOptions {
     int limit = 60;
     QString category; // filter to one category when set
     QString ofClass;  // restrict to members of this class and its ancestors
+    // The class the graph doing the calling compiles into, from selfClassOf().
+    QString selfClass;
+    // Withhold whatever `selfClass` could not legally call. Off by default on
+    // purpose: the importer and the generator resolve names through this same
+    // search while working inside the declaring class, where protected is
+    // legal, and hiding it from them would turn working code back into text.
+    // The palette is the one caller that wants it, because the palette is
+    // where a node gets picked up and dropped onto somebody else's object.
+    bool respectAccess = false;
 };
 
 // What a node does, for the inspector. `effects` is derived structurally from
@@ -113,6 +132,19 @@ public:
     // True when `child` is `base` or descends from it.
     bool isA(const QString &child, const QString &base) const;
 
+    // Whether code written inside `fromClass` may call a member declared on
+    // `owner` with `flags`. Public members answer true for anybody. A
+    // protected one answers true only from inside `owner` or a class that
+    // inherits it, which is what makes `m_Timer.SetRunning(false)` from a
+    // MissionServer a compile error and TimerBase's own use of it correct.
+    //
+    // An empty or unknown `fromClass` cannot be shown to inherit anything, so
+    // it answers false for protected. Callers that would rather stay quiet
+    // when nothing can be proved have to check the class themselves; the
+    // palette prefers the strict reading, because a node it never offered is
+    // a compile error that never happened.
+    bool accessAllowed(const QString &owner, int flags, const QString &fromClass) const;
+
     // Lazily built NodeDef for a catalogue key. Invalid def when unknown.
     NodeDef defFor(const QString &key) const;
 
@@ -148,6 +180,7 @@ private:
     struct Const { int name = 0, type = 0, value = 0, file = 0, line = 0; };
     struct SearchRow {
         QString key, name, hay, title, sub, sig, cat, guards;
+        int flags = 0; // as packed in the catalogue, for the access check
     };
 
     QString s(int id) const { return id >= 0 && id < m_strings.size()

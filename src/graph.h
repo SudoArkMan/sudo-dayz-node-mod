@@ -205,6 +205,17 @@ bool isBlankLine(const QString &line);
 
 } // namespace nodefmt
 
+// The class this graph's code really is, as far as the catalogue is concerned:
+// a modded script reopens an existing class, a plain one only has its base.
+// Every ancestry question hangs off it, so it is answered in one place rather
+// than re-derived by the generator, the analyser and the palette separately.
+//
+// Empty when the script is its own root, and a name the catalogue has never
+// heard of when the base is another script in this project. Both mean "nothing
+// can be proved about the ancestry", and a caller has to decide for itself
+// which way to fail.
+QString selfClassOf(const Graph &g);
+
 QString nextId(const QString &prefix = QStringLiteral("n"));
 // An id nothing in `g` is already using. Worth preferring whenever nodes are
 // inserted into a graph that came off disk, because the counter behind nextId

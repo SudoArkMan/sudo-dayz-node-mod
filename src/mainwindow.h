@@ -74,6 +74,15 @@ public slots:
     void newMod();
     // Points an existing project at a mod folder it was not scaffolded with.
     void setModFolder();
+    // The Mod Browser, in front and holding the keyboard. Both of these end in
+    // the same panel: the first asks for a path on disk, the second opens the
+    // library of what is installed. They raise the dock rather than toggling it,
+    // because a menu entry that hides the panel when it is already showing is a
+    // menu entry that appears to do nothing.
+    void browseInstalledMods();
+    void openModFromDisk();
+    // Puts what the mod library has found on the start page's Read a mod card.
+    void updateModLibraryLine();
     void exportScripts();
     // Writes the active script back to the .c it was imported from, asking for
     // a file only when it never came from one.
@@ -187,10 +196,10 @@ private:
     // Splits the dock columns over the window's real height. Called on the
     // first show and never again, so a layout the user has dragged stays theirs.
     void applyDockSizes();
-    // The left column's three slices. Split out because the share the browser
-    // needs depends on whether it is the tab in front, which changes after the
-    // one-time sizing above has run.
-    void applyLeftColumnSizes();
+    // The height of the bottom row. Split out because the share it needs depends
+    // on whether the Mod Browser is the tab in front, which changes long after
+    // the one-time sizing above has run.
+    void applyBottomRowSize();
     // Opens the Mod Browser on the mod named by SUDO_UI_BROWSE and hands its
     // first class to the canvas, waiting out the scan and the import. For the
     // headless UI check only: with the variable unset, which is every normal

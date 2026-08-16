@@ -38,9 +38,11 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include <QThread>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -421,6 +423,213 @@ static void testBrowsedGraphNeverExported(const Catalog &cat, const Builtins &bu
     check(exportPlan(reloaded, exportRoot, &heldAgain).size() == 1
               && heldAgain.size() == 1,
           QStringLiteral("and is still left out of an export after the round trip"));
+
+    // Every other door into a graph, asked the same question. Opening a mod is
+    // no longer only "pick a row in the scan": a loose .pbo, a mod folder
+    // nobody scanned and a tree somebody has already unpacked are three more
+    // ways in, and a door that skipped markGraphReadOnly would put another
+    // author's class in the user's export without anything here noticing.
+    const QString unpacked = QDir(temp.path()).filePath(QStringLiteral("UnpackedMod"));
+    QDir().mkpath(unpacked + QStringLiteral("/Scripts/4_World"));
+    {
+        QFile f(unpacked + QStringLiteral("/Scripts/4_World/player.c"));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) f.write(kPlayerScript);
+    }
+
+    struct Door {
+        QString what;
+        QString path;
+    };
+    const QVector<Door> doors{
+        {QStringLiteral("a loose pbo"),
+         QDir(modFolder).filePath(QStringLiteral("Addons/SudoTest_Scripts.pbo"))},
+        {QStringLiteral("a mod folder pointed at by hand"), modFolder},
+        {QStringLiteral("an unpacked script tree"), unpacked},
+    };
+
+    for (const Door &door : doors) {
+        QString why;
+        const ModEntry entry = readModPath(door.path, &why);
+        check(entry.isValid(), QStringLiteral("%1 reads as a mod (%2)").arg(door.what, why));
+        if (!entry.isValid()) continue;
+
+        Project blankAgain;
+        const ModOpenResult through = openMod(entry, cat, builtins, blankAgain);
+        check(through.ok && !through.classes.isEmpty(),
+              QStringLiteral("%1 opens and gives up a class (%2)")
+                  .arg(door.what, through.error));
+
+        // Appended the way the window appends what the browser emits, and with
+        // a sourcePath on it, which is the shape that would slip past a rule
+        // written on "did this come from a file" instead of on the mark.
+        Project host;
+        for (const ModClassView &view : through.classes) {
+            ScriptEntry script;
+            script.id = QStringLiteral("s%1").arg(host.scripts.size() + 1);
+            script.name = view.className;
+            script.folder = QStringLiteral("4_World");
+            script.graph = view.graph;
+            script.sourcePath =
+                QDir(modFolder).filePath(QStringLiteral("Scripts/4_World/player.c"));
+            host.scripts.append(script);
+        }
+
+        int writable = 0;
+        for (const ScriptEntry &script : host.scripts)
+            if (scriptIsWritable(script)) writable++;
+        check(writable == 0,
+              QStringLiteral("nothing %1 produced may be written (%2 could)")
+                  .arg(door.what).arg(writable));
+
+        QVector<const ScriptEntry *> back;
+        const QVector<ExportTarget> nothing =
+            exportPlan(host, exportRoot, &back);
+        check(nothing.isEmpty() && back.size() == host.scripts.size(),
+              QStringLiteral("an export through %1 plans no file and holds all %2 back")
+                  .arg(door.what).arg(host.scripts.size()));
+
+        // And nothing of theirs is on disk under any name, which is the check
+        // the plan is only a proxy for.
+        int leaked = 0;
+        QDirIterator sweep(exportRoot, QDir::Files | QDir::NoDotAndDotDot,
+                           QDirIterator::Subdirectories);
+        while (sweep.hasNext()) {
+            sweep.next();
+            QFile f(sweep.filePath());
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            if (QString::fromUtf8(f.readAll()).contains(QLatin1String("EEKilled")))
+                leaked++;
+        }
+        check(leaked == 0,
+              QStringLiteral("and no file in the export holds their code after %1 (%2 did)")
+                  .arg(door.what).arg(leaked));
+    }
+
+    check(folderPrint(modFolder) == modBefore,
+          QStringLiteral("the mod is still byte for byte as it was after all of them"));
+}
+
+// ------------------------------------------------- opening a path from disk
+//
+// Three new ways into a graph: a loose .pbo, a mod folder nobody scanned, and a
+// tree somebody has already unpacked. Every one of them has to arrive marked
+// read only, because the mark is the whole of the rule: `scriptIsWritable` asks
+// it, the export plan asks that, and a graph that reached the project without
+// it would be written into the user's mod as if it were theirs.
+static void testOpenPathsAreReadOnly(const Catalog &cat, const Builtins &builtins)
+{
+    line(QString());
+    line(QStringLiteral("Opening a path from disk"));
+
+    QTemporaryDir temp;
+    if (!temp.isValid()) {
+        check(false, QStringLiteral("a temporary folder for the fixture"));
+        return;
+    }
+    const QString modFolder = QDir(temp.path()).filePath(QStringLiteral("@SudoTestMod"));
+    if (!buildFixtureMod(modFolder)) {
+        check(false, QStringLiteral("the fixture mod is written"));
+        return;
+    }
+    const QString pboPath =
+        QDir(modFolder).filePath(QStringLiteral("Addons/SudoTest_Scripts.pbo"));
+
+    // A folder holding mods reads as a root rather than as one mod, or pointing
+    // at !Workshop would open 266 mods glued into one.
+    check(classifyModPath(temp.path()) == ModPathKind::ModRoot,
+          QStringLiteral("a folder of mods is a folder to scan"));
+    check(classifyModPath(modFolder) == ModPathKind::ModFolder,
+          QStringLiteral("the mod inside it is a mod"));
+    check(classifyModPath(pboPath) == ModPathKind::Pbo,
+          QStringLiteral("and its archive is a pbo"));
+    check(classifyModPath(QDir(temp.path()).filePath(QStringLiteral("nowhere")))
+              == ModPathKind::None,
+          QStringLiteral("a path that is not there is nothing"));
+
+    // Read into locals first: check() takes both the answer and the line about
+    // it, and the order its two arguments are evaluated in is the compiler's to
+    // pick, so a message built from `error` in the call would print the value
+    // from before the call that sets it.
+    QString error;
+    const bool rootRefused = !readModPath(temp.path(), &error).isValid();
+    check(rootRefused && !error.isEmpty(),
+          QStringLiteral("a root refuses to open as one mod, with a reason (\"%1\")")
+              .arg(error));
+
+    // An unpacked tree: the same two scripts, on disk, with no archive at all.
+    const QString unpacked = QDir(temp.path()).filePath(QStringLiteral("UnpackedMod"));
+    QDir().mkpath(unpacked + QStringLiteral("/Scripts/4_World"));
+    {
+        QFile f(unpacked + QStringLiteral("/Scripts/4_World/player.c"));
+        check(f.open(QIODevice::WriteOnly | QIODevice::Text),
+              QStringLiteral("an unpacked script is written"));
+        f.write(kPlayerScript);
+    }
+    check(classifyModPath(unpacked) == ModPathKind::ScriptFolder,
+          QStringLiteral("a folder of .c files is an unpacked mod"));
+
+    struct Way {
+        QString what;
+        QString path;
+    };
+    const QVector<Way> ways{
+        {QStringLiteral("a loose pbo"), pboPath},
+        {QStringLiteral("a mod folder"), modFolder},
+        {QStringLiteral("an unpacked tree"), unpacked},
+    };
+
+    const QStringList modBefore = folderPrint(modFolder);
+    const QStringList unpackedBefore = folderPrint(unpacked);
+
+    for (const Way &way : ways) {
+        QString why;
+        const ModEntry entry = readModPath(way.path, &why);
+        check(entry.isValid(), QStringLiteral("%1 reads as a mod (%2)").arg(way.what, why));
+        if (!entry.isValid()) continue;
+        check(entry.hasScripts(),
+              QStringLiteral("%1 is seen to ship script").arg(way.what));
+
+        Project project;
+        const ModOpenResult opened = openMod(entry, cat, builtins, project);
+        check(opened.ok, QStringLiteral("%1 opens (%2)").arg(way.what, opened.error));
+        check(!opened.classes.isEmpty(),
+              QStringLiteral("%1 gives up at least one class").arg(way.what));
+
+        int marked = 0, unmarked = 0;
+        for (const ModClassView &view : opened.classes) {
+            if (graphIsReadOnly(view.graph)) marked++;
+            else unmarked++;
+        }
+        check(unmarked == 0,
+              QStringLiteral("every graph out of %1 is marked read only (%2 were not)")
+                  .arg(way.what).arg(unmarked));
+        check(marked > 0,
+              QStringLiteral("and %1 had one to mark").arg(way.what));
+        for (const ModClassView &view : opened.classes)
+            check(!graphOrigin(view.graph).isEmpty(),
+                  QStringLiteral("%1 says where %2 came from (\"%3\")")
+                      .arg(way.what, view.className, graphOrigin(view.graph)));
+    }
+
+    check(folderPrint(modFolder) == modBefore,
+          QStringLiteral("the mod folder is byte for byte as it was"));
+    check(folderPrint(unpacked) == unpackedBefore,
+          QStringLiteral("and so is the unpacked tree, which is read where it lies"));
+
+    // The library has to keep an opened path across a rescan, or the row the
+    // user is looking at vanishes under them the moment the scan comes back.
+    ModLibrary library;
+    library.setRoots({});
+    const ModEntry loose = readModPath(pboPath);
+    const QString key = library.addOpened(loose);
+    check(!key.isEmpty(), QStringLiteral("a loose pbo joins the library"));
+    check(library.mod(key) != nullptr, QStringLiteral("and is found by its key"));
+    check(library.mods().size() == 1, QStringLiteral("and shows up as a row"));
+    library.addOpened(loose);
+    check(library.mods().size() == 1,
+          QStringLiteral("adding it twice is still one row (%1)").arg(library.mods().size()));
+    check(library.removeOpened(key) && library.mods().isEmpty(),
+          QStringLiteral("and it can be dropped again"));
 }
 
 static void testCacheRoundTrip()
@@ -678,6 +887,30 @@ static void shootPanel(QApplication &app, Document *doc, const QString &path)
 
     line(panel->grab().save(path) ? QStringLiteral("  wrote %1").arg(path)
                                   : QStringLiteral("  could not write %1").arg(path));
+
+    // The Open dialog, which is the way in for a mod that is not installed and
+    // is the one piece of this panel with no row of its own to look at. exec()
+    // blocks, so the picture is taken from a timer inside it and the dialog is
+    // closed from there too, which is also the cancel path.
+    QString dialogShot = path;
+    dialogShot.replace(QRegularExpression(QStringLiteral("\\.png$"),
+                                          QRegularExpression::CaseInsensitiveOption),
+                       QString());
+    dialogShot += QStringLiteral("-open.png");
+    QTimer::singleShot(600, [dialogShot]() {
+        QWidget *dialog = QApplication::activeModalWidget();
+        if (!dialog) {
+            line(QStringLiteral("  no Open dialog came up"));
+            return;
+        }
+        line(dialog->grab().save(dialogShot)
+                 ? QStringLiteral("  wrote %1").arg(dialogShot)
+                 : QStringLiteral("  could not write %1").arg(dialogShot));
+        dialog->close();
+    });
+    check(!panel->openFromDisk(),
+          QStringLiteral("a cancelled Open dialog opens nothing"));
+
     delete panel;
 }
 
@@ -719,6 +952,7 @@ int main(int argc, char *argv[])
 
     testSyntheticMod(cat, builtins);
     testBrowsedGraphNeverExported(cat, builtins);
+    testOpenPathsAreReadOnly(cat, builtins);
     testCacheRoundTrip();
     testInstalledCorpus(cat, builtins, sampleTarget);
 

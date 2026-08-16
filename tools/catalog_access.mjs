@@ -1,0 +1,137 @@
+// Proves resources/catalog.json still records who may call what.
+//
+//   node tools/catalog_access.mjs [catalog.json] [api-index.json]
+//
+// Run it after every DayZ update, next to whatever rebuilds the catalogue.
+// Exit code 0 means the access flag is complete; anything else names the
+// entries that lost it.
+//
+// ---------------------------------------------------------------- why it exists
+//
+// A node the palette offers has to generate code that compiles. 2,682 of the
+// 29,854 methods in the vanilla tree (9.0%) are protected or private and cannot
+// be called from another class, and the graph has no other way to find that out:
+// resources/catalog.json is a packed file with no signatures in it, only ints.
+// The flag is there today and it is right, but nothing was checking, so a
+// rebuild that dropped it would put `m_Timer.SetRunning(false)` back in the
+// palette with nothing to say so.
+//
+// ------------------------------------------------- how the catalogue is derived
+//
+// resources/catalog.json is generated from the dayz-script-api index at
+// reference/api-index.json, which is itself built from P:\scripts. No generator
+// script was ever committed, so the rules below were recovered by joining the
+// two files and are stated here because the next rebuild needs them.
+//
+// Methods, from every class in every file, in file order:
+//   dropped   destructors (406), and everything declared `private` (459, of
+//             which 344 are callable names rather than a member declaration
+//             the index misread). A `modded class` inherits rather than
+//             reopens, so a private member of the base is out of its reach too,
+//             and an entry nobody can call is not a node.
+//   deduped   on owner + name + parameter COUNT, first declaration wins. Real
+//             overloads with different arities are kept apart; two declarations
+//             taking the same number of arguments collapse into one, which
+//             costs 54 entries.
+//   flags     1 static, 2 proto, 4 native, 8 override, 64 protected: each one
+//             taken straight off the declaration's modifiers.
+//             128 ctor: the method's name is its class's name.
+//             16 pure: a non-void return, no out or inout parameter, and a name
+//             starting Get/Is/Has/Can/To/From/Count/Find/Contains/Should/
+//             Compute/Calculate.
+//             32 event: not pure, not an override, not a constructor, and the
+//             name is declared `override` somewhere in the tree. That last test
+//             is name-global with no ancestry check, which is why Timer::Run is
+//             an event: six Workbench plugins declare `override void Run()`.
+//
+// What the catalogue does not carry at all: the 12,732 class fields, 242
+// typedefs, 22 global variables, class-level `sealed`, and the `Obsolete`
+// attribute.
+import fs from 'node:fs';
+
+const catalogPath = process.argv[2] || 'resources/catalog.json';
+const indexPath = process.argv[3]
+  || 'C:/Users/dilla/.claude/skills/dayz-script-api/reference/api-index.json';
+
+const PROTECTED = 64;
+
+let failures = 0;
+const check = (ok, what) => {
+  console.log(`  ${ok ? 'ok  ' : 'FAIL'}   ${what}`);
+  if (!ok) failures++;
+};
+
+const bytes = fs.statSync(catalogPath).size;
+const cat = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
+const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+const S = cat.strings;
+
+console.log(`catalogue ${catalogPath}`);
+console.log(`  ${(bytes / 1024 / 1024).toFixed(3)} MB, ${cat.methods.length} methods,`
+  + ` ${cat.classes.length} classes, source ${cat.source}`);
+
+// Every catalogue entry, keyed the way the index spells it.
+const inCatalog = new Map();
+for (let i = 0; i < cat.methods.length; i++) {
+  const m = cat.methods[i];
+  inCatalog.set(`${S[cat.classes[m[0]][0]]}::${S[m[1]]}@${m[5]}`, { key: `m${i}`, flags: m[4] });
+}
+
+let protectedKept = 0, protectedFlagged = 0, privateLeaked = 0, privateCallable = 0;
+let publicMisflagged = 0, arityCollapsed = 0;
+const lostFlag = [], leaked = [];
+const seenArity = new Set();
+
+for (const f of idx.files) for (const c of f.classes || []) for (const m of c.methods || []) {
+  const mods = m.modifiers || [];
+  if (m.name.startsWith('~')) continue;
+
+  const callableName = /^[A-Za-z_]\w*$/.test(m.name);
+  if (mods.includes('private')) {
+    if (callableName) privateCallable++;
+    if (inCatalog.has(`${c.name}::${m.name}@${m.line}`)) {
+      privateLeaked++;
+      if (leaked.length < 10) leaked.push(`${c.name}::${m.name} (${f.path}:${m.line})`);
+    }
+    continue;
+  }
+
+  const shape = `${c.name}::${m.name}/${(m.params || []).length}`;
+  if (seenArity.has(shape)) { arityCollapsed++; continue; }
+  seenArity.add(shape);
+
+  const entry = inCatalog.get(`${c.name}::${m.name}@${m.line}`);
+  if (!entry) continue;
+  if (mods.includes('protected')) {
+    protectedKept++;
+    if (entry.flags & PROTECTED) protectedFlagged++;
+    else if (lostFlag.length < 10) lostFlag.push(`${c.name}::${m.name} (${f.path}:${m.line})`);
+  } else if (entry.flags & PROTECTED) {
+    publicMisflagged++;
+  }
+}
+
+console.log('access');
+check(protectedFlagged === protectedKept,
+  `every protected method carries the flag (${protectedFlagged} of ${protectedKept})`);
+if (lostFlag.length) console.log('         lost it: ' + lostFlag.join(', '));
+check(publicMisflagged === 0,
+  `no public method is flagged protected (${publicMisflagged} are)`);
+check(privateLeaked === 0,
+  `no private method reaches the catalogue (${privateCallable} callable ones dropped,`
+  + ` ${privateLeaked} leaked)`);
+if (leaked.length) console.log('         leaked: ' + leaked.join(', '));
+console.log(`         ${arityCollapsed} declarations collapsed by the arity dedupe`);
+
+// Owners have to be resolvable, or accessAllowed() cannot answer for them.
+const classNames = new Set(cat.classes.map(c => S[c[0]]));
+let ownerless = 0;
+for (const m of cat.methods) {
+  if (!(m[4] & PROTECTED)) continue;
+  if (!classNames.has(S[cat.classes[m[0]][0]])) ownerless++;
+}
+check(ownerless === 0,
+  `every protected entry names a class the catalogue holds (${ownerless} do not)`);
+
+console.log(failures === 0 ? '\nACCESS OK' : `\n${failures} FAILURES`);
+process.exit(failures === 0 ? 0 : 1);

@@ -331,16 +331,6 @@ QString defaultForType(const Ctx &ctx, const QString &type)
     return defaultLiteral(pinTypeOf(type, isEnumOf(ctx)));
 }
 
-// The class the generated script is, as far as the catalogue is concerned. A
-// modded class reopens an existing one; a plain class only has its base. Empty
-// when the script is its own root, and unknown to the catalogue when the base
-// is another script in this project. In both of those cases nothing can be
-// proved about the ancestry, so callers must treat it as "cannot tell".
-QString effectiveClassOf(const Graph &g)
-{
-    return g.modded ? g.className : g.baseClass;
-}
-
 bool selfKnown(const Ctx &ctx)
 {
     return !ctx.self.isEmpty() && ctx.cat->classId(ctx.self) >= 0;
@@ -1547,7 +1537,7 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     ctx.builtins = &builtins;
     ctx.graph = &graph;
     ctx.project = &project;
-    ctx.self = effectiveClassOf(graph);
+    ctx.self = selfClassOf(graph);
 
     // One entry per generated method, each carrying its own line ownership.
     QVector<Emitted> bodies;

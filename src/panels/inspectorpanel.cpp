@@ -16,6 +16,7 @@
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QLabel>
+#include <QCompleter>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -437,9 +438,46 @@ InspectorPanel::InspectorPanel(Document *doc, QWidget *parent)
     superBox->setVisible(false);
     layout->addWidget(superBox);
 
+    auto *classBox = new QWidget(this);
+    auto *classLayout = new QVBoxLayout(classBox);
+    classLayout->setContentsMargins(0, 6, 0, 0);
+    classLayout->setSpacing(3);
+    auto *classLabel = new QLabel(tr("Which class?"), classBox);
+    classLabel->setFont(theme::uiFont(8, true));
+    classLayout->addWidget(classLabel);
+    m_classPick = new QComboBox(classBox);
+    // Editable, because the catalogue only knows vanilla: a class from the
+    // user's own mod or from a framework has to be typeable.
+    m_classPick->setEditable(true);
+    m_classPick->setInsertPolicy(QComboBox::NoInsert);
+    if (QCompleter *done = m_classPick->completer()) {
+        done->setCaseSensitivity(Qt::CaseInsensitive);
+        // 6,108 classes, so the useful match is usually in the middle of the
+        // name rather than at the front.
+        done->setFilterMode(Qt::MatchContains);
+        done->setCompletionMode(QCompleter::PopupCompletion);
+    }
+    classLayout->addWidget(m_classPick);
+    auto *classNote = new QLabel(
+        tr("The class this node creates. Not for entities: anything under Object "
+           "needs Spawn Entity."),
+        classBox);
+    classNote->setObjectName(QStringLiteral("note"));
+    classNote->setWordWrap(true);
+    classNote->setStyleSheet(QStringLiteral("color: %1").arg(theme::textDim().name()));
+    classLayout->addWidget(classNote);
+    classBox->setVisible(false);
+    layout->addWidget(classBox);
+
     connect(m_beginMode, &QComboBox::currentIndexChanged,
             this, &InspectorPanel::onBeginModeChanged);
     connect(m_callSuper, &QCheckBox::toggled, this, &InspectorPanel::onSuperToggled);
+    // activated fires on a pick, editingFinished on a typed name plus Enter or
+    // focus leaving. currentIndexChanged would also fire while the box is being
+    // refilled from the graph.
+    connect(m_classPick, &QComboBox::activated, this, &InspectorPanel::onClassCommitted);
+    if (QLineEdit *edit = m_classPick->lineEdit())
+        connect(edit, &QLineEdit::editingFinished, this, &InspectorPanel::onClassCommitted);
 
     if (m_doc) {
         connect(m_doc, &Document::selectionChanged,
@@ -769,6 +807,26 @@ void InspectorPanel::refresh()
         }
     }
 
+    QWidget *classBox = optionBox(m_classPick);
+    // The id is spelled out rather than taken from builtins.cpp, which keeps it
+    // file local. bi::Cast is exported; its twin is not.
+    const bool takesClass = node->ref == bi::Cast
+                            || node->ref == QLatin1String("bi.new");
+    if (classBox) classBox->setVisible(takesClass);
+    if (!takesClass) {
+        m_classNodeId.clear();
+    } else if (!isBusy(m_classPick)) {
+        const QSignalBlocker blocker(m_classPick);
+        if (!m_classesLoaded && m_doc) {
+            // Once per session: six thousand rows is cheap to hold and slow to
+            // rebuild on every selection change.
+            m_classPick->addItems(m_doc->catalog().classNames());
+            m_classesLoaded = true;
+        }
+        m_classPick->setCurrentText(bi::castClass(*node));
+        m_classNodeId = node->id;
+    }
+
     QWidget *superBox = optionBox(m_callSuper);
     // Begin and End are Builtin-kind, not Event-kind, but codegen and analysis
     // both honour noSuper on them, so gating on kind alone left the flag set
@@ -798,6 +856,7 @@ void InspectorPanel::showEmpty()
         box->setVisible(false);
     if (QWidget *box = optionBox(m_beginMode)) box->setVisible(false);
     if (QWidget *box = optionBox(m_callSuper)) box->setVisible(false);
+    if (QWidget *box = optionBox(m_classPick)) box->setVisible(false);
 }
 
 void InspectorPanel::showVariable(const QString &variableId)
@@ -839,6 +898,7 @@ void InspectorPanel::setVariableMode(bool on)
         box->setVisible(false);
     if (QWidget *box = optionBox(m_beginMode)) box->setVisible(false);
     if (QWidget *box = optionBox(m_callSuper)) box->setVisible(false);
+    if (QWidget *box = optionBox(m_classPick)) box->setVisible(false);
 }
 
 void InspectorPanel::fillVariable(const GraphVariable &var)
@@ -1103,6 +1163,31 @@ void InspectorPanel::onBeginModeChanged(int index)
     m_doc->beginEdit(tr("Change lifecycle moment"));
     if (GraphNode *live = m_doc->activeGraph()->node(m_nodeId))
         live->opts.insert(QStringLiteral("when"), key);
+    m_doc->commitEdit();
+}
+
+void InspectorPanel::onClassCommitted()
+{
+    // The box has to still be showing the node it is about to write to.
+    if (m_nodeId.isEmpty() || m_classNodeId != m_nodeId) return;
+    if (!m_doc || !m_doc->activeGraph()) return;
+    const GraphNode *node = m_doc->activeGraph()->node(m_nodeId);
+    if (!node) return;
+
+    const QString cls = m_classPick->currentText().trimmed();
+    if (bi::castClass(*node) == cls) return;
+
+    // The class decides the node's title, the type on its object pin and the
+    // type written into the file, so it is a graph edit and belongs on the undo
+    // stack. Written as `cls`, the spelling castClass reads first.
+    m_doc->beginEdit(tr("Change class"));
+    if (GraphNode *live = m_doc->activeGraph()->node(m_nodeId)) {
+        if (cls.isEmpty()) live->opts.remove(QStringLiteral("cls"));
+        else live->opts.insert(QStringLiteral("cls"), cls);
+        // Both spellings reached the file format and castClass falls back to
+        // the older one, so leaving it behind would quietly win.
+        live->opts.remove(QStringLiteral("class"));
+    }
     m_doc->commitEdit();
 }
 

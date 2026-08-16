@@ -175,6 +175,11 @@ QString nodefmt::withEol(const QString &text, const QString &eol)
     return out;
 }
 
+QString selfClassOf(const Graph &g)
+{
+    return g.modded ? g.className : g.baseClass;
+}
+
 QString nextId(const QString &prefix)
 {
     // The counter alone keeps ids apart inside one run, but it restarts at zero
