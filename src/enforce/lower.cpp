@@ -3049,18 +3049,12 @@ bool explodeRawNode(Graph &graph, const QString &nodeId, const Catalog &cat,
                            ownBefore + n->opts.value(nodefmt::keyBefore()));
     }
 
-    // A raw node holds the bytes the file was written with, carriage returns
-    // and all, and it writes them straight back out. The nodes replacing it
-    // write headers, braces and blank lines that have no source line to read an
-    // ending from, so the ending goes on the node that owns the method, exactly
-    // as the importer puts it there. A method that already carries one is left
-    // alone: the comparison below is what decides whether either answer is
-    // right, and overwriting it would reformat the statements around this one.
-    if (!entryId.isEmpty() && nodefmt::eolOf(code) == QLatin1String("\r\n")) {
-        if (GraphNode *n = graph.node(entryId))
-            if (!n->opts.contains(nodefmt::keyEol()))
-                n->opts.insert(nodefmt::keyEol(), QStringLiteral("\r\n"));
-    }
+    // Line endings need no answer here. A raw node built by the importer holds
+    // bare newlines, because the file's ending was taken off once on the way in
+    // and goes back on once on the way out, so what this writes lands in the
+    // same file the raw node's text would have. A raw node holding carriage
+    // returns from somewhere else is a block the gate below turns down, which
+    // is the right outcome: those bytes belong to no file this graph knows.
 
     // The gate. Nothing above here is allowed to stand unless the file the
     // graph now generates is the file it generated a moment ago, character for

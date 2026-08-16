@@ -34,8 +34,16 @@ struct ImportResult {
     QVector<ImportedScript> scripts;
     QStringList notes;
     // Text outside any class (a global function, an enum, a #define). Kept so
-    // exporting the file back does not drop it.
+    // exporting the file back does not drop it, and held with bare newlines the
+    // way every other string here is. A caller that stitches it in front of the
+    // generated class writes the file itself, so it is that caller's job to put
+    // `eol` back over what it assembled.
     QString preamble;
+    // The ending the file was written with: "\r\n", "\n", or empty when the
+    // file used both. Every graph above carries the same value; it is repeated
+    // here for a caller that has to write a file the graphs do not cover on
+    // their own, and because a file holding no class still has an answer.
+    QString eol = QStringLiteral("\n");
 
     int totalLowered() const;
     int totalStatements() const;

@@ -34,10 +34,6 @@ const QChar Tab = QLatin1Char('\t');
 struct BodyStyle {
     QString base = QStringLiteral("\t\t");
     QString unit = QStringLiteral("\t");
-    // The ending the author's own lines carry. The generator invents headers,
-    // braces and blank lines that have no source line behind them, so without
-    // this a body read out of a CRLF file comes back with both kinds in it.
-    bool crlf = false;
 };
 
 // Generated statements plus the node behind each one.
@@ -88,27 +84,6 @@ void flatten(Emitted &e)
         for (const QString &part : line.split(QLatin1Char('\n'))) out.add(part, e.owners.at(i));
     }
     e = out;
-}
-
-// The ending the author's own lines already carry, put on the lines the
-// generator invented for itself. A line that ends with a carriage return came
-// out of the source with one and is left alone, and nothing is ever taken off:
-// a body whose two endings disagree comes back as mixed as it went in, and the
-// comparison the caller runs against the source is what turns it down.
-//
-// Called on a method body only, since the class header and the braces around a
-// method are the file's own. The last line is left alone for the same reason:
-// what ends it is the line after it, which is the brace this method closes
-// with, and nothing inside the body says how that line was written. A body
-// whose source did end its last line with a carriage return carries it already,
-// because the run between the last statement and the closing brace is read back
-// as that statement's trailing text.
-void applyEol(Emitted &e, const BodyStyle &style)
-{
-    if (!style.crlf) return;
-    flatten(e);
-    for (int i = 0; i + 1 < e.lines.size(); ++i)
-        if (!e.lines.at(i).endsWith(QLatin1Char('\r'))) e.lines[i] += QLatin1Char('\r');
 }
 
 // Recursion and size limits. A graph is user data, so every walk over it has to
@@ -226,9 +201,6 @@ BodyStyle styleOf(Ctx &ctx, const GraphNode *n)
     // not a body anyone can read once they start editing it.
     const QString unit = n->opts.value(nodefmt::keyUnit());
     if (!unit.isEmpty() && layoutOk(ctx, *n, nodefmt::keyUnit(), unit)) s.unit = unit;
-    const QString eol = n->opts.value(nodefmt::keyEol());
-    if (!eol.isEmpty() && layoutOk(ctx, *n, nodefmt::keyEol(), eol))
-        s.crlf = eol == QLatin1String("\r\n");
     return s;
 }
 
@@ -1696,9 +1668,6 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
             Emitted ctorPart;
             ctorPart.add(body);
             ctorPart.add(endLines);
-            // The style belongs to this node, and the constructor it merges into
-            // is assembled after the loop has moved on to another one.
-            applyEol(ctorPart, ctx.style);
             ctorFromGraph.add(ctorPart);
             continue;
         }
@@ -1804,7 +1773,6 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         // between two newlines, which is a blank line inside the braces. Keeping
         // that line keeps the generated text identical.
         if (lines.isEmpty()) lines.add(QString(), ev->id);
-        applyEol(lines, ctx.style);
 
         Emitted block;
         block.add(ind(1) + (isOverride ? QStringLiteral("override ") : QString()) + sigRet
@@ -1885,7 +1853,6 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
             inner.add(body);
         if (entry)
             for (const QString &l : triviaFor(ctx, *entry, nodefmt::keyEnd(), 2)) inner.add(l);
-        applyEol(inner, ctx.style);
 
         Emitted block;
         block.add(ind(1) + head, owner);
@@ -2034,7 +2001,16 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     flatten(file);
 
     GenResult result;
-    result.code = file.lines.join(QLatin1Char('\n'));
+    // Every stage above works in bare newlines, including the text the importer
+    // sliced out of the source, and the file's own ending goes on once here.
+    // Doing it at the end rather than per method is what covers the class
+    // header, the members, the signatures, the braces and the preserved region:
+    // none of those comes from a method, and a file that restored only its
+    // method bodies would come back holding both kinds.
+    //
+    // Splitting on the newline still yields one entry per line of `code`, so
+    // lineOwners stays indexed the way it says it is.
+    result.code = nodefmt::withEol(file.lines.join(QLatin1Char('\n')), graph.eol);
     result.lineOwners = file.owners;
     result.warnings = ctx.warnings;
     return result;

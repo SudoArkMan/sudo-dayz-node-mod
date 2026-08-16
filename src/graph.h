@@ -110,6 +110,15 @@ struct Graph {
     QString baseClass = QStringLiteral("ItemBase");
     bool modded = false;
     QString module = QStringLiteral("4_World"); // 3_Game | 4_World | 5_Mission
+    // The line ending the file this graph was read from was written with, put
+    // back on the whole file where the generated text is produced. A graph that
+    // came from no file at all carries the default.
+    //
+    // Empty means the source file used both endings. No single answer puts such
+    // a file back as it was, so nothing is restored and it is written with bare
+    // newlines, which is one of the two endings it already held; the importer
+    // says so in its notes rather than letting the user find out from the diff.
+    QString eol = QStringLiteral("\n");
     QVector<GraphNode> nodes;
     QVector<GraphEdge> edges;
     QVector<GraphVariable> variables;
@@ -133,7 +142,6 @@ struct Graph {
 // Keys, on the node that owns the line or the block:
 //   fmt.base        what sits in front of a statement at the top of the body
 //   fmt.unit        what one more level of nesting adds
-//   fmt.eol         the line ending the body was written with
 //   trivia.before   the blank lines and comments above this node's first line
 //   trivia.trailing what follows that line, on the same line
 //   trivia.end      the same, above the brace that closes this node's block
@@ -142,42 +150,31 @@ namespace nodefmt {
 
 QString keyBase();
 QString keyUnit();
-// 385 of 512 extracted mod scripts and every vanilla file are written with
-// CRLF, and the generator invents headers, braces and blank lines that have no
-// source line to read an ending from. Without this the body comes back with two
-// kinds of ending in it. Only "\n" and "\r\n" are line endings; anything else
-// stored here is ignored, and absent means "\n".
-//
-// Two limits, both measured rather than reasoned about, because the comment
-// above reads as a wider promise than the code keeps:
-//
-//   Only "convert to nodes" ever writes this, off the bytes a raw node holds.
-//   The importer cannot: importEnforceText removes every carriage return from
-//   the file before anything else reads it, so a body arrives there with LF
-//   endings whatever the file on disk uses. Over 400 vanilla files, 399 of them
-//   CRLF, and 1491 extracted mod scripts, 1015 of them CRLF, no node the
-//   importer built carried this key.
-//
-//   It covers a method body and nothing else. The class header, the members,
-//   the signature, the braces around the method and the preserved region are
-//   written with "\n" either way, so a file with a converted CRLF block in it
-//   holds both endings.
-QString keyEol();
 QString keyBefore();
 QString keyTrailing();
 QString keyEnd();
 QString keyEndElse();
 
-// The ending a run of text is written with: "\r\n" when the carriage returns
-// win outright, "\n" otherwise.
+// The ending a whole file was written with: "\r\n" when every break in it is a
+// carriage return and a newline, "\n" when every break is a bare newline or
+// there is no break at all, and empty when the file holds both.
 //
-// Real mod files do mix the two, and no single answer reproduces a mixed body.
-// There is nothing to gain from a cleverer guess: every line that came out of
-// the source keeps whatever ending it came with, only the lines the generator
-// invents take this one, and the caller compares what it regenerated against
-// what it read before accepting any of it. A wrong answer therefore costs a
-// conversion and never a byte of the author's file.
-QString eolOf(const QString &text);
+// A line ending is a property of the file, not of a method inside it. The
+// generator invents a class header, braces and blank lines that have no source
+// line behind them, and the only thing that can answer for those is the file
+// they are going into. There is no majority rule here on purpose: a file that
+// mixes the two has no answer that reproduces it, and picking the commoner one
+// would rewrite every line carrying the other.
+QString fileEol(const QString &text);
+
+// `text`, written with `eol`. Every stage between reading a file and writing
+// one works in bare newlines, and this is the single place they are turned back
+// into what the source used, so nothing in between has to carry an ending.
+//
+// Anything but "\r\n" leaves the text alone, and a newline already behind a
+// carriage return is left alone too, so this writes the same bytes however many
+// times it is applied.
+QString withEol(const QString &text, const QString &eol);
 
 // Whole lines, stored with a trailing newline so one blank line is "\n" rather
 // than an empty string, which a map cannot tell from a key that is not there.
@@ -200,10 +197,10 @@ bool isValidValue(const QString &key, const QString &value);
 // generate a file that does not compile.
 bool isIndentText(const QString &text);
 // A line with nothing on it, which is a wider question than whether it is an
-// indent: three quarters of the installed mods are written with CRLF endings,
-// so splitting their bodies on the newline leaves a carriage return standing on
-// every blank line. Indenting that would put whitespace at the end of a line
-// nobody typed any into.
+// indent. A carriage return can still be standing alone on a line, either
+// because the text was typed into a raw node rather than read out of a file or
+// because the file used one on its own; indenting that would put whitespace at
+// the end of a line nobody typed any into.
 bool isBlankLine(const QString &line);
 
 } // namespace nodefmt

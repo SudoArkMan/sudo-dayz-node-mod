@@ -203,6 +203,21 @@ QStringList restored(const QString &code)
     return out;
 }
 
+// What a run of text ends its lines with, said in words. Used to report a
+// corpus rather than to decide anything, so it names both cases a single ending
+// cannot answer for instead of hiding them behind one: text that mixes the two,
+// and text with no line break in it to read an ending off. A class written
+// entirely on one line is the second of those, and comparing it against the
+// several lines it comes back as would be comparing nothing with something.
+QString endingName(const QString &text)
+{
+    if (!text.contains(QLatin1Char('\n'))) return QStringLiteral("none");
+    const QString eol = nodefmt::fileEol(text);
+    if (eol == QLatin1String("\r\n")) return QStringLiteral("CRLF");
+    if (eol.isEmpty()) return QStringLiteral("mixed");
+    return QStringLiteral("LF");
+}
+
 // Everything the compiler sees, whitespace inside a line aside. `void Foo( int
 // a )` and `void Foo(int a)` declare the same method, and the generator has one
 // way of spacing a parameter list. Comments stay in: losing one is a loss.
@@ -348,6 +363,14 @@ struct Tally {
     int methods = 0;
     int asNodes = 0;
     int asText = 0;
+    // Line endings, counted apart from everything else. A file opened and saved
+    // with its endings changed is a diff over every line of it, which is a
+    // bigger change than any single method, and it is invisible to the three
+    // comparisons above: all of them drop trailing whitespace.
+    int endingKept = 0;   // the class came back ending its lines as it did
+    int endingLost = 0;   // it did not, which is a loss
+    int endingMixed = 0;  // the source used both, so there was no answer to keep
+    int endingNone = 0;   // the class was written on one line, so it ends none
     QHash<QString, int> reasons;
     // A few examples of each reason, so a bucket that hides a bug in the reader
     // can be told apart from one the model has no field for.
@@ -380,11 +403,13 @@ QString pct(int n, int of)
 
 // Reads one file, generates each class back out, and records what changed.
 Diff roundTripClass(const QString &src, const ImportedScript &script, const Catalog &cat,
-                    const Builtins &builtins, const Project &project, QString *originalOut)
+                    const Builtins &builtins, const Project &project, QString *originalOut,
+                    QString *generatedOut = nullptr)
 {
     const QString original = classTextOf(src, script.className);
     if (originalOut) *originalOut = original;
     const GenResult gen = generateEnforce(script.graph, cat, builtins, project);
+    if (generatedOut) *generatedOut = gen.code;
     return compare(original, gen.code);
 }
 
@@ -557,6 +582,48 @@ int main(int argc, char *argv[])
                               .arg(name)
                               .arg(same)
                               .arg(saved.scripts.size()));
+
+        // The same claim for a file written on Windows, which is what three
+        // quarters of the installed mods are. Nothing is set aside here either:
+        // open a file whose every line ends with a carriage return and save it,
+        // and every one of those carriage returns has to still be there.
+        int keptCrlf = 0;
+        int movedCrlf = 0;
+        for (const ScriptEntry &s : saved.scripts) {
+            QString first = generateEnforce(s.graph, cat, builtins, saved).code;
+            first.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+            const ImportResult r = importEnforceText(first, cat, builtins, saved);
+            if (!r.ok || r.scripts.size() != 1) {
+                movedCrlf++;
+                continue;
+            }
+            const QString second =
+                generateEnforce(r.scripts.first().graph, cat, builtins, saved, first).code;
+            if (first == second) {
+                keptCrlf++;
+                continue;
+            }
+            movedCrlf++;
+            if (movedCrlf <= 3) {
+                const QStringList a = first.split(QLatin1Char('\n'));
+                const QStringList b = second.split(QLatin1Char('\n'));
+                for (int i = 0; i < qMax(a.size(), b.size()); ++i) {
+                    const QString x = i < a.size() ? a.at(i) : QString();
+                    const QString y = i < b.size() ? b.at(i) : QString();
+                    if (x == y) continue;
+                    out << "       ---- " << s.name << " line " << i + 1 << Qt::endl
+                        << "            was: " << QString(x).replace('\r', "\\r") << Qt::endl
+                        << "            now: " << QString(y).replace('\r', "\\r") << Qt::endl;
+                    break;
+                }
+            }
+        }
+        check(movedCrlf == 0,
+              QStringLiteral("%1: %2 of %3 come back byte for byte when the file is written "
+                             "with CRLF endings")
+                  .arg(name)
+                  .arg(keptCrlf)
+                  .arg(saved.scripts.size()));
     }
 
     // ------------------------------------------------------ the mod template
@@ -572,8 +639,10 @@ int main(int argc, char *argv[])
         for (const QString &path : files) {
             QFile f(path);
             if (!f.open(QIODevice::ReadOnly)) continue;
-            QString src = QString::fromLatin1(f.readAll());
-            src.remove(QLatin1Char('\r'));
+            // The bytes as they are. Taking the carriage returns off here would
+            // hide the one thing a mod author sees first, which is the whole
+            // file moving because its line endings changed.
+            const QString src = QString::fromLatin1(f.readAll());
             f.close();
 
             const ImportResult r = importEnforceFile(path, cat, builtins, project);
@@ -584,7 +653,9 @@ int main(int argc, char *argv[])
             }
             for (const ImportedScript &s : r.scripts) {
                 QString original;
-                const Diff d = roundTripClass(src, s, cat, builtins, project, &original);
+                QString generated;
+                const Diff d = roundTripClass(src, s, cat, builtins, project, &original,
+                                              &generated);
                 check(d.same, QStringLiteral("%1: %2 round trips%3")
                                   .arg(name, s.className,
                                        d.exact ? QStringLiteral(", byte for byte") : QString()));
@@ -592,6 +663,10 @@ int main(int argc, char *argv[])
                     out << "         was: " << d.wasLine << Qt::endl;
                     out << "         now: " << d.nowLine << Qt::endl;
                 }
+                if (endingName(original) != QLatin1String("none"))
+                    check(endingName(generated) == endingName(original),
+                          QStringLiteral("%1: %2 keeps its %3 line endings")
+                              .arg(name, s.className, endingName(original)));
             }
             // The global functions in an init.c are not part of any class, and
             // losing them would break the mission.
@@ -832,6 +907,101 @@ int main(int argc, char *argv[])
         }
     }
 
+    // ------------------------------------------------------------ line endings
+    //
+    // What the file was written with is the file's own, not any one method's,
+    // and it is put back over the whole text. These are the three cases: a file
+    // that ends every line the same way, a carriage return that ends no line at
+    // all, and a file that uses both.
+    out << Qt::endl << "line endings" << Qt::endl;
+    {
+        const QString lf =
+            enf("modded class ItemBase\n{\n|override void EEInit()\n|{\n||super.EEInit();\n"
+                "||SetQuantity(1);\n|}\n}\n");
+        QString crlf = lf;
+        crlf.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+
+        const ImportResult r = importEnforceText(crlf, cat, builtins, project);
+        check(r.ok && r.scripts.size() == 1 && r.eol == QLatin1String("\r\n"),
+              QStringLiteral("a file written with CRLF is read as one"));
+        if (r.ok && r.scripts.size() == 1) {
+            const QString code = generateEnforce(r.scripts.first().graph, cat, builtins,
+                                                 project).code;
+            int bare = 0;
+            for (int i = 0; i < code.size(); ++i)
+                if (code.at(i) == QLatin1Char('\n')
+                    && (i == 0 || code.at(i - 1) != QLatin1Char('\r')))
+                    bare++;
+            check(bare == 0,
+                  QStringLiteral("and comes back with no line left on a bare newline (%1)")
+                      .arg(bare));
+            // The header, the members and the preserved region are the file's,
+            // not any method's, so a rule that spoke for method bodies alone
+            // would leave exactly these behind.
+            check(code.contains(QStringLiteral("modded class ItemBase\r\n"))
+                      && code.contains(USER_END + QStringLiteral("\r\n")),
+                  QStringLiteral("the class header and the preserved region take it too"));
+        }
+
+        // The one that used to be deleted outright. A carriage return with no
+        // newline behind it is a byte of the line it sits on, and inside a
+        // string literal it is a byte the Enforce compiler reads, so removing
+        // it changes what the file compiles to.
+        const QString withCr =
+            enf("modded class ItemBase\n{\n|override void EEInit()\n|{\n||super.EEInit();\n"
+                "||Print(\"a\rb\");\n|}\n}\n");
+        const ImportResult lone = importEnforceText(withCr, cat, builtins, project);
+        check(lone.ok && lone.scripts.size() == 1, QStringLiteral("a lone carriage return "
+                                                                  "does not stop the file "
+                                                                  "opening"));
+        if (lone.ok && lone.scripts.size() == 1) {
+            const QString code = generateEnforce(lone.scripts.first().graph, cat, builtins,
+                                                 project).code;
+            check(code.contains(QStringLiteral("Print(\"a\rb\");")),
+                  QStringLiteral("a carriage return inside a string literal comes back where "
+                                 "the author put it"));
+            check(lone.eol == QLatin1String("\n"),
+                  QStringLiteral("and does not make the file look like a CRLF one"));
+        }
+
+        // A file that uses both. There is no single ending that puts it back as
+        // it was, and picking the commoner one would rewrite every line
+        // carrying the other, so nothing is restored and the file is written
+        // with bare newlines, which is one of the two endings it already had.
+        // What must not happen is that it goes past the user in silence.
+        QString mixed = crlf;
+        mixed.replace(QStringLiteral("SetQuantity(1);\r\n"), QStringLiteral("SetQuantity(1);\n"));
+        const ImportResult both = importEnforceText(mixed, cat, builtins, project);
+        check(both.ok && both.eol.isEmpty(),
+              QStringLiteral("a file that mixes its endings is read, and no ending is claimed "
+                             "for it"));
+        if (both.ok && both.scripts.size() == 1) {
+            check(both.scripts.first().graph.eol.isEmpty(),
+                  QStringLiteral("the graph records that there was no answer"));
+            const QString code = generateEnforce(both.scripts.first().graph, cat, builtins,
+                                                 project).code;
+            check(!code.contains(QLatin1Char('\r')),
+                  QStringLiteral("it is written with bare newlines, which is one of the two "
+                                 "the source held"));
+            bool said = false;
+            for (const QString &n : both.notes)
+                if (n.contains(QStringLiteral("both kinds of line ending"))) said = true;
+            check(said, QStringLiteral("and the user is told, rather than finding out from "
+                                       "the diff"));
+        }
+
+        // The one caller the ending on the result is there for is the one that
+        // stitches a preamble in front of a generated class, and a file made of
+        // nothing but preamble is turned down. It still has to say what it was
+        // written with, or that caller has nowhere to read it from.
+        const ImportResult noClass = importEnforceText(
+            QStringLiteral("enum ESudo\r\n{\r\n\tOne,\r\n\tTwo\r\n};\r\n"), cat, builtins,
+            project);
+        check(!noClass.ok && noClass.eol == QLatin1String("\r\n"),
+              QStringLiteral("a file with no class in it still reports the ending it was "
+                             "written with"));
+    }
+
     // ---------------------------------------------------------- real vanilla
     out << Qt::endl << "vanilla source (P:\\scripts)" << Qt::endl;
     {
@@ -858,8 +1028,12 @@ int main(int argc, char *argv[])
             for (const QString &path : sample) {
                 QFile f(path);
                 if (!f.open(QIODevice::ReadOnly)) continue;
-                QString src = QString::fromLatin1(f.readAll());
-                src.remove(QLatin1Char('\r'));
+                // 2765 of these 2810 files are written with CRLF endings. This
+                // used to take the carriage returns off before importing, which
+                // meant the corpus could not see the importer deleting them:
+                // every file it opened came back LF and the comparison, which
+                // drops trailing whitespace, called that no change at all.
+                const QString src = QString::fromLatin1(f.readAll());
                 f.close();
 
                 const ImportResult r = importEnforceText(src, cat, builtins, project);
@@ -871,10 +1045,24 @@ int main(int argc, char *argv[])
                     tally.classes++;
                     countMethods(s.graph, &tally);
                     QString original;
-                    const Diff d = roundTripClass(src, s, cat, builtins, project, &original);
+                    QString generated;
+                    const Diff d = roundTripClass(src, s, cat, builtins, project, &original,
+                                                  &generated);
                     if (original.isEmpty()) {
                         tally.reasons[QStringLiteral("the class could not be cut out again")]++;
                         continue;
+                    }
+                    const QString was = endingName(original);
+                    if (was == QLatin1String("none")) tally.endingNone++;
+                    else if (was == QLatin1String("mixed")) tally.endingMixed++;
+                    else if (endingName(generated) == was) tally.endingKept++;
+                    else {
+                        tally.endingLost++;
+                        if (tally.endingLost <= 3)
+                            out << "       ---- " << QDir(scripts).relativeFilePath(path)
+                                << " / " << s.className << ": was "
+                                << endingName(original) << ", came back "
+                                << endingName(generated) << Qt::endl;
                     }
                     if (d.exact) tally.exact++;
                     if (d.same) tally.same++;
@@ -904,6 +1092,15 @@ int main(int argc, char *argv[])
                 << "  (" << pct(tally.same, tally.classes) << "%)" << Qt::endl;
             out << "       SAME CODE:             " << tally.sameCode << " of " << tally.classes
                 << "  (" << pct(tally.sameCode, tally.classes) << "%)" << Qt::endl;
+            out << "       LINE ENDINGS KEPT:     " << tally.endingKept << " of "
+                << tally.endingKept + tally.endingLost << "  ("
+                << pct(tally.endingKept, tally.endingKept + tally.endingLost) << "%)"
+                << Qt::endl;
+            out << "       endings not restored:  " << tally.endingLost << Qt::endl;
+            out << "       sources that mix them: " << tally.endingMixed
+                << "  (written back with bare newlines, and said so)" << Qt::endl;
+            out << "       classes on one line:   " << tally.endingNone
+                << "  (no line break to read an ending off)" << Qt::endl;
             out << "       methods:               " << tally.methods << Qt::endl;
             out << "       as nodes:              " << tally.asNodes << "  ("
                 << pct(tally.asNodes, tally.methods) << "%)" << Qt::endl;
@@ -947,6 +1144,15 @@ int main(int argc, char *argv[])
             check(tally.asNodes * 100 >= tally.methods * 25,
                   QStringLiteral("at least 25% of methods stop being a text box (%1%)")
                       .arg(pct(tally.asNodes, tally.methods)));
+            // Not a floor with room under it. A file whose ending changed is
+            // every line of that file changed, so one is a failure.
+            check(tally.endingLost == 0,
+                  QStringLiteral("every class whose file ends its lines one way comes back "
+                                 "ending them the same way (%1 did not)")
+                      .arg(tally.endingLost));
+            check(tally.endingKept > 0,
+                  QStringLiteral("%1 classes were read with their line endings on")
+                      .arg(tally.endingKept));
         }
     }
 

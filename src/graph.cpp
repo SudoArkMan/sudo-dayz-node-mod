@@ -57,7 +57,6 @@ const GraphVariable *Graph::variable(const QString &name) const
 
 QString nodefmt::keyBase() { return QStringLiteral("fmt.base"); }
 QString nodefmt::keyUnit() { return QStringLiteral("fmt.unit"); }
-QString nodefmt::keyEol() { return QStringLiteral("fmt.eol"); }
 QString nodefmt::keyBefore() { return QStringLiteral("trivia.before"); }
 QString nodefmt::keyTrailing() { return QStringLiteral("trivia.trailing"); }
 QString nodefmt::keyEnd() { return QStringLiteral("trivia.end"); }
@@ -111,10 +110,6 @@ bool nodefmt::isCommentaryOnly(const QString &text)
 bool nodefmt::isValidValue(const QString &key, const QString &value)
 {
     if (key == keyBase() || key == keyUnit()) return isIndentText(value);
-    // Two endings exist. Anything else here would be written at the end of
-    // every line of the method.
-    if (key == keyEol())
-        return value == QLatin1String("\n") || value == QLatin1String("\r\n");
     // A trailing sits behind code that is already on the line, so a newline in
     // it would put whatever follows on a line of its own, past the statement
     // the reader can see.
@@ -141,8 +136,9 @@ bool nodefmt::isBlankLine(const QString &line)
 
 namespace {
 
-// Line breaks of each kind. A lone carriage return is not a break Enforce
-// source uses, so nothing here looks for one.
+// Line breaks of each kind. A lone carriage return ends no line here: it is a
+// byte inside whatever line it sits on, and treating it as a break is what used
+// to delete it out of string literals.
 void countBreaks(const QString &text, int *crlf, int *lf)
 {
     *crlf = 0;
@@ -156,12 +152,27 @@ void countBreaks(const QString &text, int *crlf, int *lf)
 
 } // namespace
 
-QString nodefmt::eolOf(const QString &text)
+QString nodefmt::fileEol(const QString &text)
 {
     int crlf = 0;
     int lf = 0;
     countBreaks(text, &crlf, &lf);
-    return crlf > lf ? QStringLiteral("\r\n") : QStringLiteral("\n");
+    if (crlf > 0 && lf > 0) return {};
+    return crlf > 0 ? QStringLiteral("\r\n") : QStringLiteral("\n");
+}
+
+QString nodefmt::withEol(const QString &text, const QString &eol)
+{
+    if (eol != QLatin1String("\r\n")) return text;
+    QString out;
+    out.reserve(text.size() + text.count(QLatin1Char('\n')));
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar c = text.at(i);
+        if (c == QLatin1Char('\n') && (i == 0 || text.at(i - 1) != QLatin1Char('\r')))
+            out.append(QLatin1Char('\r'));
+        out.append(c);
+    }
+    return out;
 }
 
 QString nextId(const QString &prefix)
@@ -373,6 +384,11 @@ Graph graphFromJson(const QJsonObject &obj)
     g.baseClass = obj.value("baseClass").toString();
     g.modded = obj.value("modded").toBool();
     g.module = obj.value("module").toString(g.module);
+    // Absent is a file written with bare newlines, which is what every project
+    // written before this field existed generated. An empty string is a file
+    // that mixed the two and is a different fact from a missing key, so it is
+    // stored and read back rather than folded into the default.
+    g.eol = obj.value("eol").toString(g.eol);
 
     for (const QJsonValue &v : obj.value("nodes").toArray()) {
         const QJsonObject o = v.toObject();
@@ -441,7 +457,7 @@ Graph graphFromJson(const QJsonObject &obj)
         g.functions.append(fn);
     }
 
-    g.extra = extrasOf(obj, {"className", "baseClass", "modded", "module",
+    g.extra = extrasOf(obj, {"className", "baseClass", "modded", "module", "eol",
                              "nodes", "edges", "variables", "functions"});
     return g;
 }
@@ -453,6 +469,10 @@ QJsonObject graphToJson(const Graph &g)
     obj.insert("baseClass", g.baseClass);
     obj.insert("modded", g.modded);
     obj.insert("module", g.module);
+    // Left out where it says nothing: a bare newline is what a graph with no
+    // file behind it generates anyway, and writing it into every script would
+    // put a key in every project the user has for the sake of the default.
+    if (g.eol != QLatin1String("\n")) obj.insert("eol", g.eol);
 
     QJsonArray nodes;
     for (const GraphNode &n : g.nodes) {

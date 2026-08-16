@@ -224,10 +224,6 @@ int main(int argc, char *argv[])
         check(nodefmt::isValidValue(nodefmt::keyBase(), QStringLiteral("\t\t"))
                   && !nodefmt::isValidValue(nodefmt::keyBase(), QStringLiteral("x")),
               QStringLiteral("an indent field takes whitespace and nothing else"));
-        check(nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral("\r\n"))
-                  && nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral("\n"))
-                  && !nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral(" ")),
-              QStringLiteral("a line ending is one of the two that exist"));
         check(nodefmt::isValidValue(nodefmt::keyBefore(), QStringLiteral("// note\n"))
                   && !nodefmt::isValidValue(nodefmt::keyBefore(),
                                             QStringLiteral("GetGame().RequestExit(0);\n")),
@@ -277,6 +273,44 @@ int main(int argc, char *argv[])
             if (w.contains(QStringLiteral("layout"))) said++;
         check(said >= 3,
               QStringLiteral("each field that was refused is reported (%1 warnings)").arg(said));
+    }
+
+    // ------------------------------------------------ the file's own line ending
+    out << "line endings" << Qt::endl;
+    {
+        const QString crlf = QStringLiteral("\r\n");
+        const QString lf = QStringLiteral("\n");
+
+        check(nodefmt::fileEol(QStringLiteral("a\r\nb\r\n")) == crlf
+                  && nodefmt::fileEol(QStringLiteral("a\nb\n")) == lf,
+              QStringLiteral("a file that ends its lines one way answers with that ending"));
+        // A file with nothing to restore takes the form everything else works
+        // in, rather than no answer at all.
+        check(nodefmt::fileEol(QString()) == lf && nodefmt::fileEol(QStringLiteral("a")) == lf,
+              QStringLiteral("a file with no line break at all is a bare newline"));
+        // The one case no single ending reproduces. Answering "the commoner one"
+        // would rewrite every line carrying the other, which is the defect this
+        // whole rule exists to stop, so it answers with nothing instead.
+        check(nodefmt::fileEol(QStringLiteral("a\r\nb\nc\r\n")).isEmpty(),
+              QStringLiteral("a file that mixes the two has no single answer"));
+        // A carriage return inside a line is a byte of that line, not a break.
+        check(nodefmt::fileEol(QStringLiteral("Print(\"a\rb\");\n")) == lf,
+              QStringLiteral("a lone carriage return does not make a file CRLF"));
+
+        check(nodefmt::withEol(QStringLiteral("a\nb\n"), crlf) == QStringLiteral("a\r\nb\r\n")
+                  && nodefmt::withEol(QStringLiteral("a\nb\n"), lf) == QStringLiteral("a\nb\n")
+                  && nodefmt::withEol(QStringLiteral("a\nb\n"), QString())
+                         == QStringLiteral("a\nb\n"),
+              QStringLiteral("the ending is put back only where there is one to put back"));
+        check(nodefmt::withEol(nodefmt::withEol(QStringLiteral("a\nb\n"), crlf), crlf)
+                  == QStringLiteral("a\r\nb\r\n"),
+              QStringLiteral("applying it twice writes the same bytes as applying it once"));
+        // The reason this walks the string rather than replacing the character:
+        // a carriage return the author put inside a line must not become the
+        // line's ending, and the line's own ending must still be written.
+        check(nodefmt::withEol(QStringLiteral("Print(\"a\rb\");\n"), crlf)
+                  == QStringLiteral("Print(\"a\rb\");\r\n"),
+              QStringLiteral("a carriage return inside a line is left where it is"));
     }
 
     // A file anyone can hand you is checked when it is opened, not only when it
@@ -357,6 +391,31 @@ int main(int argc, char *argv[])
         Project reread;
         check(loadProject(later, reread, &e2) && reread.formatVersion == kProjectFormatVersion + 7,
               QStringLiteral("a version this build does not know is kept, not overwritten"));
+
+        // The file's ending has to survive the project file, or a script opened
+        // from a CRLF mod, saved into a .sdzn and exported the next day is
+        // written back flattened. The three states are told apart on purpose:
+        // a file that mixes its endings is not the same fact as one written
+        // with bare newlines, and the notes the user saw are long gone by then.
+        Project endings;
+        for (const char *value : {"\r\n", "\n", ""}) {
+            ScriptEntry s;
+            s.id = nextId(QStringLiteral("s"));
+            s.name = QStringLiteral("SUDO_Ends") + QString::number(endings.scripts.size());
+            s.graph.className = s.name;
+            s.graph.eol = QString::fromLatin1(value);
+            endings.scripts.append(s);
+        }
+        const QString endingsPath = tmp.filePath(QStringLiteral("endings.sdzn"));
+        check(saveProject(endings, endingsPath, &e2),
+              QStringLiteral("saves a project holding all three endings (%1)").arg(e2));
+        Project endingsBack;
+        check(loadProject(endingsPath, endingsBack, &e2)
+                  && endingsBack.scripts.size() == 3
+                  && endingsBack.scripts.at(0).graph.eol == QLatin1String("\r\n")
+                  && endingsBack.scripts.at(1).graph.eol == QLatin1String("\n")
+                  && endingsBack.scripts.at(2).graph.eol.isEmpty(),
+              QStringLiteral("and each script comes back with the ending its file had"));
     }
 
     out << "codegen" << Qt::endl;

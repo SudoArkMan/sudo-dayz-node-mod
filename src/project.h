@@ -33,7 +33,8 @@ struct ScriptEntry {
 //   1  the shape the Electron build wrote, and every build up to the one that
 //      taught a node to carry the indentation, blank lines and comments a
 //      method was written with
-//   2  fmt.base, fmt.unit, fmt.eol and the trivia.* keys on nodes
+//   2  fmt.base, fmt.unit and the trivia.* keys on nodes, and the line ending
+//      the graph's own file was written with
 //
 // A file with no version field is version 1: nothing before this wrote one.
 // That direction is safe: a v1 file has no layout keys, and every body

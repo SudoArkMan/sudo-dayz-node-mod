@@ -675,13 +675,6 @@ QString bodyText(const QString &src, int open, int close)
 struct BodyFormat {
     QString base = QStringLiteral("\t\t");
     QString unit = QStringLiteral("\t");
-    // Always "\n" as things stand, whatever the file on disk uses:
-    // importEnforceText removes every carriage return before any of this runs,
-    // so nothing here has ever seen one. Read and carried anyway, because the
-    // day that normalisation goes the answer has to come from the body rather
-    // than from a constant, and because a body that did arrive with CRLF
-    // endings would otherwise come back with two kinds in it.
-    QString eol = QStringLiteral("\n");
 };
 
 // The whitespace between the start of a line and `at`. False when something
@@ -701,13 +694,6 @@ bool leadBefore(const QString &text, int at, QString *lead)
 BodyFormat readBodyFormat(const QString &text, const std::vector<StmtPtr> &stmts)
 {
     BodyFormat f;
-    // A body whose lines do not all end the same way has no single answer, and
-    // there is nothing to gain from guessing carefully: the invented lines take
-    // whichever ending the body mostly uses, every line that came out of the
-    // source keeps its own, and the method is regenerated and compared against
-    // the text it was read from before any of it is accepted. A wrong answer
-    // therefore costs a conversion and never a byte of the author's file.
-    f.eol = nodefmt::eolOf(text);
     // The first statement of the body sits at the top level, so what stands in
     // front of it is the base every deeper level is measured from.
     bool haveBase = false;
@@ -748,7 +734,6 @@ void applyBodyFormat(GraphNode *n, const BodyFormat &f, const QString &endTrivia
     if (!n) return;
     if (f.base != QLatin1String("\t\t")) n->opts.insert(nodefmt::keyBase(), f.base);
     if (f.unit != QLatin1String("\t")) n->opts.insert(nodefmt::keyUnit(), f.unit);
-    if (f.eol != QLatin1String("\n")) n->opts.insert(nodefmt::keyEol(), f.eol);
     if (!endTrivia.isEmpty()) n->opts.insert(nodefmt::keyEnd(), endTrivia);
 }
 
@@ -1189,7 +1174,18 @@ ImportResult importEnforceText(const QString &text, const Catalog &cat, const Bu
     QString src = text;
     // Line endings are normalised once, before anything records an offset, so
     // every span found below still slices the string it was found in.
-    src.remove(QLatin1Char('\r'));
+    //
+    // The pair, never the character. A carriage return standing on its own ends
+    // no line in Enforce source: inside a string literal or a comment it is a
+    // byte the compiler reads, and taking it out changes what `Print("a\rb")`
+    // compiles to. What the file used is recorded below and put back on the
+    // finished text, so nothing between here and there has to carry an ending.
+    src.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+
+    // Read before anything can turn the file down. A file holding no class is
+    // still a file somebody may write back, and the header says this field has
+    // an answer for one, so it cannot be filled in past the early return below.
+    result.eol = nodefmt::fileEol(text);
 
     QString masked = maskedSource(src);
     maskUserRegion(src, &masked);
@@ -1224,6 +1220,17 @@ ImportResult importEnforceText(const QString &text, const Catalog &cat, const Bu
     if (!result.preamble.isEmpty())
         result.notes.append(QStringLiteral("This file also holds code outside any class, which "
                                            "the graph has no room for. It is kept as it is."));
+
+    // The ending belongs to the file, not to any method in it, so the answer
+    // read above is carried on every graph the file produced. The generator
+    // puts it back over the whole file, which is the only layer that can speak
+    // for the class header and the braces as well as for the statements.
+    for (ImportedScript &s : result.scripts) s.graph.eol = result.eol;
+    if (result.eol.isEmpty())
+        result.notes.append(QStringLiteral("This file is written with both kinds of line ending, "
+                                           "and no single one puts it back as it was. Writing it "
+                                           "from here gives every line a bare newline, so the "
+                                           "lines that had a carriage return will change."));
 
     result.ok = true;
     return result;

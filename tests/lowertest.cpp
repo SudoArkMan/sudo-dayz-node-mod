@@ -12,6 +12,7 @@
 #include "catalog.h"
 #include "codegen.h"
 #include "enforce/ast.h"
+#include "enforce/import.h"
 #include "enforce/lexer.h"
 #include "enforce/lower.h"
 #include "graph.h"
@@ -323,10 +324,6 @@ Rendered renderBody(const QString &body, const QString &indentBase, const QStrin
     begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
     begin.opts.insert(nodefmt::keyBase(), indentBase);
     begin.opts.insert(nodefmt::keyUnit(), indentUnit);
-    // What the importer reads off the same body. The generator has no source
-    // line behind the headers and braces it invents, so a CRLF body comes back
-    // with two kinds of ending in it unless this is carried with the indent.
-    begin.opts.insert(nodefmt::keyEol(), nodefmt::eolOf(body));
     // The method's closing brace belongs to the caller, so what the author left
     // above it comes back on the node that writes that brace.
     if (!low.endTrivia.isEmpty()) begin.opts.insert(nodefmt::keyEnd(), low.endTrivia);
@@ -636,25 +633,63 @@ int main(int argc, char *argv[])
         };
 
         // Three quarters of the installed mods are written with CRLF endings,
-        // and the app hands the importer those bytes as they are. Both tests
-        // that measure the corpus strip the carriage return first, so every
-        // shape above is checked again with the endings the app really sees.
+        // and the app hands the importer those bytes as they are. Every shape
+        // above is checked again with those endings, and through the path the
+        // app really takes: a whole file into the importer and a whole file out
+        // of the generator, rather than a body handed to the lowering with a
+        // formatting key set by hand. A key set by hand can only speak for a
+        // method body, and it was the class header, the signature, the braces
+        // and the preserved region that came back with the wrong ending.
+        //
+        // The claim is byte for byte, and it is stated against the same file
+        // written with bare newlines: the two have to be the same file, ending
+        // for ending, or something other than the ending has moved.
+        const auto classAround = [](const QString &body) {
+            return QStringLiteral("modded class ItemBase\n{\n\toverride void EEInit()\n\t{\n")
+                   + body + QStringLiteral("\n\t}\n}\n");
+        };
+        const auto generatedFor = [&](const QString &file) {
+            const ImportResult r = importEnforceText(file, cat, builtins, project);
+            if (!r.ok || r.scripts.isEmpty()) return QString();
+            return generateEnforce(r.scripts.first().graph, cat, builtins, project).code;
+        };
         for (const Layout &c : layouts) {
-            QString body = QString::fromUtf8(c.body);
+            const QString body = QString::fromUtf8(c.body);
             if (!body.contains(QLatin1Char('\n'))) continue;
-            body.replace(QLatin1String("\n"), QLatin1String("\r\n"));
-            const Rendered r = renderBody(body, QString::fromUtf8(c.base),
-                                          QString::fromUtf8(c.unit), cat, builtins, project,
-                                          base);
-            const bool same = r.text == body;
-            check(same == c.identical && r.nodes > 0,
+            QString crlfFile = classAround(body);
+            crlfFile.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+            const QString lfOut = generatedFor(classAround(body));
+            const QString crlfOut = generatedFor(crlfFile);
+            QString want = lfOut;
+            want.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+            check(!lfOut.isEmpty() && crlfOut == want,
                   QStringLiteral("%1, written with CRLF endings").arg(QString::fromUtf8(c.name)));
-            if (same != c.identical || r.nodes == 0) {
-                out << "         in:  " << QString(body).replace('\n', "\\n")
-                                                        .replace('\r', "\\r") << Qt::endl;
-                out << "         out: " << QString(r.text).replace('\n', "\\n")
-                                                          .replace('\r', "\\r") << Qt::endl;
+            if (lfOut.isEmpty() || crlfOut != want) {
+                out << "         want: " << QString(want).replace('\n', "\\n")
+                                                         .replace('\r', "\\r") << Qt::endl;
+                out << "         out:  " << QString(crlfOut).replace('\n', "\\n")
+                                                            .replace('\r', "\\r") << Qt::endl;
             }
+        }
+
+        // The bar the whole feature rests on, over the same shapes: open a file
+        // written with carriage returns and the class comes back with every one
+        // of them, so the diff a mod author sees is the method they changed and
+        // not every line of the file.
+        for (const Layout &c : layouts) {
+            const QString body = QString::fromUtf8(c.body);
+            if (!body.contains(QLatin1Char('\n'))) continue;
+            QString crlfFile = classAround(body);
+            crlfFile.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+            const QString outText = generatedFor(crlfFile);
+            int bare = 0;
+            for (int i = 0; i < outText.size(); ++i)
+                if (outText.at(i) == QLatin1Char('\n')
+                    && (i == 0 || outText.at(i - 1) != QLatin1Char('\r')))
+                    bare++;
+            check(!outText.isEmpty() && bare == 0,
+                  QStringLiteral("%1, no line of the file loses its carriage return")
+                      .arg(QString::fromUtf8(c.name)));
         }
 
         for (const Layout &c : layouts) {
@@ -931,46 +966,20 @@ int main(int argc, char *argv[])
                 out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
         }
 
-        // A file written on Windows reaches the lowering with the carriage
-        // return still on the end of every line. A blank line is then a line
-        // holding one CR, which is not indentation, so the generator indents it
-        // and the file gains whitespace the author never typed.
-        {
-            bool ok = false;
-            const QString after = convert(QStringLiteral("Print(\"one\");\r\n\r\nPrint(\"two\");"),
-                                          &ok);
-            // A line with nothing but the carriage return on it is the blank
-            // line as the author left it. One that also carries a tab or a
-            // space is a blank line the generator indented.
-            bool padded = false;
-            for (const QString &l : after.split(QLatin1Char('\n')))
-                if (nodefmt::isBlankLine(l)
-                    && (l.contains(QLatin1Char('\t')) || l.contains(QLatin1Char(' '))))
-                    padded = true;
-            check(!ok || !padded,
-                  QStringLiteral("a blank line in a file with CRLF endings gains no indentation"));
-            if (ok && padded)
-                out << "         out: " << QString(after).replace('\n', "\\n")
-                                                  .replace('\r', "\\r") << Qt::endl;
-        }
-
-        // The generator writes a header and its braces on lines of its own, and
-        // it has nowhere to read the ending the file uses. In a file written
-        // with CRLF the lines it makes up come back with a bare newline, so a
-        // block that converts leaves the file with two kinds of line ending in
-        // it. The importer never sees this, because both suites that measure
-        // the corpus take the carriage return off first.
+        // A raw node built by the importer holds bare newlines whatever the file
+        // on disk uses, because the file's ending comes off once on the way in
+        // and goes back on once on the way out. A raw node holding carriage
+        // returns from anywhere else is text that belongs to no file this graph
+        // knows, and converting it would write those bytes into the middle of
+        // one. The gate is what has to catch that.
         {
             bool ok = false;
             const QString after =
                 convert(QStringLiteral("if (m_Ready)\r\n{\r\n\tSetQuantity(1);\r\n}"), &ok);
-            const QStringList lines = after.split(QLatin1Char('\n'));
-            int bare = 0;
-            for (int i = 0; i + 1 < lines.size(); ++i)
-                if (!lines.at(i).endsWith(QLatin1Char('\r'))) bare++;
-            check(!ok || bare == 0,
-                  QStringLiteral("a block converted out of a file with CRLF endings keeps them"));
-            if (ok && bare > 0)
+            check(!ok || !after.contains(QLatin1Char('\r')),
+                  QStringLiteral("converting a block does not leave a stray carriage return "
+                                 "behind"));
+            if (ok && after.contains(QLatin1Char('\r')))
                 out << "         out: " << QString(after).replace('\n', "\\n")
                                                   .replace('\r', "\\r") << Qt::endl;
         }

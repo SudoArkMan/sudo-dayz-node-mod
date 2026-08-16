@@ -134,6 +134,9 @@ add_executable(lowertest
   ../src/enforce/parser.cpp
   ../src/enforce/lower.cpp
   ../src/enforce/layout.cpp
+  # The formatting cases are checked twice, once against the lowering on its own
+  # and once against the path the app takes, which starts at the importer.
+  ../src/enforce/import.cpp
   ../src/theme.cpp
 )
 target_include_directories(lowertest PRIVATE ../src)

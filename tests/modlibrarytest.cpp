@@ -23,6 +23,7 @@
 //   ./tests/modlibrarytest ../resources [sample size] [--shot browser.png]
 #include "builtins.h"
 #include "catalog.h"
+#include "codegen.h"
 #include "document.h"
 #include "graph.h"
 #include "modlibrary.h"
@@ -160,6 +161,43 @@ static const char *kToolScript = R"(class SudoTestTool
 
 // ------------------------------------------------------------ the fixed part
 
+// A whole mod folder, pbo and all, under `folder`. Used by both halves below,
+// so the read path and the export rule are proven against the same bytes.
+static bool buildFixtureMod(const QString &folder)
+{
+    QDir().mkpath(folder + QStringLiteral("/Addons"));
+    QDir().mkpath(folder + QStringLiteral("/Keys"));
+
+    {
+        QFile mod(folder + QStringLiteral("/mod.cpp"));
+        if (!mod.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+        // The missing semicolon is deliberate: a real mod.cpp in the corpus has
+        // one, and the scan has to read the keys after it anyway.
+        mod.write("name = \"Sudo Test Mod\";\n"
+                  "picture = \"SudoTest\\GUI\\logo.paa\"\n"
+                  "author = \"Dillan\";\n"
+                  "tooltip = \"A mod written by the test\";  // trailing comment\n");
+    }
+    {
+        QFile meta(folder + QStringLiteral("/meta.cpp"));
+        if (!meta.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+        meta.write("protocol = 1;\npublishedid = 1234567890;\nname = \"Workshop Title\";\n");
+    }
+
+    const QString pbo = folder + QStringLiteral("/Addons/SudoTest_Scripts.pbo");
+    QVector<QPair<QString, QByteArray>> files;
+    files.append({QStringLiteral("Scripts\\4_World\\player.c"), QByteArray(kPlayerScript)});
+    files.append({QStringLiteral("Scripts\\4_World\\tool.c"), QByteArray(kToolScript)});
+    files.append({QStringLiteral("config.cpp"), QByteArray("class CfgPatches {};\n")});
+    if (!writePbo(pbo, QStringLiteral("SudoTest_Scripts"), files)) return false;
+    {
+        QFile sign(pbo + QStringLiteral(".SudoKey.bisign"));
+        if (!sign.open(QIODevice::WriteOnly)) return false;
+        sign.write("not a real signature");
+    }
+    return true;
+}
+
 static void testSyntheticMod(const Catalog &cat, const Builtins &builtins)
 {
     line(QString());
@@ -171,37 +209,7 @@ static void testSyntheticMod(const Catalog &cat, const Builtins &builtins)
         return;
     }
     const QString folder = QDir(temp.path()).filePath(QStringLiteral("@SudoTestMod"));
-    QDir().mkpath(folder + QStringLiteral("/Addons"));
-    QDir().mkpath(folder + QStringLiteral("/Keys"));
-
-    {
-        QFile mod(folder + QStringLiteral("/mod.cpp"));
-        mod.open(QIODevice::WriteOnly | QIODevice::Text);
-        // The missing semicolon is deliberate: a real mod.cpp in the corpus has
-        // one, and the scan has to read the keys after it anyway.
-        mod.write("name = \"Sudo Test Mod\";\n"
-                  "picture = \"SudoTest\\GUI\\logo.paa\"\n"
-                  "author = \"Dillan\";\n"
-                  "tooltip = \"A mod written by the test\";  // trailing comment\n");
-    }
-    {
-        QFile meta(folder + QStringLiteral("/meta.cpp"));
-        meta.open(QIODevice::WriteOnly | QIODevice::Text);
-        meta.write("protocol = 1;\npublishedid = 1234567890;\nname = \"Workshop Title\";\n");
-    }
-
-    const QString pbo = folder + QStringLiteral("/Addons/SudoTest_Scripts.pbo");
-    QVector<QPair<QString, QByteArray>> files;
-    files.append({QStringLiteral("Scripts\\4_World\\player.c"), QByteArray(kPlayerScript)});
-    files.append({QStringLiteral("Scripts\\4_World\\tool.c"), QByteArray(kToolScript)});
-    files.append({QStringLiteral("config.cpp"), QByteArray("class CfgPatches {};\n")});
-    check(writePbo(pbo, QStringLiteral("SudoTest_Scripts"), files),
-          QStringLiteral("the fixture pbo is written"));
-    {
-        QFile sign(pbo + QStringLiteral(".SudoKey.bisign"));
-        sign.open(QIODevice::WriteOnly);
-        sign.write("not a real signature");
-    }
+    check(buildFixtureMod(folder), QStringLiteral("the fixture pbo is written"));
 
     const QStringList before = folderPrint(folder);
 
@@ -272,6 +280,147 @@ static void testSyntheticMod(const Catalog &cat, const Builtins &builtins)
           QStringLiteral("opening it twice gives the same answer"));
     check(folderPrint(folder) == before,
           QStringLiteral("and still leaves the mod folder alone"));
+}
+
+// ---------------------------------------------- a browsed graph in a project
+//
+// The hazard the browser creates, and the one thing it must not be allowed to
+// do. Opening somebody else's class puts their code in your project, and the
+// export writes the project into your mod folder. So this builds a project
+// holding one class of the user's own and one read out of another mod, exports
+// it the way the window does, and proves the second is not on disk anywhere,
+// that the mod it came from is untouched, and that a save and a load leave it
+// read only rather than handing it back as work of the user's own.
+static void testBrowsedGraphNeverExported(const Catalog &cat, const Builtins &builtins)
+{
+    line(QString());
+    line(QStringLiteral("A browsed class inside your own project"));
+
+    QTemporaryDir temp;
+    if (!temp.isValid()) {
+        check(false, QStringLiteral("a temporary folder for the fixture"));
+        return;
+    }
+    const QString modFolder = QDir(temp.path()).filePath(QStringLiteral("@SudoTestMod"));
+    if (!buildFixtureMod(modFolder)) {
+        check(false, QStringLiteral("the fixture mod is written"));
+        return;
+    }
+
+    Project blank;
+    const ModOpenResult opened =
+        openMod(ModLibrary::readMod(modFolder), cat, builtins, blank);
+    Graph browsed;
+    for (const ModClassView &view : opened.classes)
+        if (view.className == QLatin1String("PlayerBase")) browsed = view.graph;
+    check(graphIsReadOnly(browsed),
+          QStringLiteral("the browser hands over a graph marked read only"));
+
+    // The user's project: one class of their own, and one out of the mod above,
+    // appended the way the window appends what the browser emits.
+    Project project;
+    project.name = QStringLiteral("MyMod");
+
+    ScriptEntry mine;
+    mine.id = QStringLiteral("s1");
+    mine.name = QStringLiteral("MyItem");
+    mine.folder = QStringLiteral("4_World");
+    mine.graph.className = QStringLiteral("MyItem");
+    mine.graph.baseClass = QStringLiteral("ItemBase");
+    project.scripts.append(mine);
+
+    ScriptEntry theirs;
+    theirs.id = QStringLiteral("s2");
+    theirs.name = QStringLiteral("PlayerBase");
+    theirs.folder = QStringLiteral("4_World");
+    theirs.graph = browsed;
+    // Pointed straight back at the file inside the mod, which the window never
+    // does. A .sdzn is a file anyone can hand you, so the rule has to hold on
+    // the graph's own mark rather than on the entry having no path in it.
+    theirs.sourcePath =
+        QDir(modFolder).filePath(QStringLiteral("Scripts/4_World/player.c"));
+    project.scripts.append(theirs);
+
+    check(scriptIsWritable(project.scripts.at(0)),
+          QStringLiteral("a class of your own may be written"));
+    check(!scriptIsWritable(project.scripts.at(1)),
+          QStringLiteral("a class read out of another mod may not"));
+    check(scriptsNeedingFolder(project) == 1,
+          QStringLiteral("one script needs a folder, not two"));
+
+    // The export, run the way the window runs it: the plan decides, the loop
+    // only writes.
+    const QString exportRoot = QDir(temp.path()).filePath(QStringLiteral("export"));
+    QVector<const ScriptEntry *> held;
+    const QVector<ExportTarget> plan = exportPlan(project, exportRoot, &held);
+    check(plan.size() == 1,
+          QStringLiteral("the export plans one file, not two (planned %1)").arg(plan.size()));
+    check(held.size() == 1 && held.first()->name == QLatin1String("PlayerBase"),
+          QStringLiteral("and names the one it is holding back"));
+
+    const QStringList modBefore = folderPrint(modFolder);
+
+    int written = 0;
+    for (const ExportTarget &target : plan) {
+        QDir().mkpath(QFileInfo(target.path).absolutePath());
+        const GenResult gen =
+            generateEnforce(target.script->graph, cat, builtins, project);
+        QFile out(target.path);
+        if (!out.open(QIODevice::WriteOnly)) continue;
+        out.write(gen.code.toUtf8());
+        out.close();
+        written++;
+    }
+    check(written == 1, QStringLiteral("one file is written"));
+    check(QFileInfo::exists(QDir(exportRoot).filePath(QStringLiteral("4_World/MyItem.c"))),
+          QStringLiteral("your own class lands in the mod folder"));
+    check(!QFileInfo::exists(
+              QDir(exportRoot).filePath(QStringLiteral("4_World/PlayerBase.c"))),
+          QStringLiteral("theirs does not"));
+    check(folderPrint(modFolder) == modBefore,
+          QStringLiteral("and the mod it was read out of is byte for byte as it was"));
+
+    // Not just under the name it would have used: nothing written anywhere in
+    // the export carries a line only their class has.
+    int theirCodeOnDisk = 0;
+    QDirIterator walk(exportRoot, QDir::Files | QDir::NoDotAndDotDot,
+                      QDirIterator::Subdirectories);
+    while (walk.hasNext()) {
+        walk.next();
+        QFile f(walk.filePath());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        if (QString::fromUtf8(f.readAll()).contains(QLatin1String("EEKilled")))
+            theirCodeOnDisk++;
+    }
+    check(theirCodeOnDisk == 0,
+          QStringLiteral("no file in the export holds a line of their code (%1 did)")
+              .arg(theirCodeOnDisk));
+
+    // Saving is allowed and coming back editable is not. The mark rides in
+    // Graph::extra, which the .sdzn reader and writer carry through untouched.
+    const QString sdzn = QDir(temp.path()).filePath(QStringLiteral("MyMod.sdzn"));
+    QString error;
+    check(saveProject(project, sdzn, &error),
+          QStringLiteral("the project saves with the browsed class in it (%1)").arg(error));
+
+    Project reloaded;
+    check(loadProject(sdzn, reloaded, &error),
+          QStringLiteral("and loads back (%1)").arg(error));
+    const ScriptEntry *back = nullptr;
+    for (const ScriptEntry &s : reloaded.scripts)
+        if (s.name == QLatin1String("PlayerBase")) back = &s;
+    check(back != nullptr, QStringLiteral("the browsed class survives the round trip"));
+    if (back) {
+        check(graphIsReadOnly(back->graph),
+              QStringLiteral("and comes back read only"));
+        check(graphOrigin(back->graph) == graphOrigin(browsed),
+              QStringLiteral("still saying where it came from (\"%1\")")
+                  .arg(graphOrigin(back->graph)));
+    }
+    QVector<const ScriptEntry *> heldAgain;
+    check(exportPlan(reloaded, exportRoot, &heldAgain).size() == 1
+              && heldAgain.size() == 1,
+          QStringLiteral("and is still left out of an export after the round trip"));
 }
 
 static void testCacheRoundTrip()
@@ -569,6 +718,7 @@ int main(int argc, char *argv[])
     Builtins builtins;
 
     testSyntheticMod(cat, builtins);
+    testBrowsedGraphNeverExported(cat, builtins);
     testCacheRoundTrip();
     testInstalledCorpus(cat, builtins, sampleTarget);
 
