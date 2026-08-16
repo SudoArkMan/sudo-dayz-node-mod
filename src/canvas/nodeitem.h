@@ -207,10 +207,6 @@ private:
     double contentWidth(const QVector<Pin> &dataIn, const QVector<Pin> &dataOut,
                         const GraphNode *node) const;
     const PinLayout *layoutForPin(const QString &pinId) const;
-    // True when `type` is a word the header is already carrying, which is the
-    // case for every `target` pin: its class IS the subtitle. Writing it twice
-    // on a node 168 units wide spends a word and buys nothing.
-    bool alreadyOnHeader(const QString &type) const;
     // Acts on one value field the way its type asks: a bool flips, an enum
     // offers its members, everything else prompts for text. `host` parents any
     // popup and `at` is where it opens, both in screen coordinates.

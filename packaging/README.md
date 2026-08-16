@@ -59,9 +59,17 @@ beside Qt Creator, CMake, Ninja and the MinGW toolchain.
 
 The Installer Framework package itself carries no licence text at all. Its
 installed file list, `C:/Qt/installerResources/qt.tools.ifw.411/4.11.0-0-202603231357ifw-win-x64.txt`,
-records 105,975 files and not one of them is a licence, a COPYING or a notice
-outside the bundled documentation and examples. So there is no grant shipped
-with the tool that would soften the statement above.
+records 966 files: 576 under `examples/`, 383 under `doc/`, 6 in `bin/` and the
+`README`. Twenty-eight of them have a licence-like name and every one of those
+sits under `doc/` or `examples/`, so not one is a licence, a COPYING or a notice
+for the tool itself. So there is no grant shipped with the tool that would
+soften the statement above.
+
+That file is UTF-16 big endian, not text a byte-wise search reads. Searching it
+as ASCII finds nothing at all and looks like the same answer, which is the way
+this particular check goes wrong. The counts above were taken by decoding it
+first. The installed folder agrees with them: `C:/Qt/Tools/QtInstallerFramework/4.11/`
+holds `README`, `bin/`, `doc/` and `examples/` and nothing else.
 
 The nearest thing to one is what Qt puts on its other tools. Qt Creator ships
 `C:/Qt/Tools/QtCreator/share/qtcreator/LICENSE.GPL3-EXCEPT`, which is GPLv3

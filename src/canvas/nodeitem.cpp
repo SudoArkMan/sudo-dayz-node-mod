@@ -9,6 +9,7 @@
 #include "theme.h"
 
 #include <QAction>
+#include <QElapsedTimer>
 #include <QFontMetricsF>
 #include <QGraphicsSceneHoverEvent>
 #include <QGraphicsSceneMouseEvent>
@@ -300,6 +301,15 @@ bool isPlaceholderLabel(const QString &label)
     return label == QLatin1String("return");
 }
 
+// `auto` is not a type, it is the absence of one: pinTypeName writes it for a
+// pin whose kind is Any, which is what an operator preset or an untyped array
+// node carries until something is wired into it. A row that says `auto` has
+// spent a word to say nothing, so it says nothing instead.
+QString displayType(const QString &type)
+{
+    return type == QLatin1String("auto") ? QString() : type;
+}
+
 // The first sentence of a vanilla doc comment, ready to draw on one row.
 //
 // The index flattens the whole comment into one string, so the prose, the
@@ -310,7 +320,24 @@ QString firstSentence(const QString &doc)
 {
     QString text = doc.simplified();
     text.remove(QLatin1Char('`'));
+    // The only markup anywhere in the 7,406 documented declarations is a
+    // handful of bold and break tags. Stripping `<...>` wholesale would take
+    // `array<T>` and `set<Object>` with it, so the four that occur are named.
+    for (const char *tag : {"<b>", "</b>", "<br>", "<br/>"})
+        text.remove(QLatin1String(tag), Qt::CaseInsensitive);
+    text = text.trimmed();
     if (text.isEmpty()) return text;
+
+    // A doxygen tag opens a few hundred of them, and `@fn` carries the method's
+    // own name behind it, which the header is already showing. Both go.
+    const QChar first = text.at(0);
+    if (first == QLatin1Char('@') || first == QLatin1Char('\\')) {
+        const bool named = text.mid(1).startsWith(QLatin1String("fn "));
+        int at = text.indexOf(QLatin1Char(' '));
+        if (at >= 0 && named) at = text.indexOf(QLatin1Char(' '), at + 1);
+        text = at < 0 ? QString() : text.mid(at + 1).trimmed();
+        if (text.isEmpty()) return text;
+    }
 
     static const QStringList blocks = {
         QStringLiteral("[note]"),   QStringLiteral("[warning]"),
@@ -323,8 +350,12 @@ QString firstSentence(const QString &doc)
         const int at = text.indexOf(block, 0, Qt::CaseInsensitive);
         if (at >= 0) cut = qMin(cut, at);
     }
-    const int stop = text.indexOf(QLatin1String(". "));
-    if (stop >= 0) cut = qMin(cut, stop + 1);
+    // A semicolon ends a clause here as often as a full stop does, and the half
+    // in front of it is the half that answers "what is this for".
+    for (const QString &end : {QStringLiteral(". "), QStringLiteral(";")}) {
+        const int at = text.indexOf(end);
+        if (at >= 0) cut = qMin(cut, at + (end == QLatin1String(";") ? 0 : 1));
+    }
     return text.left(cut).trimmed();
 }
 
@@ -383,6 +414,23 @@ QColor valueColor(const PinType &type, bool overridden)
 
 } // namespace
 
+// TEMPORARY INSTRUMENT, remove before finishing.
+namespace {
+struct Prof {
+    qint64 refreshNs = 0;
+    qint64 paintNs = 0;
+    int refreshes = 0;
+    int paints = 0;
+    void tick() {
+        static const bool on = qEnvironmentVariableIsSet("SUDO_PROFILE");
+        if (!on) return;
+        fprintf(stderr, "PROF refresh %d calls %.2f ms | paint %d calls %.2f ms\n",
+                refreshes, refreshNs / 1e6, paints, paintNs / 1e6);
+    }
+};
+Prof g_prof;
+} // namespace
+
 NodeItem::NodeItem(Document *doc, const QString &nodeId, QGraphicsItem *parent)
     : QGraphicsObject(parent), m_doc(doc), m_nodeId(nodeId)
 {
@@ -396,6 +444,11 @@ NodeItem::NodeItem(Document *doc, const QString &nodeId, QGraphicsItem *parent)
 
 void NodeItem::refresh()
 {
+    QElapsedTimer profTimer; profTimer.start();   // TEMPORARY INSTRUMENT
+    struct ProfEnd {
+        QElapsedTimer *t;
+        ~ProfEnd() { g_prof.refreshNs += t->nsecsElapsed(); if (++g_prof.refreshes % 100 == 0) g_prof.tick(); }
+    } profEnd{&profTimer};
     const Graph *g = m_doc ? m_doc->activeGraph() : nullptr;
     const GraphNode *n = g ? g->node(m_nodeId) : nullptr;
 
@@ -433,7 +486,10 @@ void NodeItem::refresh()
     // its subtitle on a description of itself ("if / else", "runs once on
     // init"), so a second sentence saying the same thing in more words would be
     // the node arguing with its own header.
-    m_summary = m_doc ? firstSentence(m_doc->catalog().doc(n->ref)) : QString();
+    // TEMPORARY INSTRUMENT: SUDO_NO_TYPES restores the old shape for a baseline.
+    m_summary = (m_doc && !qEnvironmentVariableIsSet("SUDO_NO_TYPES"))
+                    ? firstSentence(m_doc->catalog().doc(n->ref))
+                    : QString();
     resolveSource(*n);
     m_def = m_doc->defForNode(*n);
     if (m_def.valid) {
@@ -458,6 +514,15 @@ void NodeItem::refresh()
     }
     layoutPins();
     setPos(n->x, n->y);
+    // TEMPORARY INSTRUMENT, remove before finishing.
+    if (qEnvironmentVariableIsSet("SUDO_DUMP_TIPS")) {
+        static int dumped = 0;
+        if (dumped < 6) {
+            dumped++;
+            fprintf(stderr, "=== TOOLTIP %s (%s) ===\n%s\n",
+                    qPrintable(m_nodeId), qPrintable(n->ref), qPrintable(buildTooltip()));
+        }
+    }
     update();
 }
 
@@ -676,11 +741,6 @@ double NodeItem::contentWidth(const QVector<Pin> &dataIn,
     return std::ceil(widest);
 }
 
-bool NodeItem::alreadyOnHeader(const QString &type) const
-{
-    return !type.isEmpty() && (type == m_title || type == m_subtitle);
-}
-
 void NodeItem::layoutPins()
 {
     m_pins.clear();
@@ -760,11 +820,38 @@ void NodeItem::layoutPins()
 
     // One signature for the whole node. Every pin's declared type comes out of
     // it, and building it per pin would allocate a parameter vector per row.
+    // TEMPORARY INSTRUMENT: the old shape, for the before number.
+    static const bool profOff = qEnvironmentVariableIsSet("SUDO_NO_TYPES");
     MethodSig sig;
-    if (m_doc && node) {
+    if (m_doc && node && !profOff) {
         sig = m_doc->catalog().method(node->ref);
         if (!sig.valid) sig = m_doc->catalog().globalFn(node->ref);
     }
+
+    // A variable node's pins carry the variable's own type, and that type is
+    // already the subtitle: it is how a Get and a Set say which member they
+    // are. Writing it a second time on the row below is the same word twice.
+    const bool varNode = node && (node->kind == NodeKind::VarGet
+                                  || node->kind == NodeKind::VarSet);
+
+    // Which rows say what they carry, and which say it another way already.
+    //
+    // An exec pin has no type. A row with a value field spends its width on the
+    // literal the author typed, which answers the question harder than a type
+    // name does. A CONNECTED input is answered by the wire: the pin it came
+    // from is an output, and every output names its type, so the answer is one
+    // hop away and repeating it here would put `a bool  b bool` on a node whose
+    // header already reads `&&`. What is left is the two cases that had no
+    // answer at all before: every output, and an input still waiting for one.
+    const auto wantsType = [&](const PinLayout &pl) {
+        if (pl.pin.type.kind == PinKind::Exec) return false;
+        if (!pl.editor.isEmpty()) return false;
+        if (varNode) return false;
+        // The receiver's class IS the subtitle, on every call node, by
+        // construction: Catalog::build writes the owner into both.
+        if (pl.pin.dir == PinDir::In && pl.pin.id == QLatin1String("target")) return false;
+        return !(pl.pin.dir == PinDir::In && pl.connected);
+    };
 
     const auto place = [&](const QVector<Pin> &list, int firstRow, bool left, bool data) {
         for (int i = 0; i < list.size(); ++i) {
@@ -809,17 +896,8 @@ void NodeItem::layoutPins()
                                    : m_width * 0.62;
             }
 
-            // What the row says about the type it carries. Three rows say it
-            // another way and do not repeat themselves: an exec pin has no
-            // type, a row with a value field spends its width on the literal
-            // the author typed, which answers the question harder than the type
-            // name does, and a pin whose type is already a word on the header
-            // (every `target`, whose class IS the subtitle) has been answered
-            // once already.
-            if (pl.pin.type.kind != PinKind::Exec && pl.editor.isEmpty()) {
-                const QString declared = declaredPinType(sig, pl.pin);
-                if (!alreadyOnHeader(declared)) pl.typeText = declared;
-            }
+            if (wantsType(pl))
+                pl.typeText = displayType(declaredPinType(sig, pl.pin));
             m_pins.append(pl);
         }
     };
@@ -1259,9 +1337,7 @@ void NodeItem::paintPinText(QPainter *p, const PinLayout &pl) const
 void NodeItem::paintSummary(QPainter *p) const
 {
     if (m_bandRule > 0.0) {
-        QColor rule = theme::border();
-        rule.setAlpha(120);
-        p->setPen(QPen(rule, 0.6));
+        p->setPen(QPen(theme::border(), 0.6));
         p->drawLine(QLineF(padding, m_bandRule, m_width - padding, m_bandRule));
     }
     if (m_summaryRect.isEmpty()) return;
@@ -1327,6 +1403,11 @@ void NodeItem::paintListRow(QPainter *p) const
 
 void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *w)
 {
+    QElapsedTimer profTimer; profTimer.start();   // TEMPORARY INSTRUMENT
+    struct ProfEnd {
+        QElapsedTimer *t;
+        ~ProfEnd() { g_prof.paintNs += t->nsecsElapsed(); if (++g_prof.paints % 100 == 0) g_prof.tick(); }
+    } profEnd{&profTimer};
     Q_UNUSED(opt);
     Q_UNUSED(w);
     p->setRenderHint(QPainter::Antialiasing, true);
@@ -1627,20 +1708,24 @@ QString NodeItem::buildTooltip() const
         if (!m_def.subtitle.isEmpty()) out.last() += QStringLiteral("  ") + m_def.subtitle;
     }
 
+    const auto plain = [](QString s) { s.remove(QLatin1Char('`')); return s; };
+
     const NodeHelp help = cat.explain(node->ref);
     const QString summary = help.valid && !help.summary.isEmpty() ? help.summary : m_def.doc;
     if (!summary.isEmpty()) {
-        QString prose = summary;
-        prose.remove(QLatin1Char('`'));
-        out << QString() << prose;
+        out << QString() << plain(summary);
+    } else if (help.valid && !help.effects.isEmpty()) {
+        // Three declarations in four carry no doc comment at all, so what
+        // stands in is what explain() reads off the signature: which object the
+        // call lands on, what it hands back, which pins it writes through. The
+        // Inspector says the same thing at length and says so out loud; here it
+        // is the difference between a tooltip worth opening and a bare line.
+        out << QString();
+        for (const QString &effect : help.effects) out << plain(effect);
     }
     if (help.valid && !help.cautions.isEmpty()) {
         out << QString();
-        for (const QString &c : help.cautions) {
-            QString one = c;
-            one.remove(QLatin1Char('`'));
-            out << QStringLiteral("Caution: ") + one;
-        }
+        for (const QString &c : help.cautions) out << QStringLiteral("Caution: ") + plain(c);
     }
 
     const QString where = help.valid && !help.source.isEmpty() ? help.source : m_def.loc;
@@ -1649,13 +1734,8 @@ QString NodeItem::buildTooltip() const
     if (!m_diags.isEmpty()) {
         out << QString();
         for (const Diagnostic &d : m_diags) {
-            QString one = d.message;
-            one.remove(QLatin1Char('`'));
-            if (!d.hint.isEmpty()) {
-                QString hint = d.hint;
-                hint.remove(QLatin1Char('`'));
-                one += QLatin1Char(' ') + hint;
-            }
+            QString one = plain(d.message);
+            if (!d.hint.isEmpty()) one += QLatin1Char(' ') + plain(d.hint);
             out << one;
         }
     }
