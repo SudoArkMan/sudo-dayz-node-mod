@@ -49,6 +49,7 @@ private slots:
     void onBeginModeChanged(int index);
     void onSuperToggled(bool checked);
     void onClassCommitted();
+    void onElementCommitted();
     void onTimingNameCommitted();
     void onTimingQueueChanged(int index);
     void onNodeSelectionChanged();
@@ -70,6 +71,13 @@ private:
     // stayed on `new Class()` for ever while its own help said to set it here.
     QComboBox *m_classPick;
     bool m_classesLoaded = false;
+    // What a Make Array declares and what the rest of the array group works on.
+    // Without it the whole group stays on `auto`: the canvas cannot guess a type
+    // it has not been told, deliberately, so this is the only place the answer
+    // can come from and every one of those nodes' help pointed at a control
+    // that did not exist.
+    QComboBox *m_elementPick;
+    QString m_elementNodeId;
     // Which node the class box is currently showing. editingFinished fires on
     // focus leaving, and clicking straight from one node to another can deliver
     // that after the selection has already moved, which would write the old

@@ -1566,6 +1566,77 @@ int main(int argc, char *argv[])
         check(rulesOf(dropped).contains(QStringLiteral("DZ322")),
               QStringLiteral("an array nobody reads is reported"));
 
+        // An element pin left empty falls back to its type's default, and the
+        // default for a class is null: a hole in a `ref` array that the first
+        // loop over it dereferences. Nothing new reports that, and nothing
+        // should, because DZ106 already does and calls it an error. What was
+        // missing was a check that it stays that way, since an element pin is
+        // the first input in this build whose type comes from an option on the
+        // node rather than from its definition, and a pin that resolved to
+        // something editable would drop out of DZ106 without failing anywhere.
+        GraphVariable boxes;
+        boxes.id = QStringLiteral("v9");
+        boxes.name = QStringLiteral("m_Boxes");
+        boxes.type = QStringLiteral("ref array<ref ItemBase>");
+        GraphNode objMake = make;
+        objMake.opts.insert(QStringLiteral("type"), QStringLiteral("ref ItemBase"));
+        objMake.inputs.clear();
+        GraphNode setBoxes;
+        setBoxes.id = QStringLiteral("sb");
+        setBoxes.kind = NodeKind::VarSet;
+        setBoxes.ref = QStringLiteral("var.set.v9");
+        Graph nulls;
+        nulls.className = QStringLiteral("SUDO_Arrays");
+        nulls.baseClass = QStringLiteral("ItemBase");
+        nulls.variables << boxes;
+        nulls.nodes << begin << objMake << setBoxes;
+        nulls.edges.append({QStringLiteral("e1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                            {QStringLiteral("mk"), QStringLiteral("exec")}, {}});
+        nulls.edges.append({QStringLiteral("e2"), {QStringLiteral("mk"), QStringLiteral("exec")},
+                            {QStringLiteral("sb"), QStringLiteral("exec")}, {}});
+        nulls.edges.append({QStringLiteral("e3"), {QStringLiteral("mk"), QStringLiteral("arr")},
+                            {QStringLiteral("sb"), QStringLiteral("v")}, {}});
+        check(generate(nulls).contains(QStringLiteral("m_Boxes.Insert(null);")),
+              QStringLiteral("an empty element pin on an object array writes a null"));
+        check(rulesOf(nulls).contains(QStringLiteral("DZ106")),
+              QStringLiteral("and it is an error before it ever runs"));
+
+        // Not set on the node either, so the element pins are Any. That is the
+        // state a node is in between being placed and being told what it holds,
+        // and Any has no field to type into, so it has to report as well.
+        Graph inferred = nulls;
+        for (GraphNode &n : inferred.nodes)
+            if (n.ref == bi::MakeArray) n.opts.remove(QStringLiteral("type"));
+        check(rulesOf(inferred).contains(QStringLiteral("DZ106")),
+              QStringLiteral("an element pin with no type yet is reported too"));
+
+        // Taking the pins off with the minus is the fix, and it has to clear it.
+        Graph emptied = nulls;
+        for (GraphNode &n : emptied.nodes)
+            if (n.ref == bi::MakeArray) n.opts.insert(QStringLiteral("count"),
+                                                      QStringLiteral("0"));
+        check(!rulesOf(emptied).contains(QStringLiteral("DZ106")),
+              QStringLiteral("a Make Array with no elements has nothing to report"));
+
+        // "" and 0 are values a mod may well mean, and both have a field on the
+        // node to type them into, so an array of strings is not this rule's.
+        Graph strings = nulls;
+        for (GraphNode &n : strings.nodes)
+            if (n.ref == bi::MakeArray) n.opts.insert(QStringLiteral("type"),
+                                                      QStringLiteral("string"));
+        check(!rulesOf(strings).contains(QStringLiteral("DZ106")),
+              QStringLiteral("an empty element on a string array is not reported"));
+
+        // And a filled one is finished.
+        Graph filled = nulls;
+        filled.nodes << get;
+        filled.edges.append({QStringLiteral("e4"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                             {QStringLiteral("mk"), QStringLiteral("el0")}, {}});
+        filled.edges.append({QStringLiteral("e5"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                             {QStringLiteral("mk"), QStringLiteral("el1")}, {}});
+        check(!rulesOf(filled).contains(QStringLiteral("DZ106")),
+              QStringLiteral("every element wired means nothing to report"));
+
         // ------------------------------------------- what could not connect
         // The shape from the user's own screenshot: an array<ref X> coming out
         // of a catalogue call. The array group has to take it.
@@ -1599,6 +1670,113 @@ int main(int argc, char *argv[])
             check(target && !canConnect(containers, *target),
                   QStringLiteral("the catalogue's own array.Insert still cannot"));
         }
+    }
+
+    // ------------------------------------------------ what a node row prints
+    //
+    // A pin row on the canvas now names the type it carries, and it takes that
+    // name from the signature rather than from the pin, because a pin kept only
+    // a kind and a class and gives `array<ItemBase>` back for something the
+    // file spells `ref array<ref ItemBase>`. NodeItem is compiled into the
+    // application alone and no test target can reach it, so what is pinned here
+    // is the catalogue side it reads: if any of this stops holding, the word on
+    // the row goes quietly wrong rather than failing anywhere.
+    out << Qt::endl << "what a pin row can say about its type" << Qt::endl;
+    {
+        // Walked rather than searched. Ranking decides what a human sees and
+        // has no business deciding what a check looks at: a name six classes
+        // declare can rank the wrong one first and turn a real regression into
+        // a test that quietly stops examining anything.
+        const int methodCount = cat.totals().value(QStringLiteral("methods"));
+        const auto sigOf = [&cat, methodCount](const QString &owner, const QString &name) {
+            for (int i = 0; i < methodCount; ++i) {
+                const QString key = QStringLiteral("m%1").arg(i);
+                const MethodSig sig = cat.method(key);
+                if (sig.valid && sig.owner == owner && sig.name == name)
+                    return QPair<QString, MethodSig>(key, sig);
+            }
+            return QPair<QString, MethodSig>(QString(), MethodSig());
+        };
+
+        // A generic return arrives whole. This is the shape from the user's own
+        // screenshot: the node used to print `return` for it.
+        const auto cargo = sigOf(QStringLiteral("EntityAI"),
+                                 QStringLiteral("GetAttachmentsWithCargo"));
+        check(cargo.second.valid
+                  && cargo.second.ret == QLatin1String("array<EntityAI>"),
+              QStringLiteral("a generic return keeps its spelling, got '%1'")
+                  .arg(cargo.second.ret));
+
+        // And a typedef stays a typedef. Reconstructing it from the pin would
+        // print `array<string>`, which is the same type and not the word the
+        // reader will search P:\\scripts for.
+        const auto hidden = sigOf(QStringLiteral("EntityAI"),
+                                  QStringLiteral("GetHiddenSelections"));
+        check(hidden.second.valid
+                  && hidden.second.ret == QLatin1String("TStringArray"),
+              QStringLiteral("a typedef return is not expanded, got '%1'")
+                  .arg(hidden.second.ret));
+
+        // The row finds its type by the digits in the pin id, so the numbering
+        // has to be an index into the parameters and not a count of the pins in
+        // front of it. Catalog::paramPins numbers an out parameter's output pin
+        // `o<N>` after the same N, which is what makes one lookup serve both.
+        if (!cargo.first.isEmpty()) {
+            const auto colour = sigOf(QStringLiteral("EntityAI"), QStringLiteral("GetColor"));
+            const NodeDef def = cat.defFor(colour.first);
+            bool numbered = colour.second.valid && !colour.second.params.isEmpty();
+            for (const Pin &p : def.pins) {
+                const QChar family = p.id.isEmpty() ? QChar() : p.id.at(0);
+                if (family != QLatin1Char('p') && family != QLatin1Char('o')) continue;
+                bool ok = false;
+                const int index = p.id.mid(1).toInt(&ok);
+                if (!ok || index < 0 || index >= colour.second.params.size()) numbered = false;
+            }
+            check(numbered,
+                  QStringLiteral("every p<N> and o<N> pin indexes a real parameter"));
+        }
+
+        // `return` is the one label the row drops in favour of the type, and it
+        // has to be exactly that word on a call that returns something.
+        const auto health = sigOf(QStringLiteral("Object"), QStringLiteral("GetHealth"));
+        if (!health.first.isEmpty()) {
+            const NodeDef def = cat.defFor(health.first);
+            const Pin *ret = def.pin(QStringLiteral("ret"), PinDir::Out);
+            check(ret && ret->label == QLatin1String("return"),
+                  QStringLiteral("a returning call labels its output pin `return`"));
+        }
+
+        // The receiver is the one pin the row deliberately says nothing about,
+        // because its class IS the subtitle. That is only true while the two
+        // come from the same place.
+        const auto setHealth = sigOf(QStringLiteral("Object"), QStringLiteral("SetHealth"));
+        if (!setHealth.first.isEmpty()) {
+            const NodeDef def = cat.defFor(setHealth.first);
+            const Pin *target = def.pin(QStringLiteral("target"), PinDir::In);
+            check(target && target->type.cls == def.subtitle
+                      && !def.subtitle.isEmpty(),
+                  QStringLiteral("a target pin's class is the node's subtitle"));
+        }
+
+        // The sentence on the exec row comes from here, and only from here: a
+        // key with no comment behind it has to answer empty rather than
+        // answering something derived, or three nodes in four would carry a
+        // line the declaration never said.
+        int documented = 0;
+        int silent = 0;
+        for (int i = 0; i < 4000; ++i) {
+            const QString key = QStringLiteral("m%1").arg(i);
+            if (!cat.method(key).valid) continue;
+            if (cat.doc(key).isEmpty()) silent++;
+            else documented++;
+        }
+        check(documented > 200 && silent > documented,
+              QStringLiteral("doc() answers for some and stays quiet for most (%1 of %2)")
+                  .arg(documented).arg(documented + silent));
+        check(cat.doc(QStringLiteral("en0")).isEmpty()
+                  && cat.doc(QStringLiteral("co0")).isEmpty()
+                  && cat.doc(bi::MakeArray).isEmpty(),
+              QStringLiteral("enums, constants and builtins carry no vanilla comment"));
     }
 
     out << Qt::endl << (failures == 0 ? "ALL CORE TESTS PASSED"

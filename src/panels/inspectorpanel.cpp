@@ -4,6 +4,7 @@
 #include "codegen.h"
 #include "document.h"
 #include "enforce/highlighter.h"
+#include "nodeinputs.h"
 #include "theme.h"
 #include "variablespanel.h"
 #include "widgets/codedialog.h"
@@ -191,6 +192,29 @@ NodeHelp fallbackHelp(const Document &doc, const GraphNode &node, const NodeDef 
     return help;
 }
 
+// The array group: every node whose pins are decided by one element type, plus
+// Make Array, which declares the array the rest of them work on. Spelled here
+// rather than exported from builtins.cpp because it is a question about this
+// panel's controls, not about what the nodes generate.
+bool isArrayNode(const QString &ref)
+{
+    static const QVector<QString> group = {
+        bi::MakeArray,  bi::ArrayCount,    bi::ArrayGet,   bi::ArrayInsert,
+        bi::ArrayInsertAt, bi::ArrayRemove, bi::ArrayClear, bi::ArrayFind,
+        bi::ArraySort,  bi::ArrayForIndex,
+    };
+    return group.contains(ref);
+}
+
+// Enforce types an array can hold that no class list carries. Ordered the way a
+// mod reaches for them rather than alphabetically, because the box is six
+// thousand rows long behind these and the first six are most of the answers.
+QStringList elementPrimitives()
+{
+    return {QStringLiteral("string"), QStringLiteral("int"), QStringLiteral("float"),
+            QStringLiteral("bool"),   QStringLiteral("vector")};
+}
+
 QString signatureOf(const Catalog &cat, const QString &ref)
 {
     MethodSig sig = cat.method(ref);
@@ -331,6 +355,8 @@ QString findingsHtml(const AnalysisResult &result, const QString &name)
 InspectorPanel::InspectorPanel(Document *doc, QWidget *parent)
     : QWidget(parent), m_doc(doc), m_title(new QLabel(this)), m_kind(new QLabel(this)),
       m_body(new QTextBrowser(this)), m_beginMode(nullptr), m_callSuper(nullptr),
+      m_classPick(nullptr), m_elementPick(nullptr),
+      m_timingName(nullptr), m_timingQueue(nullptr),
       m_varPane(nullptr), m_varName(nullptr), m_varNameError(nullptr),
       m_varType(nullptr), m_varValue(nullptr), m_varDefaultWarning(nullptr),
       m_defaultCommit(nullptr), m_varPreview(nullptr),
@@ -469,6 +495,35 @@ InspectorPanel::InspectorPanel(Document *doc, QWidget *parent)
     classBox->setVisible(false);
     layout->addWidget(classBox);
 
+    auto *elementBox = new QWidget(this);
+    auto *elementLayout = new QVBoxLayout(elementBox);
+    elementLayout->setContentsMargins(0, 6, 0, 0);
+    elementLayout->setSpacing(3);
+    auto *elementLabel = new QLabel(tr("What does the array hold?"), elementBox);
+    elementLabel->setFont(theme::uiFont(8, true));
+    elementLayout->addWidget(elementLabel);
+    m_elementPick = new QComboBox(elementBox);
+    // Editable for the same reason the class box is, and for one more: half the
+    // arrays a mod writes hold a primitive, and `string` is not a class name.
+    m_elementPick->setEditable(true);
+    m_elementPick->setInsertPolicy(QComboBox::NoInsert);
+    if (QCompleter *done = m_elementPick->completer()) {
+        done->setCaseSensitivity(Qt::CaseInsensitive);
+        done->setFilterMode(Qt::MatchContains);
+        done->setCompletionMode(QCompleter::PopupCompletion);
+    }
+    elementLayout->addWidget(m_elementPick);
+    auto *elementNote = new QLabel(
+        tr("Leave it blank and the node stays untyped: the pins say nothing and the "
+           "generator reads the type off whatever the array is wired into."),
+        elementBox);
+    elementNote->setObjectName(QStringLiteral("note"));
+    elementNote->setWordWrap(true);
+    elementNote->setStyleSheet(QStringLiteral("color: %1").arg(theme::textDim().name()));
+    elementLayout->addWidget(elementNote);
+    elementBox->setVisible(false);
+    layout->addWidget(elementBox);
+
     auto *timingBox = new QWidget(this);
     auto *timingLayout = new QVBoxLayout(timingBox);
     timingLayout->setContentsMargins(0, 6, 0, 0);
@@ -521,6 +576,9 @@ InspectorPanel::InspectorPanel(Document *doc, QWidget *parent)
     connect(m_classPick, &QComboBox::activated, this, &InspectorPanel::onClassCommitted);
     if (QLineEdit *edit = m_classPick->lineEdit())
         connect(edit, &QLineEdit::editingFinished, this, &InspectorPanel::onClassCommitted);
+    connect(m_elementPick, &QComboBox::activated, this, &InspectorPanel::onElementCommitted);
+    if (QLineEdit *edit = m_elementPick->lineEdit())
+        connect(edit, &QLineEdit::editingFinished, this, &InspectorPanel::onElementCommitted);
 
     if (m_doc) {
         connect(m_doc, &Document::selectionChanged,
@@ -868,6 +926,24 @@ void InspectorPanel::refresh()
         }
         m_classPick->setCurrentText(bi::castClass(*node));
         m_classNodeId = node->id;
+    }
+
+    QWidget *elementBox = optionBox(m_elementPick);
+    const bool takesElement = isArrayNode(node->ref);
+    if (elementBox) elementBox->setVisible(takesElement);
+    if (!takesElement) {
+        m_elementNodeId.clear();
+    } else if (!isBusy(m_elementPick)) {
+        const QSignalBlocker blocker(m_elementPick);
+        if (m_elementPick->count() == 0 && m_doc) {
+            // The primitives first, because they are what most arrays hold and
+            // they are the entries nothing else in this box would offer: the
+            // catalogue knows classes, and `string` is not one.
+            m_elementPick->addItems(elementPrimitives());
+            m_elementPick->addItems(m_doc->catalog().classNames());
+        }
+        m_elementPick->setCurrentText(bi::declaredElementType(*node));
+        m_elementNodeId = node->id;
     }
 
     QWidget *timingBox = optionBox(m_timingName);
@@ -1261,6 +1337,24 @@ void InspectorPanel::onClassCommitted()
         live->opts.remove(QStringLiteral("class"));
     }
     m_doc->commitEdit();
+}
+
+void InspectorPanel::onElementCommitted()
+{
+    // The box has to still be showing the node it is about to write to;
+    // editingFinished also arrives on focus leaving, which can land after the
+    // selection has already moved to another node.
+    if (m_nodeId.isEmpty() || m_elementNodeId != m_nodeId) return;
+    if (!m_doc || !m_doc->activeGraph()) return;
+    const GraphNode *node = m_doc->activeGraph()->node(m_nodeId);
+    if (!node) return;
+
+    const QString type = m_elementPick->currentText().trimmed();
+    if (bi::declaredElementType(*node) == type) return;
+    // setNodeOption is the one writer: it removes the key on an empty value, so
+    // "not set" stays one state rather than becoming a blank string that reads
+    // as a type nobody can spell.
+    setNodeOption(m_doc, m_nodeId, QStringLiteral("type"), type);
 }
 
 void InspectorPanel::onTimingNameCommitted()

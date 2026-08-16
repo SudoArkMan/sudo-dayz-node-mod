@@ -96,6 +96,62 @@ Sentence case everywhere. No all-caps labels, no wide letter-spacing.
 - Selected: 1.5px `#3f7fb5` outline. Error: 1.5px `#d9534f`. Warning amber.
 - A node with diagnostics shows a small badge in the header's right corner.
 
+### What a node says about itself
+
+A node is read at a glance and at 75 percent zoom with several hundred others
+around it, so height is the scarce thing and every word has to be paid for out
+of space the node already spends. Nothing below makes a node taller or wider
+than the rules above make it.
+
+- **A pin row names the type it carries**, in the pin's own colour at alpha 165,
+  beside the pin's name: after it on an input, in front of it on an output, so
+  the name always sits against the node's edge. The type is spelled the way the
+  declaration spelled it, from the signature rather than from the pin, because
+  the pin kept only a kind and a class and gives `array<ItemBase>` back for what
+  the file wrote as `ref array<ref ItemBase>`.
+- Four rows say nothing about their type, each because the node already
+  answers another way: an exec pin has none; a row carrying a value field spends
+  its width on the literal the author typed; a **connected** input is answered
+  by the output at the other end of the wire, which names its own type; and
+  `target`, whose class IS the subtitle, on every call node, by construction.
+  A variable node says nothing on either pin for the same reason. `auto` is
+  never drawn: it is the absence of a type, not a type.
+- `return` is the one label a row drops in favour of the type. It restates which
+  side of the node the pin is on and nothing else.
+- The name wins the room when the two do not both fit; the type elides, and
+  disappears entirely below 18 units rather than shrinking to a cut mark. Types
+  never widen a node: `contentWidth()` and `kMaxWidth` are unchanged.
+- **The exec row carries the declaration's own first sentence** when it has one,
+  in `syntax::comment()`, elided. On a call node that row holds a triangle at
+  each edge and a hundred and fifty units of nothing between them, so the
+  sentence is free. Vanilla doc comments only: a builtin already spends its
+  subtitle on a description of itself. Whatever labels the exec pins carry are
+  measured out of the way first.
+- **A hairline rule** in `border()` at 0.6px separates the flow rows from the
+  data rows, drawn only when the node has both. It is the only division a node
+  gets, because it is the only real one: above it the node says when it runs,
+  below it what it works on.
+- **A tooltip** carries the long answer, built on first hover rather than at
+  load: the whole signature with every parameter and default, the summary or,
+  when there is none, what `explain()` reads off the declaration, the cautions,
+  the source location, and the findings the badge stands for.
+
+### What belongs in the Inspector instead
+
+The canvas is glanced at; the Inspector is read. Anything that needs sentences
+rather than a phrase, anything a reader only wants for one node at a time, and
+anything that would be the same on hundreds of nodes at once, goes here: the
+effects, the cautions at length, the owner and category table, the full
+signature, and the per-node settings (Begin mode, cast target, timer name,
+array element type). The node's job is to be identifiable and correct at a
+glance; the Inspector's job is to be complete.
+
+The findings a node carries stay a badge on the canvas and prose in the
+Inspector. They are not repeated as header marks: the analyser already flags a
+protected call this graph cannot make, an override of a `proto native`, and an
+API behind an `#ifdef`, so a second quieter copy of the same fact beside the
+badge would say it twice and mean it once.
+
 ## Wires
 
 Cubic bezier with horizontal tangents; control offset is

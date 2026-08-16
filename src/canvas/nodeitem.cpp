@@ -9,7 +9,6 @@
 #include "theme.h"
 
 #include <QAction>
-#include <QElapsedTimer>
 #include <QFontMetricsF>
 #include <QGraphicsSceneHoverEvent>
 #include <QGraphicsSceneMouseEvent>
@@ -359,6 +358,18 @@ QString firstSentence(const QString &doc)
     return text.left(cut).trimmed();
 }
 
+// Whether two pieces of text carry the same words. Spacing and case are
+// ignored, so a comment reading "Create component" is recognised as a second
+// copy of a title reading "CreateComponent".
+bool sameWords(const QString &a, const QString &b)
+{
+    QString left = a.simplified().remove(QLatin1Char(' '));
+    QString right = b.simplified().remove(QLatin1Char(' '));
+    while (left.endsWith(QLatin1Char('.'))) left.chop(1);
+    while (right.endsWith(QLatin1Char('.'))) right.chop(1);
+    return !left.isEmpty() && left.compare(right, Qt::CaseInsensitive) == 0;
+}
+
 Severity worstOf(const QVector<Diagnostic> &diags, bool *any)
 {
     Severity worst = Severity::Info;
@@ -414,23 +425,6 @@ QColor valueColor(const PinType &type, bool overridden)
 
 } // namespace
 
-// TEMPORARY INSTRUMENT, remove before finishing.
-namespace {
-struct Prof {
-    qint64 refreshNs = 0;
-    qint64 paintNs = 0;
-    int refreshes = 0;
-    int paints = 0;
-    void tick() {
-        static const bool on = qEnvironmentVariableIsSet("SUDO_PROFILE");
-        if (!on) return;
-        fprintf(stderr, "PROF refresh %d calls %.2f ms | paint %d calls %.2f ms\n",
-                refreshes, refreshNs / 1e6, paints, paintNs / 1e6);
-    }
-};
-Prof g_prof;
-} // namespace
-
 NodeItem::NodeItem(Document *doc, const QString &nodeId, QGraphicsItem *parent)
     : QGraphicsObject(parent), m_doc(doc), m_nodeId(nodeId)
 {
@@ -444,11 +438,6 @@ NodeItem::NodeItem(Document *doc, const QString &nodeId, QGraphicsItem *parent)
 
 void NodeItem::refresh()
 {
-    QElapsedTimer profTimer; profTimer.start();   // TEMPORARY INSTRUMENT
-    struct ProfEnd {
-        QElapsedTimer *t;
-        ~ProfEnd() { g_prof.refreshNs += t->nsecsElapsed(); if (++g_prof.refreshes % 100 == 0) g_prof.tick(); }
-    } profEnd{&profTimer};
     const Graph *g = m_doc ? m_doc->activeGraph() : nullptr;
     const GraphNode *n = g ? g->node(m_nodeId) : nullptr;
 
@@ -486,10 +475,7 @@ void NodeItem::refresh()
     // its subtitle on a description of itself ("if / else", "runs once on
     // init"), so a second sentence saying the same thing in more words would be
     // the node arguing with its own header.
-    // TEMPORARY INSTRUMENT: SUDO_NO_TYPES restores the old shape for a baseline.
-    m_summary = (m_doc && !qEnvironmentVariableIsSet("SUDO_NO_TYPES"))
-                    ? firstSentence(m_doc->catalog().doc(n->ref))
-                    : QString();
+    m_summary = m_doc ? firstSentence(m_doc->catalog().doc(n->ref)) : QString();
     resolveSource(*n);
     m_def = m_doc->defForNode(*n);
     if (m_def.valid) {
@@ -501,6 +487,9 @@ void NodeItem::refresh()
         m_title = n->ref;
         m_subtitle = QStringLiteral("unknown node");
     }
+    // Some of these comments are the method's own name and nothing else, which
+    // on the row under the header is the node saying what it is called twice.
+    if (!m_summary.isEmpty() && sameWords(m_summary, m_title)) m_summary.clear();
 
     layoutCode(*n);
     if (!m_code.isEmpty()) {
@@ -514,15 +503,6 @@ void NodeItem::refresh()
     }
     layoutPins();
     setPos(n->x, n->y);
-    // TEMPORARY INSTRUMENT, remove before finishing.
-    if (qEnvironmentVariableIsSet("SUDO_DUMP_TIPS")) {
-        static int dumped = 0;
-        if (dumped < 6) {
-            dumped++;
-            fprintf(stderr, "=== TOOLTIP %s (%s) ===\n%s\n",
-                    qPrintable(m_nodeId), qPrintable(n->ref), qPrintable(buildTooltip()));
-        }
-    }
     update();
 }
 
@@ -820,10 +800,8 @@ void NodeItem::layoutPins()
 
     // One signature for the whole node. Every pin's declared type comes out of
     // it, and building it per pin would allocate a parameter vector per row.
-    // TEMPORARY INSTRUMENT: the old shape, for the before number.
-    static const bool profOff = qEnvironmentVariableIsSet("SUDO_NO_TYPES");
     MethodSig sig;
-    if (m_doc && node && !profOff) {
+    if (m_doc && node) {
         sig = m_doc->catalog().method(node->ref);
         if (!sig.valid) sig = m_doc->catalog().globalFn(node->ref);
     }
@@ -1403,11 +1381,6 @@ void NodeItem::paintListRow(QPainter *p) const
 
 void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *w)
 {
-    QElapsedTimer profTimer; profTimer.start();   // TEMPORARY INSTRUMENT
-    struct ProfEnd {
-        QElapsedTimer *t;
-        ~ProfEnd() { g_prof.paintNs += t->nsecsElapsed(); if (++g_prof.paints % 100 == 0) g_prof.tick(); }
-    } profEnd{&profTimer};
     Q_UNUSED(opt);
     Q_UNUSED(w);
     p->setRenderHint(QPainter::Antialiasing, true);
@@ -1756,6 +1729,13 @@ void NodeItem::hoverEnterEvent(QGraphicsSceneHoverEvent *e)
 
 void NodeItem::hoverMoveEvent(QGraphicsSceneHoverEvent *e)
 {
+    // Also here, not only on entry: a graph change throws the tooltip away, and
+    // the cursor can be sitting on this node when it happens, in which case
+    // there is no second enter to rebuild it on.
+    if (!m_tipReady) {
+        m_tipReady = true;
+        setToolTip(buildTooltip());
+    }
     const double reach = editorReach(e->widget());
     const int button = listButtonAt(e->scenePos(), reach);
     if (button != m_hoverListButton) {
