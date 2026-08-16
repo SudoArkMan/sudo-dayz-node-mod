@@ -327,6 +327,13 @@ NodeDef defOf(Ctx &ctx, const GraphNode &node);
 Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth);
 QString expr(Ctx &ctx, const GraphNode &node, const QString &pinId);
 
+// `expr`, bracketed when the value is built out of an operator loose enough
+// that the brackets matter. `outer` is the binding strength of whatever the
+// value is going into; 11 is tighter than every operator, which is what a
+// target, an index or a `!` needs.
+QString operandExpr(Ctx &ctx, const GraphNode &node, const QString &pinId, int outer,
+                    bool rightHandSide);
+
 // Variable nodes carry the id, either bare or behind "var.get." / "var.set.".
 // Resolution is an EXACT id match in one shared helper: matching on a suffix
 // binds the wrong member as soon as one id ends with another.
@@ -444,6 +451,18 @@ Emitted subChain(Ctx &ctx, const GraphNode &node, const QString &pin, int depth)
     return out;
 }
 
+// A loop variable name carried in from an imported file. Anything that is not
+// one plain identifier is not a name, and the generator invents its own.
+QString carriedName(const GraphNode &node, const QString &key)
+{
+    const QString name = node.opts.value(key).trimmed();
+    if (name.isEmpty()) return {};
+    if (!name.at(0).isLetter() && name.at(0) != QLatin1Char('_')) return {};
+    for (const QChar c : name)
+        if (!c.isLetterOrNumber() && c != QLatin1Char('_')) return {};
+    return name;
+}
+
 QString arrayElementType(Ctx &ctx, const GraphNode &node, const QString &pinId)
 {
     const GraphEdge *e = edgeInto(*ctx.graph, node.id, pinId);
@@ -478,7 +497,7 @@ QString callTarget(Ctx &ctx, const GraphNode &node, const MethodSig &sig, const 
                    bool *bad)
 {
     if (edgeInto(*ctx.graph, node.id, QStringLiteral("target")))
-        return expr(ctx, node, QStringLiteral("target"));
+        return operandExpr(ctx, node, QStringLiteral("target"), 11, false);
     // The game singleton is reachable from anywhere, but only through GetGame().
     if (sig.owner == QLatin1String("CGame")) return QStringLiteral("GetGame()");
     // Nothing can be proved when the base class is another script in this
@@ -580,6 +599,28 @@ Call callExpression(Ctx &ctx, const GraphNode &node)
     return call;
 }
 
+// A call whose result is read once, by the statement that runs straight after
+// it, needs no local of its own: the reader can say the call itself. Writing
+// `int v0 = GetQuantity(); m_Count = v0;` for `m_Count = GetQuantity();` is
+// correct, is not what anyone wrote, and is most of why an imported method came
+// back spelled differently and had to keep its text.
+//
+// The reader has to be the very next node in the exec chain, or inlining would
+// move the call past whatever runs between them.
+bool readOnceByNext(Ctx &ctx, const GraphNode &node)
+{
+    const GraphEdge *succ = edgeFrom(*ctx.graph, node.id, QStringLiteral("exec"));
+    if (!succ) return false;
+    int reads = 0;
+    QString reader;
+    for (const GraphEdge &e : ctx.graph->edges) {
+        if (e.from.node != node.id || e.from.pin != QLatin1String("ret")) continue;
+        reads++;
+        reader = e.to.node;
+    }
+    return reads == 1 && reader == succ->to.node;
+}
+
 Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
 {
     if (ctx.aborted) return {};
@@ -675,7 +716,10 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
     }
 
     if (node.ref == QLatin1String("bi.forLoop")) {
-        const QString v = QStringLiteral("i%1").arg(ctx.tempN++);
+        // The counter keeps the name the imported loop gave it, so a converted
+        // method comes back reading the way it was written.
+        QString v = carriedName(node, QStringLiteral("var"));
+        if (v.isEmpty()) v = QStringLiteral("i%1").arg(ctx.tempN++);
         ctx.temps.insert(tempKey(node.id, QStringLiteral("index")), v);
         const Emitted body = subChain(ctx, node, QStringLiteral("body"), depth + 1);
         // Hoisted rather than concatenated inline: resolving a pin allocates
@@ -696,16 +740,21 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
     }
 
     if (node.ref == QLatin1String("bi.forEach")) {
-        const QString item = QStringLiteral("item%1").arg(ctx.tempN++);
+        QString item = carriedName(node, QStringLiteral("item"));
+        if (item.isEmpty()) item = QStringLiteral("item%1").arg(ctx.tempN++);
         const QString arrExpr = expr(ctx, node, QStringLiteral("array"));
-        const QString elemType = arrayElementType(ctx, node, QStringLiteral("array"));
+        // An element type set on the node is what the loop was written with, so
+        // it beats anything derived from whatever feeds the array pin.
+        QString elemType = node.opts.value(QStringLiteral("type"));
+        if (elemType.isEmpty()) elemType = arrayElementType(ctx, node, QStringLiteral("array"));
         ctx.temps.insert(tempKey(node.id, QStringLiteral("item")), item);
         // The node offers an index, so it has to be bound: the two-variable
         // foreach is the Enforce form for it. Only declared when something
         // reads it, since an unused loop variable is noise.
         QString index;
         if (edgeFrom(*ctx.graph, node.id, QStringLiteral("index"))) {
-            index = QStringLiteral("idx%1").arg(ctx.tempN++);
+            index = carriedName(node, QStringLiteral("idx"));
+            if (index.isEmpty()) index = QStringLiteral("idx%1").arg(ctx.tempN++);
             ctx.temps.insert(tempKey(node.id, QStringLiteral("index")), index);
         }
         const Emitted body = subChain(ctx, node, QStringLiteral("body"), depth + 1);
@@ -832,6 +881,11 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                            {pad + QStringLiteral("// ") + cls
                             + QStringLiteral(" cannot be created with new (see Warnings)")});
         }
+        if (readOnceByNext(ctx, node)) {
+            ctx.temps.insert(tempKey(node.id, QStringLiteral("ret")),
+                             QStringLiteral("new ") + cls + QStringLiteral("()"));
+            return {};
+        }
         const QString v = QStringLiteral("obj%1").arg(ctx.tempN++);
         ctx.temps.insert(tempKey(node.id, QStringLiteral("ret")), v);
         const QString owned = isManaged(ctx, cls) ? QStringLiteral("ref ") : QString();
@@ -873,6 +927,31 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                         + QStringLiteral(", ") + pos + QStringLiteral(", ECE_PLACE_ON_SURFACE));")});
     }
 
+    if (node.ref == QLatin1String("bi.setElement")) {
+        const QString arr = operandExpr(ctx, node, QStringLiteral("arr"), 11, false);
+        const QString index = expr(ctx, node, QStringLiteral("index"));
+        const QString value = expr(ctx, node, QStringLiteral("v"));
+        return ownedBy(node.id, {pad + arr + QLatin1Char('[') + index + QStringLiteral("] = ")
+                                 + value + QLatin1Char(';')});
+    }
+
+    if (node.ref == QLatin1String("bi.setMember")) {
+        const QString name = node.opts.value(QStringLiteral("name")).trimmed();
+        if (name.isEmpty()) {
+            ctx.warnings.append(QStringLiteral(
+                "A \"Set Member\" node has no member name, so it is not generated. Name it "
+                "in Details."));
+            return {};
+        }
+        const QString value = expr(ctx, node, QStringLiteral("v"));
+        const QString target = edgeInto(*ctx.graph, node.id, QStringLiteral("target"))
+                                   ? operandExpr(ctx, node, QStringLiteral("target"), 11, false)
+                                         + QLatin1Char('.')
+                                   : QString();
+        return ownedBy(node.id, {pad + target + name + QStringLiteral(" = ") + value
+                                 + QLatin1Char(';')});
+    }
+
     if (node.kind == NodeKind::VarSet) {
         const GraphVariable *v = ownVariable(ctx, node);
         if (!v) return {};
@@ -886,7 +965,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
         ctx.project ? resolveMember(node.ref, *ctx.project) : MemberTarget{};
     if (member.valid && member.setter) {
         const QString target = edgeInto(*ctx.graph, node.id, QStringLiteral("target"))
-                                   ? expr(ctx, node, QStringLiteral("target"))
+                                   ? operandExpr(ctx, node, QStringLiteral("target"), 11, false)
                                    : QStringLiteral("this");
         const QString value = expr(ctx, node, QStringLiteral("v"));
         return ownedBy(node.id, {pad + target + QLatin1Char('.') + member.variable->name
@@ -906,7 +985,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
             scriptCall.fn->isStatic
                 ? scriptCall.script->name
                 : (edgeInto(*ctx.graph, node.id, QStringLiteral("target"))
-                       ? expr(ctx, node, QStringLiteral("target"))
+                       ? operandExpr(ctx, node, QStringLiteral("target"), 11, false)
                        : QStringLiteral("this"));
         const QString invocation =
             target == QLatin1String("this")
@@ -914,6 +993,10 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                 : target + QLatin1Char('.') + scriptCall.fn->name + QLatin1Char('(') + argList
                       + QLatin1Char(')');
         const bool consumed = edgeFrom(*ctx.graph, node.id, QStringLiteral("ret")) != nullptr;
+        if (returnsValue(*scriptCall.fn) && consumed && readOnceByNext(ctx, node)) {
+            ctx.temps.insert(tempKey(node.id, QStringLiteral("ret")), invocation);
+            return {};
+        }
         if (returnsValue(*scriptCall.fn) && consumed) {
             const QString v = QStringLiteral("v%1").arg(ctx.tempN++);
             ctx.temps.insert(tempKey(node.id, QStringLiteral("ret")), v);
@@ -952,6 +1035,12 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
 
     const Pin *retPin = def.pin(QStringLiteral("ret"), PinDir::Out);
     const bool consumed = retPin && edgeFrom(*ctx.graph, node.id, QStringLiteral("ret")) != nullptr;
+    // A constructor keeps its local: `new` in a statement of its own is what
+    // holds the object alive, and the warnings below are written against that.
+    if (consumed && !isCtor && call.pre.isEmpty() && readOnceByNext(ctx, node)) {
+        ctx.temps.insert(tempKey(node.id, QStringLiteral("ret")), call.text);
+        return {};
+    }
     if (consumed) {
         const MethodSig sigM = m.valid ? m : ctx.cat->globalFn(node.ref);
         QString t = sigM.valid ? sigM.ret : QString();
@@ -1054,6 +1143,79 @@ QString operatorOf(const GraphNode &node)
     return QStringLiteral("+");
 }
 
+// Binding strength, on the same ladder the parser reads expressions with, so
+// the two agree about what a tree means. Only the operators the Operator node
+// offers are here; anything else reaches the generator as text.
+int precedenceOf(const QString &op)
+{
+    if (op == QLatin1String("||")) return 1;
+    if (op == QLatin1String("&&")) return 2;
+    if (op == QLatin1String("==") || op == QLatin1String("!=")) return 6;
+    if (op == QLatin1String("<") || op == QLatin1String("<=") || op == QLatin1String(">")
+        || op == QLatin1String(">="))
+        return 7;
+    if (op == QLatin1String("+") || op == QLatin1String("-")) return 9;
+    if (op == QLatin1String("*") || op == QLatin1String("/") || op == QLatin1String("%"))
+        return 10;
+    return 0;
+}
+
+// One term: something that can stand next to an operator without brackets round
+// it. Hand-written text arrives here as a string with no tree behind it, so the
+// only safe reading is the characters: an operator outside brackets and outside
+// a string means more than one term.
+bool looksAtomic(const QString &s)
+{
+    const QString t = s.trimmed();
+    if (t.isEmpty()) return true;
+    static const QString ops = QStringLiteral("+-*/%<>=!&|^?:~,");
+    int depth = 0;
+    bool inString = false;
+    for (int i = 0; i < t.size(); ++i) {
+        const QChar c = t.at(i);
+        if (inString) {
+            if (c == QLatin1Char('\\')) i++;
+            else if (c == QLatin1Char('"')) inString = false;
+            continue;
+        }
+        if (c == QLatin1Char('"')) {
+            inString = true;
+            continue;
+        }
+        if (c == QLatin1Char('(') || c == QLatin1Char('[') || c == QLatin1Char('{')) depth++;
+        else if (c == QLatin1Char(')') || c == QLatin1Char(']') || c == QLatin1Char('}')) depth--;
+        else if (depth == 0 && ops.contains(c)) {
+            // A sign or a `!` in front of the term belongs to it.
+            if (i == 0 && (c == QLatin1Char('-') || c == QLatin1Char('+')
+                           || c == QLatin1Char('!') || c == QLatin1Char('~')))
+                continue;
+            return false;
+        }
+    }
+    return depth == 0;
+}
+
+// An operand of an operator, bracketed only where dropping the brackets would
+// change what it means. The generator used to write `(a + b)` for every
+// operator, which is correct and never what the author wrote, so a file that
+// converted came back spelled differently and was turned down.
+QString operandExpr(Ctx &ctx, const GraphNode &node, const QString &pinId, int outer,
+                    bool rightHandSide)
+{
+    const QString text = expr(ctx, node, pinId);
+    const GraphEdge *e = edgeInto(*ctx.graph, node.id, pinId);
+    const GraphNode *src = e ? ctx.graph->node(e->from.node) : nullptr;
+    if (src && src->ref.startsWith(QLatin1String("bi.op"))) {
+        const int inner = precedenceOf(operatorOf(*src));
+        const bool needs = inner < outer || (inner == outer && rightHandSide);
+        return needs ? QLatin1Char('(') + text + QLatin1Char(')') : text;
+    }
+    // A Select is a ternary, which binds looser than every operator.
+    if (src && src->ref == QLatin1String("bi.select"))
+        return QLatin1Char('(') + text + QLatin1Char(')');
+    return looksAtomic(text) ? text : QLatin1Char('(') + text + QLatin1Char(')');
+}
+
 QString pureExpr(Ctx &ctx, const GraphNode &node, const NodeDef &def, const QString &pinId)
 {
     if (node.ref == QLatin1String("bi.self")) return QStringLiteral("this");
@@ -1089,24 +1251,24 @@ QString pureExpr(Ctx &ctx, const GraphNode &node, const NodeDef &def, const QStr
         const QString code = node.opts.value(QStringLiteral("code"));
         return code.isEmpty() ? QStringLiteral("null") : code;
     }
+    // `!` binds tighter than every binary operator, so anything built out of one
+    // keeps its brackets and a single term does not.
     if (node.ref == QLatin1String("bi.not"))
-        return QStringLiteral("!(") + expr(ctx, node, QStringLiteral("a")) + QLatin1Char(')');
+        return QLatin1Char('!') + operandExpr(ctx, node, QStringLiteral("a"), 11, false);
     // Each operand is resolved into a named value first: resolving one has side
     // effects, and the operands of `+` are unsequenced in C++, so building the
     // line in one expression leaves the evaluation order to the compiler.
     if (node.ref == QLatin1String("bi.select")) {
-        const QString cond = expr(ctx, node, QStringLiteral("cond"));
-        const QString a = expr(ctx, node, QStringLiteral("a"));
-        const QString b = expr(ctx, node, QStringLiteral("b"));
-        return QLatin1Char('(') + cond + QStringLiteral(" ? ") + a + QStringLiteral(" : ") + b
-               + QLatin1Char(')');
+        const QString cond = operandExpr(ctx, node, QStringLiteral("cond"), 0, true);
+        const QString a = operandExpr(ctx, node, QStringLiteral("a"), 0, true);
+        const QString b = operandExpr(ctx, node, QStringLiteral("b"), 0, true);
+        return cond + QStringLiteral(" ? ") + a + QStringLiteral(" : ") + b;
     }
     if (node.ref.startsWith(QLatin1String("bi.op"))) {
-        const QString a = expr(ctx, node, QStringLiteral("a"));
-        const QString b = expr(ctx, node, QStringLiteral("b"));
-        return QLatin1Char('(') + a + QLatin1Char(' ')
-               + operatorOf(node) + QLatin1Char(' ') + b
-               + QLatin1Char(')');
+        const int prec = precedenceOf(operatorOf(node));
+        const QString a = operandExpr(ctx, node, QStringLiteral("a"), prec, false);
+        const QString b = operandExpr(ctx, node, QStringLiteral("b"), prec, true);
+        return a + QLatin1Char(' ') + operatorOf(node) + QLatin1Char(' ') + b;
     }
 
     if (node.kind == NodeKind::VarGet) {
@@ -1119,7 +1281,7 @@ QString pureExpr(Ctx &ctx, const GraphNode &node, const NodeDef &def, const QStr
         ctx.project ? resolveMember(node.ref, *ctx.project) : MemberTarget{};
     if (member.valid && !member.setter) {
         const QString target = edgeInto(*ctx.graph, node.id, QStringLiteral("target"))
-                                   ? expr(ctx, node, QStringLiteral("target"))
+                                   ? operandExpr(ctx, node, QStringLiteral("target"), 11, false)
                                    : QStringLiteral("this");
         return target == QLatin1String("this")
                    ? member.variable->name

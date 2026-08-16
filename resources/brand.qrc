@@ -1,7 +1,7 @@
 <!-- The brand pack, compiled into the executable so a copied .exe still has its
-     icon, splash and corner mark. Only what the running app draws is in here:
-     the app tile is a build input for the .ico, and the lockups and the dark
-     glyph are for documents and light backgrounds, so neither ships. -->
+     icon, splash, corner mark and start page. Only what the running app draws
+     is in here: the app tile is a build input for the .ico, and the light
+     lockup and the dark glyph are for light backgrounds, so neither ships. -->
 <RCC>
   <qresource prefix="/brand">
     <file alias="icon-16.png">brand/icons/sudo-icon-16.png</file>
@@ -13,6 +13,7 @@
     <file alias="icon-256.png">brand/icons/sudo-icon-256.png</file>
     <file alias="corner.png">brand/logo/sudo-corner-320x50.png</file>
     <file alias="corner@2x.png">brand/logo/sudo-corner-320x50@2x.png</file>
+    <file alias="lockup-dark.png">brand/logo/sudo-lockup-dark.png</file>
     <file alias="splash.png">brand/splash/sudo-splash-760x440.png</file>
     <file alias="splash@2x.png">brand/splash/sudo-splash-760x440@2x.png</file>
   </qresource>

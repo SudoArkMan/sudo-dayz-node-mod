@@ -47,6 +47,8 @@ const QString IdNew        = QStringLiteral("bi.new");
 const QString IdSpawn      = QStringLiteral("bi.spawn");
 const QString IdServerOnly = QStringLiteral("bi.serverOnly");
 const QString IdRawExpr    = QStringLiteral("bi.rawExpr");
+const QString IdSetElement = QStringLiteral("bi.setElement");
+const QString IdSetMember  = QStringLiteral("bi.setMember");
 
 // Palette groups. Builtins are the only nodes that choose their own category;
 // catalogue nodes are grouped by what they are (Events, Functions, Enums).
@@ -444,6 +446,51 @@ Builtins::Builtins()
         {QStringLiteral("Wire it into any `target` pin to act on the object itself.")});
     add(self);
 
+    // Set nodes exist per variable for the members this script declares. These
+    // two cover what a graph cannot declare: one slot of an array, and a member
+    // that belongs to the base class or to an object of a type nothing here
+    // describes. Without them an assignment to either kept its text and took
+    // the statement around it down as well.
+    NodeDef setElement = makeDef(IdSetElement, QStringLiteral("Set Element"),
+                                 QStringLiteral("array[index] = value"),
+                                 CatVariables, accents::variable(),
+                                 {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                  execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                  dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                          PinDir::In, anyArray()),
+                                  dataPin(QStringLiteral("index"), QStringLiteral("index"),
+                                          PinDir::In, prim(PinKind::Int)),
+                                  dataPin(QStringLiteral("v"), QStringLiteral("value"),
+                                          PinDir::In, prim(PinKind::Any))});
+    setElement.doc = help(
+        QStringLiteral("Writes one slot of an array by its index."),
+        {QStringLiteral("Emits `array[index] = value;`."),
+         QStringLiteral("Reading a slot is the Get Element node, or an index typed into a "
+                        "Raw Expression.")},
+        {QStringLiteral("The slot has to exist already. Writing past the end of an array "
+                        "throws; use Insert to grow one.")});
+    add(setElement);
+
+    NodeDef setMember = makeDef(IdSetMember, QStringLiteral("Set Member"),
+                                QStringLiteral("name = value"),
+                                CatVariables, accents::variable(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                 dataPin(QStringLiteral("target"), QStringLiteral("target"),
+                                         PinDir::In, obj(QStringLiteral("auto"))),
+                                 dataPin(QStringLiteral("v"), QStringLiteral("value"),
+                                         PinDir::In, prim(PinKind::Any))});
+    setMember.doc = help(
+        QStringLiteral("Assigns to a member this graph does not declare: one the base "
+                       "class owns, or one on another object."),
+        {QStringLiteral("Set the name in Details. Emits `name = value;`, or "
+                        "`target.name = value;` when the target pin is wired."),
+         QStringLiteral("A member this script declares itself has its own Set node in the "
+                        "Variables panel, which is the one to prefer.")},
+        {QStringLiteral("The name is written out as typed. Nothing here checks that the "
+                        "base class really declares it.")});
+    add(setMember);
+
     // ------------------------------------------------------------- operators
     NodeDef op = makeDef(IdOp, QStringLiteral("Operator"), QStringLiteral("a op b"),
                          CatOperators, accents::pure(),
@@ -797,6 +844,30 @@ NodeDef Builtins::defForNode(const GraphNode &node, const Catalog &cat) const
         d.pins = {dataPin(QStringLiteral("a"), QStringLiteral("a"), PinDir::In, operand),
                   dataPin(QStringLiteral("b"), QStringLiteral("b"), PinDir::In, operand),
                   dataPin(QStringLiteral("ret"), QString(), PinDir::Out, result)};
+        return d;
+    }
+
+    // The member being written is the whole point of the node, so it belongs in
+    // the title rather than only in Details.
+    if (base.key == IdSetMember) {
+        const QString name = node.opts.value(QStringLiteral("name"));
+        if (name.isEmpty()) return base;
+        NodeDef d = base;
+        d.title = QStringLiteral("Set %1").arg(name);
+        d.subtitle = QStringLiteral("%1 = value").arg(name);
+        return d;
+    }
+
+    // A For Each that knows what it iterates says so on the item pin, so a wire
+    // out of it is checked against the real element type rather than Any.
+    if (base.key == bi::ForEach) {
+        const QString elem = node.opts.value(QStringLiteral("type"));
+        if (elem.isEmpty()) return base;
+        NodeDef d = base;
+        d.subtitle = QStringLiteral("iterate an array of %1").arg(elem);
+        for (Pin &p : d.pins)
+            if (p.id == QLatin1String("item") && p.dir == PinDir::Out)
+                p.type = pinTypeOf(elem, isEnumFn);
         return d;
     }
 

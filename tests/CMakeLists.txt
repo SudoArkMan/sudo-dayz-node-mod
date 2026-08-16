@@ -284,26 +284,56 @@ add_executable(pbotest
 target_include_directories(pbotest PRIVATE ../src)
 target_link_libraries(pbotest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
 
+# The recent projects list, and the page built on it. The list half runs on
+# files the test writes into a QTemporaryDir and its own store file, so it never
+# touches the user's real history. `--shot` and `--gallery` write pictures of
+# the start page and of the templates column. Forces the offscreen platform
+# itself, so it runs with no display:
+#   ./tests/recenttest ../resources [--shot start.png] [--gallery templates.png]
+add_executable(recenttest
+  recenttest.cpp
+  ../src/recentprojects.cpp
+  ../src/widgets/startpage.cpp
+  ../src/widgets/newscriptdialog.cpp
+  ../src/enforce/highlighter.cpp
+  ../src/enforce/lexer.cpp
+  ../src/catalog.cpp
+  ../src/pins.cpp ../src/graph.cpp
+  ../src/branding.cpp ../src/theme.cpp
+  ../resources/brand.qrc
+)
+target_include_directories(recenttest PRIVATE ../src)
+# The start page draws the brand lockup out of the .qrc and reuses the New
+# script dialog's skeletons, which is what pulls the catalogue and the lexer in.
+target_link_libraries(recenttest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)
+
 # Running the mod: prerequisite detection against the real machine, a junction
 # made and removed under a temporary name, the project.cfg rewrite line by line,
-# and the build and launch command lines printed rather than executed. Starts no
-# game and packs no PBO:
-#   ./tests/testruntest ../resources
+# and the build, launch and offline command lines printed rather than executed.
+# Starts no game and packs no PBO. The dock is built either way, so the mode
+# selector is driven the way a user drives it; `--shot` and `--shot-offline`
+# write pictures of it in both modes:
+#   ./tests/testruntest ../resources [--shot dock.png] [--shot-offline off.png]
 add_executable(testruntest
   testruntest.cpp
   ../src/testrun.cpp
   ../src/modtemplate.cpp
   ../src/moddeps.cpp
+  ../src/panels/testpanel.cpp
+  ../src/document.cpp
   ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
   ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
   ../src/config/configtree.cpp
   ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
   ../src/enforce/layout.cpp ../src/enforce/import.cpp
-  ../src/codegen.cpp ../src/theme.cpp
+  ../src/codegen.cpp ../src/analysis.cpp ../src/theme.cpp
 )
 target_include_directories(testruntest PRIVATE ../src)
-# Widgets arrives through theme.cpp, which moddeps pulls in for badge colours.
-# No QApplication is built here and no widget is touched.
+# The panel is linked in so the picture is of the dock the app really ships,
+# not of a copy that can drift. The offscreen platform is forced by the test
+# itself, so this still runs with no display.
 target_link_libraries(testruntest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )

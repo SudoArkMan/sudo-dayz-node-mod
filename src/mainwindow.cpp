@@ -17,14 +17,18 @@
 #include "panels/palettepanel.h"
 #include "panels/testpanel.h"
 #include "panels/variablespanel.h"
+#include "recentprojects.h"
 #include "theme.h"
 #include "widgets/codedialog.h"
 #include "widgets/configeditor.h"
 #include "widgets/filedialog.h"
 #include "widgets/newmoddialog.h"
+#include "widgets/newscriptdialog.h"
+#include "widgets/startpage.h"
 
 #include <QAction>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QDir>
 #include <QDockWidget>
 #include <QFile>
@@ -46,6 +50,7 @@
 #include <QSaveFile>
 #include <QScreen>
 #include <QSet>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
@@ -509,7 +514,14 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
 
     layout->addWidget(tabRow);
     layout->addWidget(m_view, 1);
-    setCentralWidget(central);
+
+    m_recent.load();
+    m_editor = central;
+    m_startPage = new StartPage(&m_recent, this);
+    m_stack = new QStackedWidget(this);
+    m_stack->addWidget(m_editor);
+    m_stack->addWidget(m_startPage);
+    setCentralWidget(m_stack);
 
     buildMenus();
     buildToolBar();
@@ -563,15 +575,72 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
         CodeDialog::editNodeCode(this, m_doc, id);
     });
 
+    connect(m_startPage, &StartPage::openRequested, this, &MainWindow::openProjectPath);
+    connect(m_startPage, &StartPage::browseRequested, this, &MainWindow::openProject);
+    connect(m_startPage, &StartPage::newProjectRequested, this, &MainWindow::newProject);
+    connect(m_startPage, &StartPage::newModRequested, this, &MainWindow::newMod);
+    connect(m_startPage, &StartPage::templateRequested,
+            this, &MainWindow::startFromTemplate);
+    connect(m_startPage, &StartPage::statusMessage, this, &MainWindow::flashStatus);
+
+    // Two minutes: long enough that the write is never in the way of typing,
+    // short enough that a crash costs an edit or two rather than a session.
+    m_autosaveTimer = new QTimer(this);
+    m_autosaveTimer->setInterval(120000);
+    connect(m_autosaveTimer, &QTimer::timeout, this, &MainWindow::writeAutosave);
+    m_autosaveTimer->start();
+
     refreshTabs();
     m_scene->rebuild();
     runAnalysis();
+    // The editor is built and stays built; the start page is what sits in front
+    // of it until a project is opened. main() opening one from the command line
+    // switches to the editor before the window is shown.
+    showStartPage();
+    updateWindowTitle();
+}
+
+void MainWindow::showStartPage()
+{
+    if (m_stack->currentWidget() == m_startPage) {
+        m_startPage->refresh();
+        return;
+    }
+    // A dock the user closed from the View menu stays closed when the editor
+    // comes back, so only the ones that were open are put away.
+    m_putAwayDocks.clear();
+    for (QDockWidget *dock : findChildren<QDockWidget *>()) {
+        if (dock->isHidden()) continue;
+        m_putAwayDocks.append(dock);
+        dock->hide();
+    }
+    m_putAwayToolBar = m_toolBar && !m_toolBar->isHidden();
+    if (m_putAwayToolBar) m_toolBar->hide();
+
+    m_stack->setCurrentWidget(m_startPage);
+    m_startPage->refresh();
+    updateWindowTitle();
+}
+
+void MainWindow::showEditor()
+{
+    if (m_stack->currentWidget() == m_editor) return;
+    m_stack->setCurrentWidget(m_editor);
+    for (const QPointer<QDockWidget> &dock : m_putAwayDocks)
+        if (dock) dock->show();
+    m_putAwayDocks.clear();
+    if (m_putAwayToolBar && m_toolBar) m_toolBar->show();
+    m_putAwayToolBar = false;
     updateWindowTitle();
 }
 
 void MainWindow::buildMenus()
 {
     QMenu *file = menuBar()->addMenu(QStringLiteral("&File"));
+    // First, because it is the way back to everything under it once a project
+    // is open.
+    file->addAction(QStringLiteral("Start page"), this, &MainWindow::showStartPage);
+    file->addSeparator();
     file->addAction(QStringLiteral("New mod..."),
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N),
                     this, &MainWindow::newMod);
@@ -1202,8 +1271,60 @@ void MainWindow::showTabList()
 
 void MainWindow::newProject()
 {
+    if (!maybeSaveChanges(QStringLiteral("Starting a new project"))) return;
     m_doc->resetToNew();
+    showEditor();
     m_view->zoomToFit();
+}
+
+void MainWindow::startFromTemplate(const StartTemplate &tpl)
+{
+    if (tpl.kind == StartTemplateKind::Project) {
+        if (!tpl.available) {
+            QMessageBox::warning(
+                this, QStringLiteral("Templates"),
+                QStringLiteral("%1 is not installed. It ships in resources/ beside "
+                               "the executable.")
+                    .arg(QFileInfo(tpl.projectPath).fileName()));
+            return;
+        }
+        openProjectPath(tpl.projectPath);
+        return;
+    }
+
+    if (!maybeSaveChanges(QStringLiteral("Starting from a template"))) return;
+
+    // resetToNew first, so the import reads the project it is landing in rather
+    // than the one being replaced.
+    m_doc->resetToNew();
+    Project &p = m_doc->project();
+    const QString text = scriptSkeleton(tpl.script, &m_doc->catalog());
+    const ImportResult result =
+        importEnforceText(text, m_doc->catalog(), m_doc->builtins(), p);
+    if (!result.ok || result.scripts.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Templates"),
+                             QStringLiteral("The %1 template could not be read as a "
+                                            "graph.\n\n%2")
+                                 .arg(tpl.title, result.error));
+        return;
+    }
+
+    // The new project's placeholder script would otherwise sit beside the
+    // template as an empty second tab.
+    p.scripts.clear();
+    p.activeId.clear();
+    const QString firstId = appendImportedScripts(result, QString(), tpl.module);
+    if (const ScriptEntry *first = p.script(firstId))
+        p.name = first->name;
+    if (!firstId.isEmpty()) m_doc->setActiveScript(firstId);
+    // Never saved anywhere, so the project is modified from the first frame and
+    // Save has to ask where it goes.
+    m_doc->touchGraph();
+    refreshTabs();
+    showEditor();
+    m_view->zoomToFit();
+    flashStatus(QStringLiteral("Started from %1. Save the project to give it a "
+                               "file.").arg(tpl.title));
 }
 
 void MainWindow::newMod()
@@ -1218,19 +1339,7 @@ void MainWindow::newMod()
     // The new mod takes the session over: the editor ends up on a project
     // saved inside the folder that is about to be created, so anything unsaved
     // here would be left behind with nowhere to go back to.
-    if (m_doc->isModified()) {
-        const QMessageBox::StandardButton answer = QMessageBox::warning(
-            this, QStringLiteral("New mod"),
-            QStringLiteral("The open project has unsaved changes. Starting a new mod "
-                           "closes it."),
-            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-            QMessageBox::Save);
-        if (answer == QMessageBox::Cancel) return;
-        if (answer == QMessageBox::Save) {
-            saveProject();
-            if (m_doc->isModified()) return;
-        }
-    }
+    if (!maybeSaveChanges(QStringLiteral("Starting a new mod"))) return;
 
     const ModTemplateResult result = NewModDialog::run(this);
     if (!result.ok) {
@@ -1261,11 +1370,12 @@ void MainWindow::newMod()
         return;
     }
 
+    afterSave(projectPath);
     refreshTabs();
     m_scene->rebuild();
     runAnalysis();
-    updateWindowTitle();
     syncExplorerRoot();
+    showEditor();
     m_view->zoomToFit();
 
     // The dialog has already reported the folder it wrote, so this names the
@@ -1374,40 +1484,8 @@ void MainWindow::openModScript(const QString &path)
     }
 
     const QString source = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-    const QString module = moduleForPath(path);
-    QString firstId;
-    for (int i = 0; i < result.scripts.size(); ++i) {
-        const ImportedScript &imported = result.scripts.at(i);
-        ScriptEntry entry;
-        // The counter behind nextId restarts every launch and knows nothing
-        // about the ids already in this project.
-        do {
-            entry.id = nextId(QStringLiteral("s"));
-        } while (p.script(entry.id));
-        entry.graph = imported.graph;
-        // The header fields on the ImportedScript are what the file said. A
-        // graph carries defaults from its own constructor, so taking them from
-        // the struct is what keeps `modded class X` from regenerating as
-        // `class X extends ItemBase`.
-        if (!imported.className.isEmpty()) entry.graph.className = imported.className;
-        if (!imported.baseClass.isEmpty()) entry.graph.baseClass = imported.baseClass;
-        if (imported.modded) entry.graph.modded = true;
-
-        entry.name = entry.graph.className.isEmpty()
-                         ? QFileInfo(path).completeBaseName()
-                         : entry.graph.className;
-        entry.folder = module.isEmpty() ? entry.graph.module : module;
-        if (entry.folder.isEmpty()) entry.folder = QStringLiteral("4_World");
-        entry.graph.module = entry.folder;
-        entry.sourcePath = source;
-        // The preamble belongs to the file rather than to any one class in it,
-        // so the first script carries it and writing the file back puts it in
-        // front of all of them.
-        if (i == 0) entry.preamble = result.preamble;
-
-        p.scripts.append(entry);
-        if (firstId.isEmpty()) firstId = entry.id;
-    }
+    const QString firstId =
+        appendImportedScripts(result, source, moduleForPath(path));
 
     // Selecting the script is what rebuilds the canvas, refreshes the tabs and
     // frames the graph; the project holding scripts the .sdzn does not is what
@@ -1449,49 +1527,246 @@ void MainWindow::openModScript(const QString &path)
                               + result.notes.join(QLatin1Char('\n')));
 }
 
+QString MainWindow::appendImportedScripts(const ImportResult &result,
+                                          const QString &sourcePath,
+                                          const QString &module)
+{
+    Project &p = m_doc->project();
+    QString firstId;
+    for (int i = 0; i < result.scripts.size(); ++i) {
+        const ImportedScript &imported = result.scripts.at(i);
+        ScriptEntry entry;
+        // The counter behind nextId restarts every launch and knows nothing
+        // about the ids already in this project.
+        do {
+            entry.id = nextId(QStringLiteral("s"));
+        } while (p.script(entry.id));
+        entry.graph = imported.graph;
+        // The header fields on the ImportedScript are what the file said. A
+        // graph carries defaults from its own constructor, so taking them from
+        // the struct is what keeps `modded class X` from regenerating as
+        // `class X extends ItemBase`.
+        if (!imported.className.isEmpty()) entry.graph.className = imported.className;
+        if (!imported.baseClass.isEmpty()) entry.graph.baseClass = imported.baseClass;
+        if (imported.modded) entry.graph.modded = true;
+
+        entry.name = entry.graph.className.isEmpty()
+                         ? QFileInfo(sourcePath).completeBaseName()
+                         : entry.graph.className;
+        if (entry.name.isEmpty()) entry.name = QStringLiteral("Untitled");
+        entry.folder = module.isEmpty() ? entry.graph.module : module;
+        if (entry.folder.isEmpty()) entry.folder = QStringLiteral("4_World");
+        entry.graph.module = entry.folder;
+        entry.sourcePath = sourcePath;
+        // The preamble belongs to the file rather than to any one class in it,
+        // so the first script carries it and writing the file back puts it in
+        // front of all of them.
+        if (i == 0) entry.preamble = result.preamble;
+
+        p.scripts.append(entry);
+        if (firstId.isEmpty()) firstId = entry.id;
+    }
+    return firstId;
+}
+
 void MainWindow::openProject()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, QStringLiteral("Open project"), QString(),
+        this, QStringLiteral("Open project"), m_recent.lastFolder(),
         QStringLiteral("SUDO node projects (*.sdzn);;All files (*)"));
     if (!path.isEmpty()) openProjectPath(path);
 }
 
 void MainWindow::openProjectPath(const QString &path)
 {
+    if (!maybeSaveChanges(QStringLiteral("Opening another project"))) return;
+
+    const QString source = recoveryFor(path);
     QString error;
-    if (!m_doc->openProject(path, &error)) {
+    if (!m_doc->openProject(source, &error)) {
         QMessageBox::warning(this, QStringLiteral("Open project"), error);
+        // A project that will not open is still the one the user was looking
+        // for, so it keeps its place in the list rather than being forgotten
+        // for being broken.
+        m_recent.record(path);
+        if (m_startPage) m_startPage->refresh();
         return;
     }
+    const bool recovered = source != path;
+    if (recovered) {
+        // The document is pointed back at the real project, which has not been
+        // touched. Nothing is written until the user saves.
+        m_doc->project().path = path;
+        m_doc->touchGraph();
+    }
+    m_recent.record(path);
+    showEditor();
     m_view->zoomToFit();
-    flashStatus(QStringLiteral("Opened %1").arg(QFileInfo(path).fileName()));
+    flashStatus(recovered
+                    ? QStringLiteral("Recovered unsaved work for %1. Save it to keep "
+                                     "it.").arg(QFileInfo(path).fileName())
+                    : QStringLiteral("Opened %1").arg(QFileInfo(path).fileName()));
 }
 
-void MainWindow::saveProject()
+bool MainWindow::saveProject()
 {
-    if (m_doc->projectPath().isEmpty()) {
-        saveProjectAs();
+    if (m_doc->projectPath().isEmpty()) return saveProjectAs();
+    QString error;
+    if (!m_doc->saveProject(m_doc->projectPath(), &error)) {
+        QMessageBox::warning(this, QStringLiteral("Save project"), error);
+        return false;
+    }
+    afterSave(m_doc->projectPath());
+    flashStatus(QStringLiteral("Saved."));
+    return true;
+}
+
+bool MainWindow::saveProjectAs()
+{
+    QString start = m_doc->projectPath();
+    if (start.isEmpty()) {
+        const QString folder = m_recent.lastFolder().isEmpty() ? QDir::homePath()
+                                                               : m_recent.lastFolder();
+        start = QDir(folder).filePath(m_doc->project().name
+                                      + QStringLiteral(".sdzn"));
+    }
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save project as"), start,
+        QStringLiteral("SUDO node projects (*.sdzn)"));
+    if (path.isEmpty()) return false;
+    QString error;
+    if (!m_doc->saveProject(path, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Save project"), error);
+        return false;
+    }
+    afterSave(path);
+    flashStatus(QStringLiteral("Saved as %1").arg(QFileInfo(path).fileName()));
+    return true;
+}
+
+void MainWindow::afterSave(const QString &path)
+{
+    // The sidecar describes work that is now in the file itself. Leaving it
+    // would offer, on the next open, to recover the state just saved past.
+    clearAutosave(path);
+    m_recent.record(path);
+    updateWindowTitle();
+}
+
+bool MainWindow::maybeSaveChanges(const QString &action)
+{
+    if (!m_doc->isModified()) return true;
+
+    const QString name = m_doc->projectPath().isEmpty()
+                             ? m_doc->project().name
+                             : QFileInfo(m_doc->projectPath()).fileName();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("Unsaved changes"));
+    box.setText(QStringLiteral("%1 has changes that are not saved.").arg(name));
+    box.setInformativeText(QStringLiteral("%1 loses them.").arg(action));
+    box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard
+                           | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Save);
+    switch (box.exec()) {
+    case QMessageBox::Save:
+        // A failed write, or a cancelled Save as, is not permission to carry on.
+        return saveProject();
+    case QMessageBox::Discard:
+        return true;
+    default:
+        return false;
+    }
+}
+
+QString MainWindow::autosavePathFor(const QString &projectPath) const
+{
+    if (projectPath.isEmpty()) return {};
+    // Beside the project, not in a temp folder: every path in a .sdzn is
+    // relative to the file itself, so a sidecar anywhere else would resolve the
+    // mod folder and every imported script against the wrong place.
+    return projectPath + QStringLiteral(".autosave");
+}
+
+void MainWindow::writeAutosave()
+{
+    const QString project = m_doc->projectPath();
+    if (project.isEmpty() || !m_doc->isModified()) return;
+    const QString sidecar = autosavePathFor(project);
+    QString error;
+    // The free function, not Document::saveProject: that one would clear the
+    // modified flag and move the project's own path to the sidecar, so the next
+    // Save would write the graph over the recovery file.
+    if (!::saveProject(m_doc->project(), sidecar, &error)) {
+        flashStatus(QStringLiteral("Could not autosave: %1").arg(error));
         return;
     }
-    QString error;
-    if (!m_doc->saveProject(m_doc->projectPath(), &error))
-        QMessageBox::warning(this, QStringLiteral("Save project"), error);
-    else
-        flashStatus(QStringLiteral("Saved."));
+    flashStatus(QStringLiteral("Autosaved beside the project."));
 }
 
-void MainWindow::saveProjectAs()
+void MainWindow::clearAutosave(const QString &projectPath)
 {
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("Save project as"), m_doc->project().name + ".sdzn",
-        QStringLiteral("SUDO node projects (*.sdzn)"));
-    if (path.isEmpty()) return;
-    QString error;
-    if (!m_doc->saveProject(path, &error))
-        QMessageBox::warning(this, QStringLiteral("Save project"), error);
-    else
-        updateWindowTitle();
+    const QString sidecar = autosavePathFor(projectPath);
+    if (!sidecar.isEmpty() && QFileInfo::exists(sidecar)) QFile::remove(sidecar);
+}
+
+QString MainWindow::recoveryFor(const QString &projectPath)
+{
+    const QString sidecar = autosavePathFor(projectPath);
+    if (sidecar.isEmpty()) return projectPath;
+    const QFileInfo recovery(sidecar);
+    if (!recovery.isFile()) return projectPath;
+
+    const QFileInfo saved(projectPath);
+    if (saved.isFile() && recovery.lastModified() <= saved.lastModified()) {
+        // The project has been saved since the sidecar was written, so it holds
+        // nothing the project does not. Removing it is the app tidying up after
+        // itself, and it leaves the project untouched.
+        QFile::remove(sidecar);
+        return projectPath;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QStringLiteral("Unsaved work found"));
+    box.setText(QStringLiteral("%1 has an autosave that is newer than the project.")
+                    .arg(saved.fileName()));
+    box.setInformativeText(
+        QStringLiteral("Autosaved %1, project last saved %2.\n\nRecovering opens the "
+                       "autosaved graph as unsaved work. The project file is not "
+                       "changed until you save it yourself.")
+            .arg(relativeTime(recovery.lastModified()),
+                 saved.isFile() ? relativeTime(saved.lastModified())
+                                : QStringLiteral("never")));
+    QPushButton *recover =
+        box.addButton(QStringLiteral("Recover"), QMessageBox::AcceptRole);
+    QPushButton *open =
+        box.addButton(QStringLiteral("Open the project"), QMessageBox::RejectRole);
+    QPushButton *discard = box.addButton(QStringLiteral("Delete the autosave"),
+                                         QMessageBox::DestructiveRole);
+    box.setDefaultButton(recover);
+    box.exec();
+
+    if (box.clickedButton() == discard) {
+        QFile::remove(sidecar);
+        return projectPath;
+    }
+    // Keeping the file is the answer to both "open the project" and closing the
+    // box: an autosave thrown away by accident cannot be asked for again.
+    if (box.clickedButton() == open) return projectPath;
+    return box.clickedButton() == recover ? sidecar : projectPath;
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (!maybeSaveChanges(QStringLiteral("Closing"))) {
+        event->ignore();
+        return;
+    }
+    // The session ended in a decision rather than a crash, so there is nothing
+    // to recover on the next launch.
+    clearAutosave(m_doc->projectPath());
+    QMainWindow::closeEvent(event);
 }
 
 bool MainWindow::writeScriptFile(const QString &path, QString *error)
@@ -1698,9 +1973,18 @@ void MainWindow::exportScripts()
 
 void MainWindow::updateWindowTitle()
 {
+    // The start page is not looking at a project, and naming one there would
+    // say the editor is showing something it is not.
+    if (m_stack && m_stack->currentWidget() == m_startPage) {
+        setWindowTitle(QStringLiteral("SUDO DayZ Node Mod"));
+        return;
+    }
     const QString name = m_doc->projectPath().isEmpty()
                              ? m_doc->project().name
                              : QFileInfo(m_doc->projectPath()).fileName();
+    // The asterisk is the contracted mark for unsaved work and it goes in front
+    // of the name, where it is read before the eye moves on.
     setWindowTitle(QStringLiteral("%1%2 - SUDO DayZ Node Mod")
-                       .arg(name, m_doc->isModified() ? QStringLiteral(" *") : QString()));
+                       .arg(m_doc->isModified() ? QStringLiteral("*") : QString(),
+                            name));
 }

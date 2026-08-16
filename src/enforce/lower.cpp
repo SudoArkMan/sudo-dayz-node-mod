@@ -7,7 +7,9 @@
 #include "project.h"
 #include "scriptapi.h"
 
+#include <QFile>
 #include <QHash>
+#include <QMutex>
 #include <QSet>
 
 // Ids the builtins header does not name but this file has to place. They are
@@ -23,6 +25,8 @@ const QString IdNew        = QStringLiteral("bi.new");
 const QString IdRawExpr    = QStringLiteral("bi.rawExpr");
 const QString IdLitClass   = QStringLiteral("bi.litClass");
 const QString IdServerOnly = QStringLiteral("bi.serverOnly");
+const QString IdSetElement = QStringLiteral("bi.setElement");
+const QString IdSetMember  = QStringLiteral("bi.setMember");
 
 const QString PinExec   = QStringLiteral("exec");
 const QString PinRet    = QStringLiteral("ret");
@@ -101,6 +105,30 @@ QString opWithoutAssign(const QString &op)
     return op.endsWith(QLatin1Char('=')) ? op.left(op.size() - 1) : QString();
 }
 
+// The counted form, `for (int i = a; i < b; i++)`, which the For Loop node can
+// hold; empty for any other shape. The first pass and the lowering both read
+// this, and they have to agree: the step of a counted loop is the loop node's
+// own counter, so counting it as a second write turns the counter into a class
+// variable and the body then reads that instead of the index pin.
+QString countedForCounter(const Stmt &s)
+{
+    const Stmt *init = s.forInit.get();
+    const Expr *cond = s.forCond.get();
+    const Expr *step = s.forStep.get();
+    if (!init || !cond || !step) return {};
+    if (init->kind != StmtKind::VarDecl || init->decls.size() != 1) return {};
+    const QString var = init->decls.front().name;
+    if (var.isEmpty() || !init->decls.front().init) return {};
+    if (cond->kind != ExprKind::Binary || cond->op != QLatin1String("<")) return {};
+    if (!cond->target || cond->target->kind != ExprKind::Name
+        || cond->target->text != var || !cond->second)
+        return {};
+    if (step->kind != ExprKind::Unary || !isIncrement(step->op) || !step->target
+        || step->target->kind != ExprKind::Name || step->target->text != var)
+        return {};
+    return var;
+}
+
 bool isClassIdent(const QString &s)
 {
     if (s.isEmpty()) return false;
@@ -168,6 +196,144 @@ QString literalTypeName(const QString &enforceType)
     return QStringLiteral("string");
 }
 
+// ------------------------------------------------------ measuring the refusals
+//
+// Instrumentation for the question "why does so little of a real mod lower".
+// One tab separated row per statement turned down, one per body handed in, into
+// the file named by SUDO_LOWER_DIAG. Nothing here runs when that is unset, and
+// nothing here decides anything: the rows are written after the lowering has
+// already made its choice.
+namespace diag {
+
+struct Sink {
+    QFile file;
+    QMutex lock;
+    bool tried = false;
+    bool on = false;
+    qint64 run = 0;
+};
+
+Sink &sink()
+{
+    static Sink s;
+    return s;
+}
+
+bool enabled()
+{
+    Sink &s = sink();
+    QMutexLocker guard(&s.lock);
+    if (!s.tried) {
+        s.tried = true;
+        const QByteArray path = qgetenv("SUDO_LOWER_DIAG");
+        if (!path.isEmpty()) {
+            s.file.setFileName(QString::fromLocal8Bit(path));
+            s.on = s.file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        }
+    }
+    return s.on;
+}
+
+void write(const QString &row)
+{
+    Sink &s = sink();
+    QMutexLocker guard(&s.lock);
+    if (!s.on) return;
+    s.file.write(row.toUtf8());
+    s.file.write("\n");
+}
+
+qint64 nextRun()
+{
+    Sink &s = sink();
+    QMutexLocker guard(&s.lock);
+    return ++s.run;
+}
+
+QString flat(const QString &text, int limit = 150)
+{
+    QString one = text;
+    one.replace(QLatin1Char('\t'), QLatin1Char(' '));
+    one = one.simplified();
+    if (one.size() > limit) one = one.left(limit) + QStringLiteral(" ...");
+    return one;
+}
+
+QString kindName(StmtKind k)
+{
+    switch (k) {
+    case StmtKind::Expression: return QStringLiteral("Expression");
+    case StmtKind::VarDecl:    return QStringLiteral("VarDecl");
+    case StmtKind::If:         return QStringLiteral("If");
+    case StmtKind::For:        return QStringLiteral("For");
+    case StmtKind::ForEach:    return QStringLiteral("ForEach");
+    case StmtKind::While:      return QStringLiteral("While");
+    case StmtKind::Return:     return QStringLiteral("Return");
+    case StmtKind::Break:      return QStringLiteral("Break");
+    case StmtKind::Continue:   return QStringLiteral("Continue");
+    case StmtKind::Block:      return QStringLiteral("Block");
+    case StmtKind::Switch:     return QStringLiteral("Switch");
+    case StmtKind::Delete:     return QStringLiteral("Delete");
+    case StmtKind::Raw:        return QStringLiteral("Raw");
+    }
+    return QStringLiteral("?");
+}
+
+// How many statements a refusal takes down with it, counted the way the parser
+// counts them, so the shares add up against the total it reported.
+int countStmts(const Stmt &s)
+{
+    if (s.kind == StmtKind::Raw) return 1;
+    int n = 1;
+    for (const StmtPtr &c : s.body)
+        if (c) n += countStmts(*c);
+    for (const StmtPtr &c : s.elseBody)
+        if (c) n += countStmts(*c);
+    for (const SwitchCase &c : s.cases)
+        for (const StmtPtr &b : c.body)
+            if (b) n += countStmts(*b);
+    if (s.forInit) n += countStmts(*s.forInit);
+    return n;
+}
+
+// The sub shape of a statement, because "Expression" on its own says nothing:
+// an assignment, a call and a bare ternary are three different problems.
+QString shapeOf(const Stmt &s)
+{
+    if (s.kind == StmtKind::Expression) {
+        const Expr *e = s.expr.get();
+        if (!e) return QStringLiteral("empty");
+        switch (e->kind) {
+        case ExprKind::Assign:
+            return e->op == QLatin1String("=") ? QStringLiteral("assign")
+                                               : QStringLiteral("assign") + e->op;
+        case ExprKind::Unary:
+            return isIncDec(e->op) ? QStringLiteral("incdec") : QStringLiteral("unary");
+        case ExprKind::Call:    return QStringLiteral("call");
+        case ExprKind::New:     return QStringLiteral("new");
+        case ExprKind::Member:  return QStringLiteral("member");
+        case ExprKind::Name:    return QStringLiteral("name");
+        case ExprKind::Ternary: return QStringLiteral("ternary");
+        default:                return QStringLiteral("other");
+        }
+    }
+    if (s.kind == StmtKind::If) {
+        if (!s.elseBody.empty()) return QStringLiteral("if.else");
+        return QStringLiteral("if");
+    }
+    if (s.kind == StmtKind::VarDecl) {
+        bool anyInit = false;
+        for (const Declarator &d : s.decls)
+            if (d.init) anyInit = true;
+        return anyInit ? QStringLiteral("decl.init") : QStringLiteral("decl");
+    }
+    if (s.kind == StmtKind::Return) return s.expr ? QStringLiteral("return.value")
+                                                  : QStringLiteral("return");
+    return QStringLiteral("-");
+}
+
+} // namespace diag
+
 class Lowerer
 {
 public:
@@ -222,7 +388,11 @@ private:
     Chain lowerSwitch(const Stmt &s);
     Chain rawStatement(const Stmt &s);
     bool rawIsSafe(const Stmt &s) const;
-    Chain storeInto(const Expr &lhs, const Val &value);
+    Chain storeInto(const Expr &lhs, const Val &value, bool plain);
+    bool valueIsOneTerm(const Val &v) const;
+    // Records where a statement was turned down without a reason of its own.
+    // Returns the same empty chain the call site returned before it.
+    Chain no(int line);
 
     // ---- expressions
     Val lowerExpr(const Expr &e);
@@ -242,7 +412,8 @@ private:
     QString methodOn(const QString &cls, const QString &name, int argc,
                      bool wantStatic, bool *ambiguous) const;
     QString globalFn(const QString &name, int argc) const;
-    QString anyMethod(const QString &name, int argc, bool *ambiguous) const;
+    QString anyMethod(const QString &name, int argc, bool hasTarget,
+                      bool *ambiguous) const;
     QString constantNamed(const QString &name, QString *type) const;
     QString typeOfName(const QString &name);
     const ScriptEntry *scriptByClass(const QString &cls) const;
@@ -281,7 +452,37 @@ private:
     bool m_unsafeRaw = false;
     mutable QHash<QString, QString> m_constKey;
     mutable QHash<QString, QString> m_constType;
+
+    // Diagnosis only. `m_failWhy` and `m_denyLine` say why the statement being
+    // lowered right now was turned down; both are saved and restored around
+    // each statement so an inner refusal never answers for the one around it.
+    struct Decline {
+        QString kind;
+        QString shape;
+        QString why;
+        int line = 0;
+        bool fromInside = false; // the statement itself lowered, something in it did not
+        int weight = 1;          // statements it takes down, itself included
+        int depth = 0;
+        QString causeKind;       // the first refusal underneath it, when there was one
+        QString causeWhy;
+        QString text;
+    };
+    QVector<Decline> m_declines;
+    // Every refusal, including the ones rolled back when the statement around
+    // them kept its text as well. That is what says whether a refusal is a
+    // cause or a consequence.
+    QVector<Decline> m_shadow;
+    QString m_failWhy;
+    int m_denyLine = 0;
+    int m_depth = 0;
 };
+
+Chain Lowerer::no(int line)
+{
+    if (m_denyLine == 0) m_denyLine = line;
+    return {};
+}
 
 // ---------------------------------------------------------------- graph bits
 
@@ -493,12 +694,16 @@ void Lowerer::scanStmt(const Stmt &s, int depth)
         scanStmts(s.body, depth + 1);
         scanStmts(s.elseBody, depth + 1);
         return;
-    case StmtKind::For:
+    case StmtKind::For: {
+        const QString counter = countedForCounter(s);
         if (s.forInit) scanStmt(*s.forInit, depth + 1);
         scanExpr(s.forCond.get(), depth + 1);
-        scanExpr(s.forStep.get(), depth + 1);
+        // The step of a counted loop is the loop node counting, not a write the
+        // graph has to find somewhere to keep.
+        if (counter.isEmpty()) scanExpr(s.forStep.get(), depth + 1);
         scanStmts(s.body, depth + 1);
         return;
+    }
     case StmtKind::ForEach:
         noteDecl(s.eachValueName, s.typeName, depth + 1);
         noteWrite(s.eachValueName, depth + 1);
@@ -678,10 +883,18 @@ Chain Lowerer::lowerStmt(const Stmt &s)
     // usable code, and the statement around them clears it by taking the text
     // of both.
     const bool outerUnsafe = m_unsafeRaw;
+    const int declineMark = m_declines.size();
+    const int shadowMark = m_shadow.size();
+    const QString whyMark = m_failWhy;
+    const int denyMark = m_denyLine;
+    m_failWhy.clear();
+    m_denyLine = 0;
     m_unsafeRaw = false;
     m_failed = false;
     m_pending.clear();
+    m_depth++;
     Chain c = lowerStmtInner(s);
+    m_depth--;
 
     if (m_failed || !c.ok) {
         // Half a statement is worse than none: everything it built is dropped
@@ -691,19 +904,62 @@ Chain Lowerer::lowerStmt(const Stmt &s)
         m_scopes = scopeMark;
         m_res.statementsLowered = loweredMark;
         m_res.statementsRaw = rawMark;
+        // Same rollback the counter gets: what an inner statement recorded is
+        // dropped, because this one is about to keep the text of all of it.
+        m_declines.resize(declineMark);
+        if (diag::enabled()) {
+            Decline d;
+            d.kind = diag::kindName(s.kind);
+            d.shape = diag::shapeOf(s);
+            d.why = m_failWhy;
+            d.line = m_denyLine;
+            d.fromInside = c.ok;
+            d.weight = diag::countStmts(s);
+            d.depth = m_depth + 1;
+            d.text = diag::flat(s.kind == StmtKind::Raw && !s.text.isEmpty()
+                                    ? s.text
+                                    : stmtToText(s, 0));
+            // The first refusal recorded under this one, resolved all the way
+            // down: an inner refusal that was itself a consequence carries the
+            // reason it inherited, so the root reads out in one hop.
+            if (shadowMark < m_shadow.size()) {
+                const Decline &inner = m_shadow.at(shadowMark);
+                d.causeKind = inner.causeKind.isEmpty()
+                                  ? inner.kind + QLatin1Char('/') + inner.shape
+                                  : inner.causeKind;
+                d.causeWhy = !inner.causeWhy.isEmpty() ? inner.causeWhy
+                             : inner.why.isEmpty()
+                                 ? QStringLiteral("silent@%1").arg(inner.line)
+                                 : inner.why;
+            }
+            m_declines.append(d);
+            m_shadow.append(d);
+        }
+        // Everything this statement built is gone, so anything it left queued
+        // to run first names a node that no longer exists.
+        m_pending.clear();
         c = rawStatement(s);
         m_res.statementsRaw++;
+        // The refusal ends here. The text is a statement of its own now, and a
+        // block around it is still a block, so `if (a) { unreadable(); }` keeps
+        // the Branch and turns one line into a raw node rather than turning the
+        // whole method back into a text box.
+        m_failed = false;
         // The text kept here declares whatever it reads, unless it reads a
         // local from an enclosing statement that the graph turned into a wire.
         // In that case this fallback is broken too, and the statement around it
         // has to keep its code instead. Cleared here because the text of the
         // enclosing statement will contain the declaration as well.
         m_unsafeRaw = outerUnsafe || !rawIsSafe(s);
+        m_failWhy = whyMark;
+        m_denyLine = denyMark;
         return c;
     }
     while (m_res.notes.size() > noteMark) m_res.notes.removeLast();
     m_res.statementsLowered++;
     m_unsafeRaw = outerUnsafe;
+    m_failWhy = whyMark;
+    m_denyLine = denyMark;
     return c;
 }
 
@@ -726,19 +982,19 @@ Chain Lowerer::lowerStmtInner(const Stmt &s)
     }
     case StmtKind::Break:
         fail(QStringLiteral("There is no Break node, so the statement keeps its code."));
-        return {};
+        return no(__LINE__);
     case StmtKind::Continue:
         fail(QStringLiteral("There is no Continue node, so the statement keeps its code."));
-        return {};
+        return no(__LINE__);
     case StmtKind::Delete:
         fail(QStringLiteral("There is no Delete node, so the statement keeps its code."));
-        return {};
+        return no(__LINE__);
     case StmtKind::Raw:
         fail(QStringLiteral("The parser could not read this statement, so it keeps its "
                             "code."));
-        return {};
+        return no(__LINE__);
     }
-    return {};
+    return no(__LINE__);
 }
 
 Chain Lowerer::rawStatement(const Stmt &s)
@@ -772,50 +1028,50 @@ bool Lowerer::rawIsSafe(const Stmt &s) const
 Chain Lowerer::lowerExprStmt(const Stmt &s)
 {
     const Expr *e = s.expr.get();
-    if (!e) return {};
+    if (!e) return no(__LINE__);
 
     if (e->kind == ExprKind::Assign) return lowerAssign(*e);
     if (e->kind == ExprKind::Unary && isIncDec(e->op)) return lowerIncDec(*e);
 
     if (e->kind == ExprKind::Call || e->kind == ExprKind::New) {
         const Val v = lowerExpr(*e);
-        if (!v.valid || v.isLiteral()) return {};
+        if (!v.valid || v.isLiteral()) return no(__LINE__);
         Chain c = chainWith(QString());
         // A pure node generates nothing on its own, so a call that resolved to
         // one cannot stand as a statement.
-        if (c.tailNode != v.node) return {};
+        if (c.tailNode != v.node) return no(__LINE__);
         return c;
     }
-    return {};
+    return no(__LINE__);
 }
 
 Chain Lowerer::lowerAssign(const Expr &e)
 {
     const Expr *lhs = e.target.get();
     const Expr *rhs = e.second.get();
-    if (!lhs || !rhs) return {};
+    if (!lhs || !rhs) return no(__LINE__);
 
     Val value;
     if (e.op == QLatin1String("=")) {
         value = lowerExpr(*rhs);
     } else {
         const QString op = opWithoutAssign(e.op);
-        if (!Builtins::binaryOperators().contains(op)) return {};
+        if (!Builtins::binaryOperators().contains(op)) return no(__LINE__);
         const Val cur = lowerExpr(*lhs);
         const Val add = lowerExpr(*rhs);
-        if (!cur.valid || !add.valid) return {};
+        if (!cur.valid || !add.valid) return no(__LINE__);
         value = makeOp(op, cur, add);
     }
-    if (!value.valid) return {};
-    return storeInto(*lhs, value);
+    if (!value.valid) return no(__LINE__);
+    return storeInto(*lhs, value, e.op == QLatin1String("="));
 }
 
 Chain Lowerer::lowerIncDec(const Expr &e)
 {
     const Expr *lhs = e.target.get();
-    if (!lhs) return {};
+    if (!lhs) return no(__LINE__);
     const Val cur = lowerExpr(*lhs);
-    if (!cur.valid) return {};
+    if (!cur.valid) return no(__LINE__);
     Val one;
     one.text = QStringLiteral("1");
     one.type = QStringLiteral("int");
@@ -823,11 +1079,30 @@ Chain Lowerer::lowerIncDec(const Expr &e)
     const Val sum = makeOp(isIncrement(e.op) ? QStringLiteral("+")
                                              : QStringLiteral("-"),
                            cur, one);
-    if (!sum.valid) return {};
-    return storeInto(*lhs, sum);
+    if (!sum.valid) return no(__LINE__);
+    return storeInto(*lhs, sum, false);
 }
 
-Chain Lowerer::storeInto(const Expr &lhs, const Val &value)
+// A value the generator writes out as one term: a literal, a member read, a
+// name it kept verbatim. The Set Member node is the only assignment node whose
+// statement has no other way of being written, so it is worth taking only when
+// the line it produces is the line that was read in. Anything with a call or an
+// operator in it is written the graph's way, which is a different line, and the
+// raw statement it replaces said it better.
+bool Lowerer::valueIsOneTerm(const Val &v) const
+{
+    if (!v.valid) return false;
+    if (v.isLiteral()) return true;
+    for (const GraphNode &n : m_res.nodes) {
+        if (n.id != v.node) continue;
+        if (n.kind == NodeKind::VarGet) return true;
+        return n.ref == IdRawExpr || n.ref == IdSelf || n.ref == bi::Literal
+               || n.ref == IdLitClass;
+    }
+    return false;
+}
+
+Chain Lowerer::storeInto(const Expr &lhs, const Val &value, bool plain)
 {
     if (lhs.kind == ExprKind::Name) {
         const QString name = lhs.text;
@@ -852,38 +1127,90 @@ Chain Lowerer::storeInto(const Expr &lhs, const Val &value)
         if (m_opts.knownLocals.contains(name)) {
             fail(QStringLiteral("%1 is a parameter, and a graph cannot assign to one.")
                      .arg(name));
-            return {};
+            return no(__LINE__);
         }
-        fail(QStringLiteral("Nothing in this graph declares %1, so the assignment to it "
-                            "is kept as code.").arg(name));
-        return {};
+        // Nothing here declares it, so it is a member of the base class. Reads
+        // of one already resolve to the name itself; this is the write.
+        if (!isClassIdent(name)) {
+            fail(QStringLiteral("The left side of this assignment is not a name the graph "
+                                "can write to."));
+            return no(__LINE__);
+        }
+        if (!plain || !valueIsOneTerm(value)) {
+            fail(QStringLiteral("%1 belongs to the base class, and the node that writes to "
+                                "one spells the value out its own way.").arg(name));
+            return no(__LINE__);
+        }
+        const QString set = addNode(NodeKind::Builtin, IdSetMember);
+        setOpt(set, QStringLiteral("name"), name);
+        bindInput(set, PinValue, value);
+        return chainWith(set);
     }
 
     if (lhs.kind == ExprKind::Member && lhs.target) {
         const Val obj = lowerExpr(*lhs.target);
-        if (!obj.valid) return {};
-        const ScriptEntry *owner = scriptByClass(obj.type);
-        if (!owner) {
-            fail(QStringLiteral("%1 is not a member this project declares, so the "
-                                "assignment to it is kept as code.").arg(lhs.text));
-            return {};
+        if (!obj.valid) return no(__LINE__);
+        if (const ScriptEntry *owner = scriptByClass(obj.type)) {
+            for (const GraphVariable &v : owner->graph.variables) {
+                if (v.name != lhs.text) continue;
+                const QString set =
+                    addNode(NodeKind::Call,
+                            QStringLiteral("sv.set.%1.%2").arg(owner->id, v.id));
+                bindInput(set, PinTarget, obj);
+                bindInput(set, PinValue, value);
+                return chainWith(set);
+            }
         }
-        for (const GraphVariable &v : owner->graph.variables) {
-            if (v.name != lhs.text) continue;
-            const QString set = addNode(NodeKind::Call,
-                                        QStringLiteral("sv.set.%1.%2").arg(owner->id, v.id));
-            bindInput(set, PinTarget, obj);
-            bindInput(set, PinValue, value);
-            return chainWith(set);
+        // A field of an object whose class nothing here describes. The name is
+        // still the name the generated file has to write.
+        if (!plain || !valueIsOneTerm(value)) {
+            fail(QStringLiteral("%1 is not a member this project declares, and the node "
+                                "that writes to one spells the value out its own way.")
+                     .arg(lhs.text));
+            return no(__LINE__);
         }
-        fail(QStringLiteral("%1 has no member named %2 in this project.")
-                 .arg(owner->name, lhs.text));
-        return {};
+        if (!isClassIdent(lhs.text)) {
+            fail(QStringLiteral("%1 is not a member name the graph can write to.")
+                     .arg(lhs.text));
+            return no(__LINE__);
+        }
+        const QString set = addNode(NodeKind::Builtin, IdSetMember);
+        setOpt(set, QStringLiteral("name"), lhs.text);
+        bindInput(set, PinTarget, obj);
+        bindInput(set, PinValue, value);
+        return chainWith(set);
+    }
+
+    // One slot of an array, which is the single most common assignment the
+    // graph had no node for.
+    if (lhs.kind == ExprKind::Index && lhs.target && lhs.second) {
+        if (!plain) {
+            fail(QStringLiteral("A Set Element node spells out the whole value, so a "
+                                "compound assignment to one slot keeps its code."));
+            return no(__LINE__);
+        }
+        const Val arr = lowerExpr(*lhs.target);
+        if (!arr.valid) return no(__LINE__);
+        const Val index = lowerExpr(*lhs.second);
+        if (!index.valid) return no(__LINE__);
+        // The index pin is an int, and a literal goes into it as typed text, so
+        // a map key would come back out of it stripped of its quotes.
+        if (index.isLiteral() && index.type != QLatin1String("int")) {
+            fail(QStringLiteral("This is indexed by a %1, and the Set Element node counts "
+                                "in ints.")
+                     .arg(index.type.isEmpty() ? QStringLiteral("value") : index.type));
+            return no(__LINE__);
+        }
+        const QString set = addNode(NodeKind::Builtin, IdSetElement);
+        bindInput(set, QStringLiteral("arr"), arr);
+        bindInput(set, QStringLiteral("index"), index);
+        bindInput(set, PinValue, value);
+        return chainWith(set);
     }
 
     fail(QStringLiteral("The left side of this assignment is not something the graph can "
                         "write to."));
-    return {};
+    return no(__LINE__);
 }
 
 Chain Lowerer::lowerVarDecl(const Stmt &s)
@@ -893,7 +1220,7 @@ Chain Lowerer::lowerVarDecl(const Stmt &s)
         Val init;
         if (d.init) {
             init = lowerExpr(*d.init);
-            if (!init.valid) return {};
+            if (!init.valid) return no(__LINE__);
             // `float frames = m_FrameCount;` is a widening, not a second name
             // for the same value, and wiring the int straight through would
             // drop it. Only a literal is safe to retype, because it is written
@@ -905,7 +1232,7 @@ Chain Lowerer::lowerVarDecl(const Stmt &s)
                 fail(QStringLiteral("%1 is declared %2 and given a %3, so the conversion "
                                     "has to stay in code.")
                          .arg(d.name, declared, init.type));
-                return {};
+                return no(__LINE__);
             }
             // A local holding a call and read more than once is what stops the
             // same call being written out once per reader.
@@ -913,7 +1240,7 @@ Chain Lowerer::lowerVarDecl(const Stmt &s)
                 && isCallNode(init.node) && !needsVariable(d.name)) {
                 fail(QStringLiteral("%1 holds the result of a call and is read more than "
                                     "once, so it has to stay a local.").arg(d.name));
-                return {};
+                return no(__LINE__);
             }
             // The declared type beats whatever the initialiser looked like:
             // `EntityAI e = GetSomething();` is an EntityAI from here on.
@@ -924,11 +1251,11 @@ Chain Lowerer::lowerVarDecl(const Stmt &s)
         if (m_opts.knownLocals.contains(d.name)) {
             fail(QStringLiteral("%1 is read outside this block, so its declaration has to "
                                 "stay as code.").arg(d.name));
-            return {};
+            return no(__LINE__);
         }
         declareLocal(d.name, s.typeName);
         Local *l = findLocal(d.name);
-        if (!l) return {};
+        if (!l) return no(__LINE__);
 
         if (l->varId.isEmpty()) {
             if (d.init) {
@@ -1011,7 +1338,7 @@ bool Lowerer::castToPattern(const Expr &cond, QString *destName, const Expr **sr
 Chain Lowerer::lowerIf(const Stmt &s)
 {
     const Expr *cond = s.expr.get();
-    if (!cond) return {};
+    if (!cond) return no(__LINE__);
 
     if (serverGuard(s)) {
         const QString guard = addNode(NodeKind::Builtin, IdServerOnly);
@@ -1027,7 +1354,7 @@ Chain Lowerer::lowerIf(const Stmt &s)
         Local *dest = findLocal(destName);
         if (dest && dest->varId.isEmpty()) {
             const Val obj = lowerExpr(*src);
-            if (!obj.valid) return {};
+            if (!obj.valid) return no(__LINE__);
             const QStringList pre = m_pending;
             m_pending.clear();
             QString target = dest->type;
@@ -1049,14 +1376,14 @@ Chain Lowerer::lowerIf(const Stmt &s)
             }
             const Chain t = lowerBlock(s.body);
             popScope();
-            if (m_unsafeRaw) return {};
+            if (m_unsafeRaw) return no(__LINE__);
             if (!t.entry.isEmpty()) wire(cast, QStringLiteral("success"), t.entry, PinExec);
 
             pushScope();
             const Chain f = lowerBlock(s.elseBody);
             popScope();
             if (!f.entry.isEmpty()) wire(cast, QStringLiteral("failed"), f.entry, PinExec);
-            if (m_unsafeRaw) return {};
+            if (m_unsafeRaw) return no(__LINE__);
 
             // The local outlives the `if` in the source, but the value only
             // exists on the success branch, so it stays bound to the cast.
@@ -1071,7 +1398,7 @@ Chain Lowerer::lowerIf(const Stmt &s)
     }
 
     const Val c = lowerExpr(*cond);
-    if (!c.valid) return {};
+    if (!c.valid) return no(__LINE__);
     const QStringList pre = m_pending;
     m_pending.clear();
 
@@ -1087,7 +1414,7 @@ Chain Lowerer::lowerIf(const Stmt &s)
     const Chain f = lowerBlock(s.elseBody);
     popScope();
     if (!f.entry.isEmpty()) wire(br, QStringLiteral("false"), f.entry, PinExec);
-    if (m_unsafeRaw) return {};
+    if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, br);
     out.tailPin.clear();
@@ -1142,22 +1469,34 @@ bool mentionsName(const Expr *e, const QString &name)
 Chain Lowerer::lowerForEach(const Stmt &s)
 {
     const Expr *coll = s.eachCollection.get();
-    if (!coll) return {};
+    if (!coll) return no(__LINE__);
     // The For Each node binds a counter, and a map binds a key of whatever type
     // it was declared with. Generating `int` for a string key would change what
     // the loop does, so that shape keeps its code.
     if (!s.eachIndexType.isEmpty() && s.eachIndexType != QLatin1String("int")) {
         fail(QStringLiteral("foreach over a map binds a %1 key, which the For Each node "
                             "cannot carry.").arg(s.eachIndexType));
-        return {};
+        return no(__LINE__);
+    }
+    // Both names come out of pins, so neither can be written to.
+    for (const QString &bound : {s.eachValueName, s.eachIndexName}) {
+        if (bound.isEmpty() || m_varForName.value(bound).isEmpty()) continue;
+        fail(QStringLiteral("%1 is assigned inside the loop, and a For Each node binds it "
+                            "fresh on every pass.").arg(bound));
+        return no(__LINE__);
     }
     const Val arr = lowerExpr(*coll);
-    if (!arr.valid) return {};
+    if (!arr.valid) return no(__LINE__);
     const QStringList pre = m_pending;
     m_pending.clear();
 
     const QString fe = addNode(NodeKind::Builtin, bi::ForEach);
     bindInput(fe, QStringLiteral("array"), arr);
+    // What the loop declared, kept as written. Without it the generator has
+    // only the array pin to go on, and for anything but a catalogue call that
+    // is `auto`: legal Enforce, but not the line the author wrote.
+    if (!s.typeName.isEmpty()) setOpt(fe, QStringLiteral("type"), s.typeName);
+    if (!s.eachValueName.isEmpty()) setOpt(fe, QStringLiteral("item"), s.eachValueName);
 
     pushScope();
     declareLocal(s.eachValueName, s.typeName);
@@ -1168,6 +1507,7 @@ Chain Lowerer::lowerForEach(const Stmt &s)
     // The counted form of foreach only exists in the generated code when the
     // index pin is wired, so it is only bound when the body actually reads it.
     if (!s.eachIndexName.isEmpty() && mentionsName(s.body, s.eachIndexName)) {
+        setOpt(fe, QStringLiteral("idx"), s.eachIndexName);
         declareLocal(s.eachIndexName, QStringLiteral("int"));
         if (Local *idx = findLocal(s.eachIndexName)) {
             idx->value = {fe, QStringLiteral("index"), QString(),
@@ -1178,7 +1518,7 @@ Chain Lowerer::lowerForEach(const Stmt &s)
     const Chain body = lowerBlock(s.body);
     popScope();
     if (!body.entry.isEmpty()) wire(fe, QStringLiteral("body"), body.entry, PinExec);
-    if (m_unsafeRaw) return {};
+    if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, fe);
     out.tailNode = fe;
@@ -1190,31 +1530,26 @@ Chain Lowerer::lowerForEach(const Stmt &s)
 // Any other shape keeps its exact meaning only as code.
 Chain Lowerer::lowerFor(const Stmt &s)
 {
-    const Stmt *init = s.forInit.get();
+    const QString var = countedForCounter(s);
+    if (var.isEmpty()) return no(__LINE__);
+    // The counter comes out of the loop node's index pin, which nothing can
+    // assign to, so a body that writes it is a different loop.
+    if (!m_varForName.value(var).isEmpty()) {
+        fail(QStringLiteral("%1 is assigned inside the loop, and a For Loop node counts "
+                            "on its own.").arg(var));
+        return no(__LINE__);
+    }
+    const Expr *first = s.forInit->decls.front().init.get();
     const Expr *cond = s.forCond.get();
-    const Expr *step = s.forStep.get();
-    if (!init || !cond || !step) return {};
-    if (init->kind != StmtKind::VarDecl || init->decls.size() != 1) return {};
-    const QString var = init->decls.front().name;
-    const Expr *first = init->decls.front().init.get();
-    if (!first) return {};
-    if (cond->kind != ExprKind::Binary || cond->op != QLatin1String("<")) return {};
-    if (!cond->target || cond->target->kind != ExprKind::Name
-        || cond->target->text != var)
-        return {};
-    if (!cond->second) return {};
-    const bool stepOk = step->kind == ExprKind::Unary && isIncrement(step->op)
-                        && step->target && step->target->kind == ExprKind::Name
-                        && step->target->text == var;
-    if (!stepOk) return {};
 
     const Val a = lowerExpr(*first);
     const Val b = lowerExpr(*cond->second);
-    if (!a.valid || !b.valid) return {};
+    if (!a.valid || !b.valid) return no(__LINE__);
     const QStringList pre = m_pending;
     m_pending.clear();
 
     const QString loop = addNode(NodeKind::Builtin, bi::ForLoop);
+    setOpt(loop, QStringLiteral("var"), var);
     bindInput(loop, QStringLiteral("first"), a);
     bindInput(loop, QStringLiteral("last"), b);
 
@@ -1227,7 +1562,7 @@ Chain Lowerer::lowerFor(const Stmt &s)
     const Chain body = lowerBlock(s.body);
     popScope();
     if (!body.entry.isEmpty()) wire(loop, QStringLiteral("body"), body.entry, PinExec);
-    if (m_unsafeRaw) return {};
+    if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, loop);
     out.tailNode = loop;
@@ -1238,15 +1573,15 @@ Chain Lowerer::lowerFor(const Stmt &s)
 Chain Lowerer::lowerWhile(const Stmt &s)
 {
     const Expr *cond = s.expr.get();
-    if (!cond) return {};
+    if (!cond) return no(__LINE__);
     const Val c = lowerExpr(*cond);
-    if (!c.valid) return {};
+    if (!c.valid) return no(__LINE__);
     // The condition is re-read every pass, and a call node placed ahead of the
     // loop would only run once, so that shape stays as code.
     if (!m_pending.isEmpty()) {
         fail(QStringLiteral("This while condition calls something, which a graph would "
                             "only run once, so the loop is kept as code."));
-        return {};
+        return no(__LINE__);
     }
 
     const QString loop = addNode(NodeKind::Builtin, bi::While);
@@ -1255,7 +1590,7 @@ Chain Lowerer::lowerWhile(const Stmt &s)
     const Chain body = lowerBlock(s.body);
     popScope();
     if (!body.entry.isEmpty()) wire(loop, QStringLiteral("body"), body.entry, PinExec);
-    if (m_unsafeRaw) return {};
+    if (m_unsafeRaw) return no(__LINE__);
 
     // Built from the empty list on purpose: lowering the body left its own
     // pending nodes behind, and none of them run before the loop.
@@ -1270,7 +1605,7 @@ Chain Lowerer::lowerReturn(const Stmt &s)
     Val v;
     if (s.expr) {
         v = lowerExpr(*s.expr);
-        if (!v.valid) return {};
+        if (!v.valid) return no(__LINE__);
     }
     const QString ret = addNode(NodeKind::Builtin, bi::Return);
     if (s.expr) bindInput(ret, QStringLiteral("value"), v);
@@ -1285,9 +1620,9 @@ Chain Lowerer::lowerReturn(const Stmt &s)
 Chain Lowerer::lowerSwitch(const Stmt &s)
 {
     const Expr *subject = s.expr.get();
-    if (!subject || s.cases.empty()) return {};
-    if (subject->kind != ExprKind::Name && subject->kind != ExprKind::Member) return {};
-    if (!isVerbatimSafe(*subject)) return {};
+    if (!subject || s.cases.empty()) return no(__LINE__);
+    if (subject->kind != ExprKind::Name && subject->kind != ExprKind::Member) return no(__LINE__);
+    if (!isVerbatimSafe(*subject)) return no(__LINE__);
 
     struct Arm {
         QVector<const Expr *> values; // empty for default
@@ -1298,7 +1633,7 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
     for (int i = 0; i < int(s.cases.size()); ++i) {
         const SwitchCase &c = s.cases.at(i);
         if (c.body.empty()) {
-            if (!c.value) return {}; // an empty default says nothing
+            if (!c.value) return no(__LINE__); // an empty default says nothing
             pendingValues.append(c.value.get());
             continue;
         }
@@ -1313,10 +1648,10 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
         const bool ends = last
                           && (last->kind == StmtKind::Break || last->kind == StmtKind::Return
                               || last->kind == StmtKind::Continue);
-        if (!ends && i + 1 < int(s.cases.size())) return {};
+        if (!ends && i + 1 < int(s.cases.size())) return no(__LINE__);
         arms.append(arm);
     }
-    if (!pendingValues.isEmpty() || arms.isEmpty()) return {};
+    if (!pendingValues.isEmpty() || arms.isEmpty()) return no(__LINE__);
 
     Chain out;
     QString prevBranch;
@@ -1330,14 +1665,14 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
         Val test;
         m_pending.clear();
         for (const Expr *value : arm.values) {
-            if (!value) return {};
+            if (!value) return no(__LINE__);
             const Val subj = lowerExpr(*subject);
             const Val want = lowerExpr(*value);
-            if (!subj.valid || !want.valid || !m_pending.isEmpty()) return {};
+            if (!subj.valid || !want.valid || !m_pending.isEmpty()) return no(__LINE__);
             const Val eq = makeOp(QStringLiteral("=="), subj, want);
-            if (!eq.valid) return {};
+            if (!eq.valid) return no(__LINE__);
             test = test.valid ? makeOp(QStringLiteral("||"), test, eq) : eq;
-            if (!test.valid) return {};
+            if (!test.valid) return no(__LINE__);
         }
 
         Chain armChain;
@@ -1370,10 +1705,10 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
             armChain = acc;
         }
         popScope();
-        if (m_unsafeRaw) return {};
+        if (m_unsafeRaw) return no(__LINE__);
 
         if (arm.values.isEmpty()) {
-            if (prevBranch.isEmpty()) return {};
+            if (prevBranch.isEmpty()) return no(__LINE__);
             if (!armChain.entry.isEmpty())
                 wire(prevBranch, QStringLiteral("false"), armChain.entry, PinExec);
             continue;
@@ -1387,7 +1722,7 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
             wire(br, QStringLiteral("true"), armChain.entry, PinExec);
         prevBranch = br;
     }
-    if (out.entry.isEmpty()) return {};
+    if (out.entry.isEmpty()) return no(__LINE__);
     out.tailNode = prevBranch;
     out.tailPin.clear();
     out.ok = true;
@@ -1399,6 +1734,9 @@ Chain Lowerer::lowerSwitch(const Stmt &s)
 Val Lowerer::fail(const QString &why)
 {
     m_failed = true;
+    // The first reason is the deciding one: everything after it is the refusal
+    // travelling back up. The note list dedupes, so it cannot be read for this.
+    if (m_failWhy.isEmpty() && !why.isEmpty()) m_failWhy = why;
     if (!why.isEmpty() && !m_res.notes.contains(why)) m_res.notes.append(why);
     return {};
 }
@@ -1741,7 +2079,7 @@ Val Lowerer::callVal(const Expr &e)
         }
 
         ambiguous = false;
-        const QString any = anyMethod(name, argc, &ambiguous);
+        const QString any = anyMethod(name, argc, false, &ambiguous);
         if (!any.isEmpty() && !ambiguous) {
             const MethodSig sig = m_cat.method(any);
             const QString id = addNode(NodeKind::Call, any);
@@ -1838,7 +2176,7 @@ Val Lowerer::callVal(const Expr &e)
 
     bool ambiguous = false;
     QString key = methodOn(target.type, name, argc, false, &ambiguous);
-    if (key.isEmpty()) key = anyMethod(name, argc, &ambiguous);
+    if (key.isEmpty()) key = anyMethod(name, argc, true, &ambiguous);
     if (key.isEmpty()) {
         if (ambiguous)
             return fail(QStringLiteral("%1() is declared on several classes and the type "
@@ -1948,17 +2286,50 @@ QString Lowerer::globalFn(const QString &name, int argc) const
     return {};
 }
 
-// The last resort for a call whose object has no known type: one match in the
-// whole catalogue is an answer, several is a guess, and a guess here writes the
-// wrong method into someone's mod.
-QString Lowerer::anyMethod(const QString &name, int argc, bool *ambiguous) const
+// Two declarations of the same name that the generator would write out as the
+// same line. Everything it reads off the signature has to agree: the call form
+// (`Owner.Name(...)` for a static, `target.Name(...)` for an instance method),
+// the type of the local a consumed result lands in, and the parameter list,
+// since an `out` parameter has a declaration of its own emitted ahead of the
+// call and a trailing default decides whether an argument is written at all.
+bool sameEmittedCall(const MethodSig &a, const MethodSig &b)
+{
+    const int shape = flag::Static | flag::Ctor;
+    if ((a.flags & shape) != (b.flags & shape)) return false;
+    if ((a.flags & shape) && a.owner != b.owner) return false;
+    if (a.ret != b.ret) return false;
+    if (a.params.size() != b.params.size()) return false;
+    for (int i = 0; i < a.params.size(); ++i) {
+        const MethodSig::Param &pa = a.params.at(i);
+        const MethodSig::Param &pb = b.params.at(i);
+        if (pa.dir != pb.dir) return false;
+        if (pa.def.isEmpty() != pb.def.isEmpty()) return false;
+        if (pa.dir != 0 && pa.type != pb.type) return false;
+    }
+    return true;
+}
+
+// The last resort for a call whose object has no known type. Several matches
+// used to be refused outright, on the grounds that picking one is a guess. It
+// is only a guess when the choice shows: `Count()` is declared on array, set
+// and map with the same signature, and the generator writes `target.Count()`
+// whichever one is meant. So the test is whether the candidates would be
+// written differently, not whether there is more than one of them.
+//
+// `hasTarget` says the call already carries the object it runs against. Without
+// one the generator falls back to the owner to decide what to call the method
+// on, so the owners have to agree there as well.
+QString Lowerer::anyMethod(const QString &name, int argc, bool hasTarget,
+                           bool *ambiguous) const
 {
     *ambiguous = false;
     if (name.isEmpty()) return {};
     SearchOptions opts;
     opts.limit = 60;
     QString only;
+    MethodSig first;
     QSet<QString> owners;
+    bool allSame = true;
     for (const SearchHit &h : m_cat.search(name, opts)) {
         const MethodSig sig = m_cat.method(h.key);
         if (!sig.valid || sig.name != name) continue;
@@ -1966,18 +2337,35 @@ QString Lowerer::anyMethod(const QString &name, int argc, bool *ambiguous) const
         for (const MethodSig::Param &p : sig.params)
             if (p.def.isEmpty()) required++;
         if (argc < required || argc > sig.params.size()) continue;
-        if (only.isEmpty()) only = h.key;
+        if (only.isEmpty()) {
+            only = h.key;
+            first = sig;
+        } else if (!sameEmittedCall(first, sig)) {
+            allSame = false;
+        }
         owners.insert(sig.owner);
     }
-    if (owners.size() > 1) {
-        // A hook the class this script is already declares beats the rest.
-        bool onSelf = false;
-        const QString mine = methodOn(m_opts.selfClass, name, argc, false, &onSelf);
-        if (!mine.isEmpty()) return mine;
-        *ambiguous = true;
-        return {};
+    if (owners.size() <= 1) return only;
+
+    // A hook the class this script already declares beats the rest.
+    bool onSelf = false;
+    const QString mine = methodOn(m_opts.selfClass, name, argc, false, &onSelf);
+    if (!mine.isEmpty()) return mine;
+
+    if (allSame && !only.isEmpty()) {
+        if (hasTarget) return only;
+        // With nothing wired, `GetGame()` and `this` are both possible targets
+        // and the owner is what chooses between them, so every candidate has to
+        // be one this class can call on itself.
+        bool everyOwnerIsSelf = !m_opts.selfClass.isEmpty();
+        for (const QString &owner : owners)
+            if (owner.isEmpty() || owner == QLatin1String("CGame")
+                || !m_cat.isA(m_opts.selfClass, owner))
+                everyOwnerIsSelf = false;
+        if (everyOwnerIsSelf) return only;
     }
-    return only;
+    *ambiguous = true;
+    return {};
 }
 
 QString Lowerer::constantNamed(const QString &name, QString *type) const
@@ -2056,6 +2444,49 @@ LowerResult Lowerer::run(const std::vector<StmtPtr> &stmts)
     createVariables();
 
     const Chain c = lowerBlock(stmts);
+
+    if (diag::enabled()) {
+        const qint64 id = diag::nextRun();
+        // A body the caller can use at all, by the same rule the importer
+        // applies before it compares the regenerated text.
+        const bool usable = !m_res.nodes.isEmpty() && !c.entry.isEmpty() && !m_unsafeRaw;
+        QString sig;
+        int total = 0;
+        for (const StmtPtr &s : stmts) {
+            if (!s) continue;
+            sig += QString::number(int(s->kind)) + QLatin1Char(',');
+            total += diag::countStmts(*s);
+        }
+        diag::write(QStringLiteral("R\t%1\t%2\t%3\t%4\t%5\t%6\t%7")
+                        .arg(id)
+                        .arg(total)
+                        .arg(m_res.statementsLowered)
+                        .arg(m_res.statementsRaw)
+                        .arg(m_declines.size())
+                        .arg(usable ? 1 : 0)
+                        .arg(sig));
+        // One .arg() a field: the multi argument form fills the lowest numbered
+        // markers left, which silently ate the last column when it was used here.
+        for (const Decline &d : m_declines) {
+            QString row = QStringLiteral("S");
+            const QStringList fields = {
+                QString::number(id),
+                d.kind,
+                d.shape,
+                d.fromInside ? QStringLiteral("1") : QStringLiteral("0"),
+                QString::number(d.weight),
+                QString::number(d.depth),
+                QString::number(d.line),
+                d.why.isEmpty() ? QStringLiteral("-") : diag::flat(d.why),
+                d.causeKind.isEmpty() ? QStringLiteral("-") : d.causeKind,
+                d.causeWhy.isEmpty() ? QStringLiteral("-") : diag::flat(d.causeWhy),
+                d.text,
+            };
+            for (const QString &f : fields) row += QLatin1Char('\t') + f;
+            diag::write(row);
+        }
+    }
+
     if (m_unsafeRaw) {
         // A statement kept its code and that code reads a local nothing
         // declares any more. Nothing here is safe to use.

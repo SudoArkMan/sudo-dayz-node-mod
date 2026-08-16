@@ -42,8 +42,12 @@ class EnforceLexer {
 public:
     // Tokenises one line. `state` is carried in and updated on the way out.
     static QVector<Token> tokenize(const QString &line, LexState &state);
-    // Whole-text convenience; newlines are Whitespace tokens.
-    static QVector<Token> tokenizeAll(const QString &text);
+    // Whole-text convenience; newlines are Whitespace tokens. `endState` reports
+    // where the text left the lexer. A caller cannot work that out from the
+    // tokens: the first line of a block comment and a genuinely unclosed one are
+    // the same token shape, so anything asking "is this comment closed" has to
+    // read the state rather than the text.
+    static QVector<Token> tokenizeAll(const QString &text, LexState *endState = nullptr);
 
     static bool isKeyword(const QString &word);
     static bool isType(const QString &word);

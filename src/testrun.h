@@ -19,8 +19,16 @@
 //   3. The PBO. AddonBuilder packs the folder holding config.cpp into
 //      P:\Mods\@<Prefix>\Addons, which is the only place the engine looks for a
 //      mod that is not from the Workshop.
-//   4. The session. DayZDiag_x64.exe twice, server first, both with
-//      -filePatching, because a script mod is unloadable without it.
+//   4. The session. Either one DayZDiag_x64.exe on the mod's own mission, or
+//      two of them with the server first, both with -filePatching, because a
+//      script mod is unloadable without it.
+//
+// The two ways to run are not interchangeable and the choice is the user's.
+// Offline is one process and comes up in a fraction of the time, which is what
+// you want while a script is still changing every minute. A dev server is the
+// only one of the two that is a server, so it is the one that can tell you the
+// mod works. offlineLimits() below is the list of what the fast loop cannot
+// answer, and the panel prints it beside the selector.
 //
 // Every step hands back what it ran and what came back rather than a boolean.
 // A build or a launch that failed with nothing on screen is the thing that
@@ -70,6 +78,14 @@ enum class PrereqState {
     Warning,  // worth saying, does not block
 };
 
+// Which of the two sessions the launch button starts. Nothing else in the app
+// branches on this: the prerequisites, the mod chain and the PBO are the same
+// either way, and only the command that gets assembled differs.
+enum class LaunchMode {
+    Offline,    // one diag process on a mission, no server, no port
+    DevServer,  // a diag server, then a diag client on its port
+};
+
 struct PrereqCheck {
     QString id;
     QString label;
@@ -109,10 +125,13 @@ struct TestRunPaths {
     QString gamePath;       // the DayZ client install
     QString gameFrom;
     QString diagExe;        // its DayZDiag_x64.exe, used for both server and client
-    QString serverPath;     // the DayZServer install, for the offline mission
+    QString retailExe;      // its DayZ_x64.exe, only ever used to say why it is no good
+    QString serverPath;     // the DayZServer install, for a mission to borrow
     QString deployDir;      // <workDrive>/Mods/@<prefix>/Addons
     QString pbo;            // the file a build produces there
-    QString mission;        // what -mission= gets, empty to let server.cfg decide
+    QStringList missions;   // every mission that can be run, in folder order
+    QString mission;        // the chosen one, what -mission= gets
+    QString missionFrom;    // where the list came from, so a surprise is traceable
     QString serverProfiles; // where the server writes its RPT
     QString clientProfiles; // where the client writes its RPT
     QString tempDir;        // AddonBuilder's scratch folder
@@ -167,6 +186,44 @@ RunStep makeJunction(const QString &link, const QString &target);
 // that this function can never recurse into somebody's mod.
 RunStep removeJunction(const QString &link);
 
+// One thing an offline run cannot answer, split so the panel can print the
+// short half where it only has one line and the whole of it on hover.
+struct OfflineLimit {
+    QString what;  // "Anything set in server.cfg"
+    QString why;   // the reason, and where it was checked
+    QString line() const;
+};
+
+// What an offline run cannot answer. A mod that works offline can still be
+// broken on a server, and finding that out by chasing a bug that only exists on
+// one side of the split is the expensive way to learn it, so the panel prints
+// this beside the mode selector.
+//
+// Every line was checked against the vanilla scripts on the work drive or
+// against the mod's own source before it was written here, and anything that
+// could not be confirmed was dropped rather than repeated:
+//
+//   - Offline is IsServer() and not IsMultiplayer(). That is Community
+//     Framework's own definition of an offline mission, in
+//     3_Game/CommunityFramework/CommunityFramework.c.
+//   - Vanilla gates 467 checks across 197 files on IsMultiplayer(). RPC
+//     delivery is one of them: SyncEvents only reads RPC_SYNC_EVENT when the
+//     game is a multiplayer client, in 3_game/syncevents.c.
+//   - EntityAI::IsServerCheck only raises its "changed client side" error for
+//     a multiplayer client, 3_game/entities/entityai.c.
+//   - game.c's own note on IsDedicatedServer() says #ifdef SERVER is the same
+//     question asked at compile time, 3_game/global/game.c.
+//   - ServerConfigGetInt reads the -config file, and enableCfgGameplayFile is
+//     read through it, 3_game/cfggameplayhandler.c.
+//   - Community Online Tools returns true from HasPermission whenever the
+//     mission is offline, and loads its roles only when the game is a
+//     multiplayer server. Its own source, JMPermissionManager and
+//     CommunityOnlineToolsBase.
+//
+// The chain decides the last line, because the permission note is only worth
+// printing to somebody who is loading COT.
+QVector<OfflineLimit> offlineLimits(const QVector<ModRef> &modChain);
+
 // ------------------------------------------------------------------- the class
 
 class TestRun : public QObject {
@@ -190,8 +247,22 @@ public:
     static QString discoverGame(const QString &toolsPath, QString *how = nullptr);
     static QString discoverServer(const QString &gamePath, QString *how = nullptr);
 
+    // Which session the launch button starts. Changing it assembles a
+    // different command and nothing else: no path moves and no file is
+    // written, so it is safe to flip while the checklist is on screen.
+    LaunchMode mode() const { return m_mode; }
+    void setMode(LaunchMode mode) { m_mode = mode; }
+
+    // The mission both modes point at. Offline cannot run without one; the
+    // server can, because server.cfg carries a template line of its own. The
+    // choice survives a refresh, so re-checking does not silently move a user
+    // who picked Enoch back to Chernarus.
+    void setMission(const QString &path);
+
     // Every prerequisite, in the order they have to hold. Cheap enough to call
-    // on every refresh: it is a handful of stat calls.
+    // on every refresh: it is a handful of stat calls. The mission row is the
+    // only one that reads the mode, because a mission missing offline blocks
+    // and a mission missing on a server does not.
     QVector<PrereqCheck> check() const;
     // The ids that are Missing among `checks`, so a caller can say which button
     // is not going to work and why without repeating the rules.
@@ -212,11 +283,15 @@ public:
     RunCommand buildCommand(bool clean, QString *error = nullptr) const;
     RunCommand serverCommand(QString *error = nullptr) const;
     RunCommand clientCommand(QString *error = nullptr) const;
+    // One process on the mission. No -server, no -config, no port and no
+    // -connect: there is nothing to connect to.
+    RunCommand offlineCommand(QString *error = nullptr) const;
 
     // Start the assembled command. False and a reason when it could not start;
     // the log carries everything after that.
     bool startBuild(bool clean, QString *error = nullptr);
-    // Server, then the client once the server has had time to open its port.
+    // Offline, or the server and then the client once the server has had time
+    // to open its port. Which one is mode()'s answer.
     bool startTest(QString *error = nullptr);
 
     // Kills what this object started, server first, and cancels a client that
@@ -261,4 +336,11 @@ private:
     QString m_serverCarry;
     QString m_clientCarry;
     int m_port = 2302;
+    // The dev server is the default because it is what this app already did
+    // and because it is the run that can actually clear a mod. Offline is the
+    // faster answer, not the more complete one.
+    LaunchMode m_mode = LaunchMode::DevServer;
+    // The user's pick, kept apart from the resolved path so a refresh that
+    // finds the folder gone does not forget which one was wanted.
+    QString m_mission;
 };

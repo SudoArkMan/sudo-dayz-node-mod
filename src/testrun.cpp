@@ -455,6 +455,74 @@ RunStep removeJunction(const QString &link)
     return step;
 }
 
+// -------------------------------------------------------------- offline limits
+
+QString OfflineLimit::line() const
+{
+    return QStringLiteral("%1. %2").arg(what, why);
+}
+
+QVector<OfflineLimit> offlineLimits(const QVector<ModRef> &modChain)
+{
+    QVector<OfflineLimit> limits;
+    const auto add = [&limits](const QString &what, const QString &why) {
+        OfflineLimit limit;
+        limit.what = what;
+        limit.why = why;
+        limits.append(limit);
+    };
+
+    // One process, one character, no socket. Nothing to check in the scripts
+    // for this one: it is the shape of the command.
+    add(QStringLiteral("Another player"),
+        QStringLiteral("Offline is one process and one character, so anything "
+                       "that needs a second client cannot happen at all."));
+
+    // 3_game/syncevents.c is the clearest of the 467: the handler for
+    // RPC_SYNC_EVENT sits behind IsMultiplayer() and IsClient() together, so
+    // offline an RPC is written and nothing ever reads it.
+    add(QStringLiteral("Anything networked"),
+        QStringLiteral("IsMultiplayer() is false offline, and vanilla gates 467 "
+                       "checks across 197 files on it, RPC delivery included."));
+
+    // EntityAI::IsServerCheck returns at its first line offline, because
+    // IsServer() is true there. The error it exists to raise cannot fire.
+    add(QStringLiteral("A variable written on the wrong side"),
+        QStringLiteral("EntityAI.IsServerCheck only raises its error for a "
+                       "multiplayer client, and offline is not multiplayer."));
+
+    // game.c's own comment on IsDedicatedServer() names #ifdef SERVER as the
+    // compile-time form of the same question.
+    add(QStringLiteral("Code behind IsDedicatedServer() or #ifdef SERVER"),
+        QStringLiteral("Offline is not a dedicated server, so neither branch is "
+                       "taken."));
+
+    // ServerConfigGetInt reads the file given to -config, which offline is
+    // never given. enableCfgGameplayFile is read through it, so
+    // cfggameplay.json goes with it.
+    add(QStringLiteral("Anything set in server.cfg"),
+        QStringLiteral("Offline passes no -config, so ServerConfigGetInt finds "
+                       "nothing and cfggameplay.json is not loaded."));
+
+    // Only worth saying to somebody loading COT. Spaces and dashes come out
+    // because the folder ships as @Community-Online-Tools while the guessed
+    // name is @CommunityOnlineTools.
+    for (const ModRef &m : modChain) {
+        QString packed = m.name;
+        packed.remove(QLatin1Char(' ')).remove(QLatin1Char('-'));
+        if (!packed.contains(QStringLiteral("CommunityOnlineTools"),
+                             Qt::CaseInsensitive))
+            continue;
+        add(QStringLiteral("A Community Online Tools permission"),
+            QStringLiteral("HasPermission returns true whenever the mission is "
+                           "offline and the roles are only loaded on a "
+                           "multiplayer server, so a gated feature always opens."));
+        break;
+    }
+
+    return limits;
+}
+
 // ------------------------------------------------------------------- discovery
 
 QString TestRun::dayzToolsPath()
@@ -619,6 +687,13 @@ void TestRun::refresh(const Project &project)
                     ? QString()
                     : clean(QDir(p.gamePath).filePath(QStringLiteral("DayZDiag_x64.exe")));
     if (!isFile(p.diagExe)) p.diagExe.clear();
+    // Found so the checklist can name it. A DayZ folder with only the retail
+    // exe in it is not a partial install, it is the wrong install for this, and
+    // saying so beats "no DayZDiag_x64.exe under D:\...".
+    p.retailExe = p.gamePath.isEmpty()
+                      ? QString()
+                      : clean(QDir(p.gamePath).filePath(QStringLiteral("DayZ_x64.exe")));
+    if (!isFile(p.retailExe)) p.retailExe.clear();
     p.serverPath = discoverServer(p.gamePath, nullptr);
 
     if (!p.modRoot.isEmpty() && !p.modPrefix.isEmpty()) {
@@ -667,20 +742,35 @@ void TestRun::refresh(const Project &project)
         p.clientProfiles =
             clean(QDir(p.modRoot).filePath(QStringLiteral("Profiles/Client")));
 
-        // The mod's own mission first, because that is the one the user can edit
-        // without touching the DayZ install.
+        // The mod's own missions first, because those are the ones the user can
+        // edit without touching the DayZ install. The template ships one folder
+        // per map it was scaffolded with, named <Prefix>.<Terrain>, and offline
+        // has to be pointed at exactly one of them.
         const QDir missions(QDir(p.modRoot).filePath(QStringLiteral("Missions")));
-        const QStringList own =
-            missions.entryList({ p.modPrefix + QStringLiteral(".*") },
-                               QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-        if (!own.isEmpty()) {
-            p.mission = clean(missions.filePath(own.first()));
+        for (const QString &name :
+             missions.entryList({ p.modPrefix + QStringLiteral(".*") },
+                                QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+            p.missions << clean(missions.filePath(name));
+        if (!p.missions.isEmpty()) {
+            p.missionFrom = QStringLiteral("shipped with this mod");
         } else if (!p.serverPath.isEmpty()) {
-            const QString offline =
-                QDir(p.serverPath)
-                    .filePath(QStringLiteral("mpmissions/dayzOffline.chernarusplus"));
-            if (isDir(offline)) p.mission = clean(offline);
+            // Nothing of the mod's own, so the vanilla offline missions are
+            // better than refusing to run: they load the mod chain the same way
+            // and they are already on disk.
+            const QDir mp(QDir(p.serverPath).filePath(QStringLiteral("mpmissions")));
+            for (const QString &name :
+                 mp.entryList({ QStringLiteral("dayzOffline.*") },
+                              QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+                p.missions << clean(mp.filePath(name));
+            if (!p.missions.isEmpty())
+                p.missionFrom = QStringLiteral("borrowed from the DayZServer install");
         }
+
+        // The user's pick wins while it is still there. Falling back to the
+        // first is what makes a freshly opened project runnable without asking.
+        for (const QString &have : p.missions)
+            if (have.compare(m_mission, Qt::CaseInsensitive) == 0) p.mission = have;
+        if (p.mission.isEmpty()) p.mission = p.missions.value(0);
     }
 
     p.modChain = modChainFor(project, p.workDrive, p.gamePath);
@@ -692,6 +782,15 @@ void TestRun::refresh(const Project &project)
             applyExistingSpelling(p.modChain, file.readAll());
     }
     m_paths = p;
+}
+
+void TestRun::setMission(const QString &path)
+{
+    m_mission = clean(path);
+    // Taken up straight away rather than at the next refresh, so the command
+    // the user reads in the log is the mission they just picked.
+    for (const QString &have : m_paths.missions)
+        if (have.compare(m_mission, Qt::CaseInsensitive) == 0) m_paths.mission = have;
 }
 
 QVector<PrereqCheck> TestRun::check() const
@@ -784,12 +883,27 @@ QVector<PrereqCheck> TestRun::check() const
                    QStringLiteral("Press Set DayZ Tools folder and point at the "
                                   "install."));
 
-    if (!p.diagExe.isEmpty())
-        out << ok(QStringLiteral("diag"), QStringLiteral("Diag client"),
+    if (!p.diagExe.isEmpty()) {
+        out << ok(QStringLiteral("diag"), QStringLiteral("Diag build"),
                   QStringLiteral("%1 (%2)")
                       .arg(QDir::toNativeSeparators(p.diagExe), p.gameFrom));
-    else
-        out << bad(QStringLiteral("diag"), QStringLiteral("Diag client"),
+    } else if (!p.retailExe.isEmpty()) {
+        // The one case worth spelling out. Both modes need -filePatching, and
+        // retail DayZ_x64.exe and DayZServer_x64.exe both stop at the loading
+        // screen once it is on, so a retail install is not a smaller version of
+        // what is needed here, it is the wrong one.
+        out << bad(QStringLiteral("diag"), QStringLiteral("Diag build"),
+                   QStringLiteral("Only the retail %1 is here. Neither offline "
+                                  "nor a dev server can use it: both need "
+                                  "-filePatching, and the retail client and the "
+                                  "retail server each stop at the loading screen "
+                                  "once it is on.")
+                       .arg(QDir::toNativeSeparators(p.retailExe)),
+                   QStringLiteral("Install the diagnostic build from the DayZ "
+                                  "Tools launcher. It lands beside the retail "
+                                  "exe as DayZDiag_x64.exe."));
+    } else {
+        out << bad(QStringLiteral("diag"), QStringLiteral("Diag build"),
                    p.gamePath.isEmpty()
                        ? QStringLiteral("The DayZ install was not found.")
                        : QStringLiteral("No DayZDiag_x64.exe under %1.")
@@ -797,6 +911,7 @@ QVector<PrereqCheck> TestRun::check() const
                    QStringLiteral("Install the diagnostic build from the DayZ "
                                   "Tools launcher. The retail exe cannot load a "
                                   "file-patched mod."));
+    }
 
     if (isFile(p.projectCfg))
         out << ok(QStringLiteral("projectcfg"), QStringLiteral("Mod chain"),
@@ -821,13 +936,35 @@ QVector<PrereqCheck> TestRun::check() const
 
     if (!p.mission.isEmpty())
         out << ok(QStringLiteral("mission"), QStringLiteral("Mission"),
-                  QDir::toNativeSeparators(p.mission));
+                  p.missions.size() > 1
+                      ? QStringLiteral("%1, one of %2 %3")
+                            .arg(QDir::toNativeSeparators(p.mission))
+                            .arg(p.missions.size())
+                            .arg(p.missionFrom)
+                      : QStringLiteral("%1 (%2)")
+                            .arg(QDir::toNativeSeparators(p.mission), p.missionFrom));
+    else if (m_mode == LaunchMode::Offline)
+        // Offline has nothing to fall back on. There is no server.cfg in the
+        // command and no server to read one, so a run with no mission is a run
+        // that comes up at the main menu and looks like the mod failed.
+        out << bad(QStringLiteral("mission"), QStringLiteral("Mission"),
+                   QStringLiteral("No %1\\Missions\\%2.<map> and no DayZServer "
+                                  "install to borrow one from. Offline has "
+                                  "nothing to load.")
+                       .arg(QDir::toNativeSeparators(p.modRoot), p.modPrefix),
+                   QStringLiteral("Scaffold the mod again with a map selected, "
+                                  "or copy a mission folder in and name it "
+                                  "%1.ChernarusPlus. Switching to Dev server "
+                                  "also runs without one.")
+                       .arg(p.modPrefix));
     else
         out << bad(QStringLiteral("mission"), QStringLiteral("Mission"),
                    QStringLiteral("No mission under the mod folder and no "
                                   "DayZServer install to borrow one from."),
                    QStringLiteral("The server will fall back to the template line "
-                                  "in server.cfg."),
+                                  "in server.cfg. Offline cannot: it needs one "
+                                  "named %1.<map> under Missions.")
+                       .arg(p.modPrefix),
                    PrereqState::Warning);
 
     if (isFile(p.pbo))
@@ -1061,6 +1198,48 @@ RunCommand TestRun::clientCommand(QString *error) const
     return cmd;
 }
 
+RunCommand TestRun::offlineCommand(QString *error) const
+{
+    const TestRunPaths &p = m_paths;
+    const auto fail = [error](const QString &why) {
+        if (error) *error = why;
+        return RunCommand();
+    };
+
+    if (p.diagExe.isEmpty())
+        return fail(QStringLiteral("DayZDiag_x64.exe was not found."));
+    // Refused here rather than launched without it. The engine takes a missing
+    // -mission= as a request for the main menu, so the session would come up
+    // looking exactly like a mod that failed to load.
+    if (p.mission.isEmpty())
+        return fail(QStringLiteral("No mission to run. Offline loads one mission "
+                                   "folder, and there is no %1.<map> under "
+                                   "%2\\Missions to load. Scaffold the mod again "
+                                   "with a map selected, or run on a dev server "
+                                   "instead.")
+                        .arg(p.modPrefix,
+                             QDir::toNativeSeparators(p.modRoot)));
+    if (!isDir(p.mission))
+        return fail(QStringLiteral("%1 is not there any more.")
+                        .arg(QDir::toNativeSeparators(p.mission)));
+
+    RunCommand cmd;
+    cmd.program = p.diagExe;
+    cmd.workingDir = QFileInfo(p.diagExe).absolutePath();
+    cmd.arguments << QStringLiteral("-mission=%1")
+                         .arg(QDir::toNativeSeparators(p.mission))
+                  << QStringLiteral("-profiles=%1")
+                         .arg(QDir::toNativeSeparators(p.clientProfiles));
+    const QString mods = p.modArgument();
+    if (!mods.isEmpty()) cmd.arguments << QStringLiteral("-mod=%1").arg(mods);
+    // Same reason as the pair: without it the engine reads scripts out of the
+    // PBO only, and editing a script would mean rebuilding to see it.
+    cmd.arguments << QStringLiteral("-filePatching")
+                  << QStringLiteral("-window");
+    if (error) error->clear();
+    return cmd;
+}
+
 // ------------------------------------------------------------------- processes
 
 void TestRun::emitCommand(const RunCommand &cmd)
@@ -1166,6 +1345,27 @@ bool TestRun::startTest(QString *error)
         return false;
     }
     QString why;
+
+    // Offline is the whole session in one process, so there is no port to wait
+    // on and nothing to sequence. It lands in the client slot because that is
+    // what it is: the diag client, running the mission itself.
+    if (m_mode == LaunchMode::Offline) {
+        const RunCommand offline = offlineCommand(&why);
+        if (!offline.isValid()) {
+            if (error) *error = why;
+            return false;
+        }
+        QDir().mkpath(m_paths.clientProfiles);
+        m_clientCarry.clear();
+        m_client = makeProcess(QStringLiteral("Offline"), &m_clientCarry);
+        emitCommand(offline);
+        m_client->setWorkingDirectory(offline.workingDir);
+        m_client->start(offline.program, offline.arguments);
+        emit busyChanged();
+        if (error) error->clear();
+        return true;
+    }
+
     const RunCommand server = serverCommand(&why);
     if (!server.isValid()) {
         if (error) *error = why;
@@ -1235,7 +1435,9 @@ QVector<RunStep> TestRun::stop()
     // The server goes first. Killing the client first leaves the server holding
     // the port, and the next launch lands on a socket that is already taken.
     killOne(m_server, QStringLiteral("server"));
-    killOne(m_client, QStringLiteral("client"));
+    killOne(m_client, m_mode == LaunchMode::Offline
+                          ? QStringLiteral("offline session")
+                          : QStringLiteral("client"));
     killOne(m_build, QStringLiteral("build"));
 
     if (steps.isEmpty()) {

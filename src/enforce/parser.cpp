@@ -211,11 +211,18 @@ private:
 
     void build()
     {
-        const QVector<Token> raw = EnforceLexer::tokenizeAll(m_src);
+        // The lexer works a line at a time, so the first line of a block comment
+        // and a comment nobody closed are the same token: text that opens with
+        // `/*` and does not close. Asking the lexer where it finished is the only
+        // way to tell them apart, and getting it wrong reported a syntax error on
+        // every body holding a comment over two lines, which stopped the whole
+        // body from being lowered.
+        LexState endState = LexState::Normal;
+        const QVector<Token> raw = EnforceLexer::tokenizeAll(m_src, &endState);
         int cursor = 0;
         int line = 1;
         int paren = 0, brace = 0, bracket = 0;
-        bool unterminatedComment = false;
+        const bool unterminatedComment = endState == LexState::InBlockComment;
         bool unterminatedString = false;
 
         for (const Token &t : raw) {
@@ -228,11 +235,7 @@ private:
                 if (m_src.at(i) == QLatin1Char('\n')) line++;
             cursor = t.start + t.length;
 
-            if (t.kind == TokenKind::Comment) {
-                if (t.text.startsWith(QLatin1String("/*")) && !t.text.endsWith(QLatin1String("*/")))
-                    unterminatedComment = true;
-                continue;
-            }
+            if (t.kind == TokenKind::Comment) continue;
             if (t.kind == TokenKind::Whitespace) continue;
             if (t.kind == TokenKind::String
                 && (t.length < 2 || !t.text.endsWith(QLatin1Char('"'))))
@@ -575,6 +578,9 @@ private:
         }
 
         if (looksLikeDeclaration()) return parseVarDecl(true);
+        if (looksLikeConstructedDeclaration())
+            throw ParseFail{QStringLiteral("a declaration that runs a constructor has no node "
+                                           "shape")};
 
         StmtPtr s = makeStmt(StmtKind::Expression, ln);
         s->expr = parseExpression();
@@ -736,6 +742,28 @@ private:
                        // which vanilla has in ingamehud.c
                        || peek(1).line > cur().line;
             }
+        } catch (const ParseFail &) {
+            decl = false;
+        }
+        m_pos = save;
+        return decl;
+    }
+
+    // `ScriptInputUserData serializer();` declares a local and runs its
+    // constructor. Vanilla writes it, so does CF, and the graph has no shape for
+    // it. Naming the shape is worth the scan on its own: the reason the importer
+    // showed came from the expression path, so authors were told their code was
+    // missing a semicolon. Nothing here changes what is kept, because a refused
+    // statement keeps its own text either way.
+    bool looksLikeConstructedDeclaration()
+    {
+        const int save = m_pos;
+        bool decl = false;
+        try {
+            const QString type = parseTypeName();
+            decl = !type.isEmpty() && identLike(cur().kind)
+                   && peek(1).kind == TokenKind::Punctuation
+                   && peek(1).text == QLatin1String("(");
         } catch (const ParseFail &) {
             decl = false;
         }

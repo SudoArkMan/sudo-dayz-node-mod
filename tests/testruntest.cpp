@@ -9,16 +9,24 @@
 //   - a junction made under a temporary name, verified, then removed, with the
 //     folder it pointed at proved intact afterwards
 //   - the project.cfg rewrite, asserted line by line so that only Mods moved
-//   - the build, server and client command lines, printed rather than executed
+//   - the build, server, client and offline command lines, printed rather than
+//     executed, with the pair proved unchanged by the offline mode existing
+//   - a mod with no mission at all, which offline has to refuse rather than
+//     start into a session that looks like the mod failed to load
 //
 // Everything happens inside a QTemporaryDir except the one junction that goes
 // on the work drive, which uses a name nothing else will have.
+#include "document.h"
 #include "moddeps.h"
 #include "modtemplate.h"
+#include "panels/testpanel.h"
 #include "project.h"
 #include "testrun.h"
+#include "theme.h"
 
-#include <QCoreApplication>
+#include <QAction>
+#include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -85,7 +93,13 @@ static QList<int> changedLines(const QByteArray &before, const QByteArray &after
 
 int main(int argc, char **argv)
 {
-    QCoreApplication app(argc, argv);
+    // Offscreen unless the caller has already chosen. The suite builds a
+    // QApplication only so --shot can grab the real dock; nothing else here
+    // touches a widget, and forcing the platform keeps it runnable with no
+    // display.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("SUDO"));
     // Deliberately not the app's own name: TestRun remembers the DayZ Tools
     // folder in QSettings, and a test has no business reading or writing the
@@ -107,6 +121,10 @@ int main(int argc, char **argv)
     options.prefix = QStringLiteral("SUDO_RunTest");
     options.displayName = QStringLiteral("Run test");
     options.author = QStringLiteral("tests");
+    // Two maps, because offline runs one mission and the interesting case is
+    // the one where the mod ships more than one and somebody has to pick.
+    options.includeMissions = true;
+    options.maps = { QStringLiteral("ChernarusPlus"), QStringLiteral("Enoch") };
     const ModTemplateResult made = scaffoldMod(tmp.path(), options);
     check(made.ok, QStringLiteral("mod scaffolded (%1)")
                        .arg(made.ok ? made.modRoot : made.error));
@@ -357,6 +375,31 @@ int main(int argc, char **argv)
     if (!paths.link.isEmpty() && QFileInfo(paths.link).isJunction())
         removeJunction(paths.link);
 
+    // ---------------------------------------------------------------- missions
+
+    heading(QStringLiteral("Missions this mod ships"));
+    for (const QString &m : paths.missions)
+        out << "  " << QDir::toNativeSeparators(m) << Qt::endl;
+
+    check(paths.missions.size() == 2,
+          QStringLiteral("both scaffolded maps are found (%1)")
+              .arg(paths.missions.size()));
+    check(!paths.mission.isEmpty() && paths.missions.contains(paths.mission),
+          QStringLiteral("one of them is selected without being asked"));
+    check(paths.missionFrom == QStringLiteral("shipped with this mod"),
+          QStringLiteral("and it came from the mod, not from the DayZ install"));
+
+    // Picking the other one has to stick across a re-check. A refresh that
+    // quietly moved somebody back to Chernarus would be found out in game.
+    const QString wantedMission = paths.missions.last();
+    run.setMission(wantedMission);
+    check(run.paths().mission == wantedMission,
+          QStringLiteral("the picked mission is the one held"));
+    run.refresh(project);
+    check(run.paths().mission == wantedMission,
+          QStringLiteral("and it survives a refresh (%1)")
+              .arg(QFileInfo(wantedMission).fileName()));
+
     // ---------------------------------------------------------- command lines
 
     heading(QStringLiteral("Command lines, assembled and printed, never run"));
@@ -438,8 +481,228 @@ int main(int argc, char **argv)
         note(QStringLiteral("no diag client on this machine, commands not assembled"));
     }
 
+    // ------------------------------------------------------- offline, one process
+
+    heading(QStringLiteral("Offline, and the four arguments it must not carry"));
+    check(run.mode() == LaunchMode::DevServer,
+          QStringLiteral("the dev server is still the default"));
+    run.setMode(LaunchMode::Offline);
+    check(run.mode() == LaunchMode::Offline,
+          QStringLiteral("the mode is what was asked for"));
+
+    const RunCommand offline = run.offlineCommand(&error);
+    if (offline.isValid()) {
+        out << "  offline " << offline.display() << Qt::endl;
+
+        check(offline.program.endsWith(QStringLiteral("DayZDiag_x64.exe")),
+              QStringLiteral("offline runs the diag build too, because retail "
+                             "stops at the loading screen with file patching on"));
+        check(offline.arguments.contains(
+                  QStringLiteral("-mission=%1")
+                      .arg(QDir::toNativeSeparators(wantedMission))),
+              QStringLiteral("it loads the mission that was picked"));
+        check(offline.arguments.contains(
+                  QStringLiteral("-profiles=%1")
+                      .arg(QDir::toNativeSeparators(paths.clientProfiles))),
+              QStringLiteral("its RPT goes to the client profile folder"));
+        check(offline.arguments.contains(QStringLiteral("-filePatching")),
+              QStringLiteral("file patching is on, or the script mod does not load"));
+        check(offline.arguments.contains(
+                  QStringLiteral("-mod=%1").arg(paths.modArgument())),
+              QStringLiteral("it loads the same chain the pair does"));
+
+        // The four that make a session a pair. Each one is wrong offline, and
+        // passing one anyway is how a quick run turns into an hour spent
+        // wondering why the game sat at the main menu.
+        bool connect = false, config = false, port = false;
+        for (const QString &a : offline.arguments) {
+            connect = connect || a.startsWith(QStringLiteral("-connect="));
+            config = config || a.startsWith(QStringLiteral("-config="));
+            port = port || a.startsWith(QStringLiteral("-port="));
+        }
+        check(!offline.arguments.contains(QStringLiteral("-server")),
+              QStringLiteral("no -server, because nothing is hosting"));
+        check(!connect, QStringLiteral("no -connect, because there is nothing to "
+                                       "connect to"));
+        check(!config, QStringLiteral("no -config, because server.cfg is not read"));
+        check(!port, QStringLiteral("no -port, because no socket is opened"));
+    } else {
+        check(!paths.diagExe.isEmpty(),
+              QStringLiteral("offline command assembled (%1)").arg(error));
+        note(QStringLiteral("no diag build on this machine, offline command not "
+                            "assembled"));
+    }
+
+    // The mode picks a command. It does not rewrite the other one.
+    const RunCommand serverAgain = run.serverCommand(&error);
+    const RunCommand clientAgain = run.clientCommand(&error);
+    check(serverAgain.display() == server.display()
+              && clientAgain.display() == client.display(),
+          QStringLiteral("the dev server pair is byte for byte what it was"));
+
+    // --------------------------------------------------- what offline will not show
+
+    heading(QStringLiteral("What an offline run will not show"));
+    const QVector<OfflineLimit> limits = offlineLimits(paths.modChain);
+    for (const OfflineLimit &limit : limits)
+        out << "  " << limit.line() << Qt::endl;
+
+    check(limits.size() >= 5,
+          QStringLiteral("there are %1 of them").arg(limits.size()));
+    bool wellFormed = true;
+    for (const OfflineLimit &limit : limits)
+        // The short half is what the panel puts on its one line and must not
+        // carry a full stop of its own; the reason is a finished sentence. The
+        // ASCII rule is asserted rather than trusted.
+        wellFormed = wellFormed && !limit.what.trimmed().isEmpty()
+                     && !limit.what.trimmed().endsWith(QLatin1Char('.'))
+                     && limit.why.trimmed().endsWith(QLatin1Char('.'))
+                     && !limit.line().contains(QChar(0x2014));
+    check(wellFormed,
+          QStringLiteral("each is a short name and a finished reason, no em dash"));
+
+    const auto mentionsPermissions = [](const QVector<OfflineLimit> &lines) {
+        for (const OfflineLimit &limit : lines)
+            if (limit.what.contains(QStringLiteral("permission"), Qt::CaseInsensitive))
+                return true;
+        return false;
+    };
+    check(mentionsPermissions(limits),
+          QStringLiteral("the permission line is printed, because COT is in the chain"));
+    const QVector<OfflineLimit> withoutCot = offlineLimits({});
+    check(!mentionsPermissions(withoutCot),
+          QStringLiteral("and dropped from a chain that does not load COT"));
+    check(withoutCot.size() == limits.size() - 1,
+          QStringLiteral("nothing else moved with it"));
+
+    // ------------------------------------------------------- a mod with no mission
+
+    heading(QStringLiteral("A mod with no mission at all"));
+    // Two halves, and both are needed. A mod scaffolded without missions, and
+    // DayZServer pointed at an empty folder so nothing can be borrowed from it
+    // either: on a machine that has DayZServer installed the borrow would hide
+    // the case this is here to prove.
+    const QString emptyServer = QDir(tmp.path()).filePath(QStringLiteral("no-server"));
+    QDir().mkpath(emptyServer);
+    const bool hadServerEnv = qEnvironmentVariableIsSet("DAYZ_SERVER_PATH");
+    const QByteArray oldServerEnv = qgetenv("DAYZ_SERVER_PATH");
+    qputenv("DAYZ_SERVER_PATH", QDir::toNativeSeparators(emptyServer).toLocal8Bit());
+
+    ModTemplateOptions bare;
+    bare.prefix = QStringLiteral("SUDO_RunTestBare");
+    bare.displayName = QStringLiteral("Run test, no mission");
+    bare.author = QStringLiteral("tests");
+    const ModTemplateResult bareMade = scaffoldMod(tmp.path(), bare);
+    check(bareMade.ok, QStringLiteral("a mod with no missions scaffolded (%1)")
+                           .arg(bareMade.ok ? bareMade.modRoot : bareMade.error));
+
+    Project bareProject;
+    bareProject.name = bare.prefix;
+    bareProject.modRoot = bareMade.modRoot;
+    bareProject.modPrefix = bare.prefix;
+
+    TestRun bareRun;
+    bareRun.setMode(LaunchMode::Offline);
+    bareRun.refresh(bareProject);
+    check(bareRun.paths().missions.isEmpty(),
+          QStringLiteral("no mission is found, and none is invented"));
+
+    QString bareWhy;
+    const RunCommand bareOffline = bareRun.offlineCommand(&bareWhy);
+    check(!bareOffline.isValid() && !bareWhy.isEmpty(),
+          QStringLiteral("offline refuses to assemble a command"));
+    check(bareWhy.contains(QStringLiteral("mission"), Qt::CaseInsensitive)
+              && bareWhy.contains(bare.prefix),
+          QStringLiteral("and names the folder it wanted (%1)").arg(bareWhy));
+
+    const PrereqCheck bareMission =
+        findCheck(bareRun.check(), QStringLiteral("mission"));
+    check(bareMission.state == PrereqState::Missing,
+          QStringLiteral("the checklist blocks on it before the button is pressed"));
+    check(!bareMission.fix.isEmpty(),
+          QStringLiteral("and says what to do about it (%1)").arg(bareMission.fix));
+
+    // The same state on a dev server is a warning rather than a block, because
+    // the server has server.cfg's own template line to fall back on.
+    bareRun.setMode(LaunchMode::DevServer);
+    check(findCheck(bareRun.check(), QStringLiteral("mission")).state
+              == PrereqState::Warning,
+          QStringLiteral("a dev server treats the same state as a warning"));
+    // Assembled into a variable first: the message has to read the reason this
+    // call produced, not the one still sitting in bareWhy from the refusal.
+    QString bareServerWhy;
+    const RunCommand bareServer = bareRun.serverCommand(&bareServerWhy);
+    check(bareServer.isValid() || paths.diagExe.isEmpty(),
+          QStringLiteral("and still assembles a server command (%1)")
+              .arg(bareServerWhy.isEmpty() ? QStringLiteral("no complaint")
+                                           : bareServerWhy));
+    bool bareHasMission = false;
+    for (const QString &a : bareServer.arguments)
+        bareHasMission = bareHasMission || a.startsWith(QStringLiteral("-mission="));
+    check(!bareHasMission,
+          QStringLiteral("and leaves -mission off it, so server.cfg's own "
+                         "template line decides"));
+
+    if (hadServerEnv) qputenv("DAYZ_SERVER_PATH", oldServerEnv);
+    else qunsetenv("DAYZ_SERVER_PATH");
+
+    // ------------------------------------------------------------------ the dock
+
+    // A shape nobody has looked at is a shape nobody has checked. The panel is
+    // built on the mod scaffolded above, so the picture is of a real project
+    // with a real mod chain rather than of an empty dock.
+    const QStringList args = QCoreApplication::arguments();
+    const auto argAfter = [&args](const QString &flag) {
+        const int at = args.indexOf(flag);
+        return at > 0 && at + 1 < args.size() ? args.at(at + 1) : QString();
+    };
+    const QString shot = argAfter(QStringLiteral("--shot"));
+    const QString offlineShot = argAfter(QStringLiteral("--shot-offline"));
+    {
+        heading(QStringLiteral("The dock"));
+        theme::apply(app);
+        Document doc;
+        doc.project() = project;
+        auto *panel = new TestPanel(&doc);
+        panel->resize(760, 560);
+        panel->show();
+        QApplication::processEvents();
+        if (!shot.isEmpty())
+            out << (panel->grab().save(shot) ? "wrote " : "could not write ")
+                << shot << Qt::endl;
+
+        // The mode is a combo box in the panel and there is no other way in,
+        // which is the point: this drives the same widget the user does, so a
+        // selector wired to nothing would be caught here rather than in game.
+        const QList<QComboBox *> boxes = panel->findChildren<QComboBox *>();
+        QComboBox *modeBox = boxes.value(0);
+        check(modeBox && modeBox->count() == 2,
+              QStringLiteral("the dock offers both ways to run"));
+        check(panel->launchAction()->text().contains(QStringLiteral("dev server"),
+                                                     Qt::CaseInsensitive),
+              QStringLiteral("the launch button starts on the dev server (%1)")
+                  .arg(panel->launchAction()->text()));
+        if (modeBox) {
+            const int at = modeBox->findData(int(LaunchMode::Offline));
+            check(at >= 0, QStringLiteral("offline is one of the entries"));
+            modeBox->setCurrentIndex(at);
+            QApplication::processEvents();
+            check(panel->launchAction()->text().contains(QStringLiteral("offline"),
+                                                         Qt::CaseInsensitive),
+                  QStringLiteral("choosing it renames the launch button (%1)")
+                      .arg(panel->launchAction()->text()));
+            if (!offlineShot.isEmpty())
+                out << (panel->grab().save(offlineShot) ? "wrote "
+                                                        : "could not write ")
+                    << offlineShot << Qt::endl;
+        }
+        delete panel;
+    }
+
     // Nothing above may have started anything.
     check(!run.isBusy(), QStringLiteral("nothing was launched by this suite"));
+    check(!bareRun.isBusy(),
+          QStringLiteral("and the refusal started nothing either"));
 
     out << Qt::endl
         << (failures == 0 ? QStringLiteral("ALL TEST RUN TESTS PASSED")

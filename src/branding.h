@@ -34,4 +34,12 @@ QPixmap splashArt(qreal dpr);
 // kept. Null when the mark cannot be loaded, which callers treat as "no mark".
 QPixmap cornerMark(int logicalHeight, qreal dpr);
 
+// The horizontal lockup for a dark surface, scaled to `logicalHeight`.
+//
+// The file is 1760x372 with the artwork in its left half and ground either side
+// of it, so it is trimmed to what is actually drawn before it is scaled: laid
+// out untrimmed, a third of its width is empty and every gap beside it has to
+// be guessed against a rectangle that is mostly nothing.
+QPixmap lockup(int logicalHeight, qreal dpr);
+
 } // namespace branding

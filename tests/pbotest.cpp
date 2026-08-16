@@ -227,7 +227,9 @@ static void testSyntheticArchive(const QString &work)
 
     PboFile pbo;
     QString error;
-    check(pbo.open(pboPath, &error), QStringLiteral("it opens: %1").arg(error));
+    const bool opened = pbo.open(pboPath, &error);
+    check(opened, QStringLiteral("it opens%1")
+                      .arg(error.isEmpty() ? QString() : QStringLiteral(": ") + error));
     check(pbo.prefix() == QStringLiteral("TestMod_Scripts"),
           QStringLiteral("the prefix comes off the product entry"));
     check(pbo.headers().value(QStringLiteral("Mikero")) == QStringLiteral("test"),

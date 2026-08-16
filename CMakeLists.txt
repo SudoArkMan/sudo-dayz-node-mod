@@ -32,6 +32,7 @@ add_executable(DAYZSUDONodeMod
   src/builtins.h    src/builtins.cpp
   src/graph.h       src/graph.cpp
   src/project.h     src/project.cpp
+  src/recentprojects.h src/recentprojects.cpp
   src/moddeps.h     src/moddeps.cpp
   src/modlibrary.h  src/modlibrary.cpp
   src/scriptapi.h   src/scriptapi.cpp
@@ -58,6 +59,7 @@ add_executable(DAYZSUDONodeMod
   src/widgets/codedialog.h   src/widgets/codedialog.cpp
   src/widgets/filedialog.h   src/widgets/filedialog.cpp
   src/widgets/newscriptdialog.h src/widgets/newscriptdialog.cpp
+  src/widgets/startpage.h    src/widgets/startpage.cpp
   src/canvas/nodeitem.h      src/canvas/nodeitem.cpp
   src/canvas/wireitem.h      src/canvas/wireitem.cpp
   src/canvas/noteitem.h      src/canvas/noteitem.cpp

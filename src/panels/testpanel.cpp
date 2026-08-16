@@ -7,6 +7,7 @@
 #include <QAbstractItemView>
 #include <QAction>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -16,6 +17,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -125,6 +127,45 @@ void TestPanel::buildUi()
     runRow->addStretch(1);
     layout->addLayout(runRow);
 
+    auto *modeRow = new QHBoxLayout;
+    modeRow->setSpacing(4);
+    modeRow->addWidget(new QLabel(QStringLiteral("Run"), this));
+    m_mode = new QComboBox(this);
+    m_mode->addItem(QStringLiteral("Offline"), int(LaunchMode::Offline));
+    m_mode->addItem(QStringLiteral("Dev server"), int(LaunchMode::DevServer));
+    m_mode->setToolTip(
+        QStringLiteral("Offline is one process on the mission and comes up in a "
+                       "fraction of the time. A dev server is the only one of "
+                       "the two that is a server."));
+    const int startAt = m_mode->findData(int(m_run->mode()));
+    if (startAt >= 0) m_mode->setCurrentIndex(startAt);
+    modeRow->addWidget(m_mode);
+    modeRow->addSpacing(8);
+    modeRow->addWidget(new QLabel(QStringLiteral("Mission"), this));
+    m_mission = new QComboBox(this);
+    // Filled by refresh from what is actually on disk. It matters to both
+    // modes: offline loads it and the server is pointed at it.
+    m_mission->setPlaceholderText(QStringLiteral("none found"));
+    m_mission->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    modeRow->addWidget(m_mission);
+    modeRow->addStretch(1);
+    layout->addLayout(modeRow);
+
+    // Under the selector and across the dock, which is the widest line
+    // available. This dock is wide and short, so it is height that is scarce:
+    // the names of the six go here and the reasons go in the tooltip and into
+    // the log when offline is chosen, rather than a paragraph taking the space
+    // the checklist needs.
+    m_offlineNotes = new QLabel(this);
+    m_offlineNotes->setWordWrap(true);
+    m_offlineNotes->setStyleSheet(
+        QStringLiteral("color: %1;").arg(theme::textDim().name()));
+    layout->addWidget(m_offlineNotes);
+
+    connect(m_mode, &QComboBox::currentIndexChanged, this, &TestPanel::chooseMode);
+    connect(m_mission, &QComboBox::currentIndexChanged, this,
+            &TestPanel::chooseMission);
+
     auto *optionRow = new QHBoxLayout;
     optionRow->setSpacing(4);
     m_clean = new QCheckBox(QStringLiteral("Clean build"), this);
@@ -170,6 +211,43 @@ void TestPanel::buildUi()
     split->setStretchFactor(0, 5);
     split->setStretchFactor(1, 3);
     layout->addWidget(split, 1);
+
+    applyMode();
+}
+
+void TestPanel::applyMode()
+{
+    const bool offline = m_run->mode() == LaunchMode::Offline;
+    m_launchAction->setText(offline ? QStringLiteral("Launch offline")
+                                    : QStringLiteral("Launch dev server"));
+    m_launchAction->setToolTip(
+        offline ? QStringLiteral("Start one diag process on the mission, with "
+                                 "file patching on.")
+                : QStringLiteral("Start the diag server, then the diag client "
+                                 "connecting to it, both with file patching on."));
+}
+
+void TestPanel::chooseMode()
+{
+    m_run->setMode(LaunchMode(m_mode->currentData().toInt()));
+    applyMode();
+    // The mission row changes severity with the mode, so the checklist is read
+    // again rather than left saying what the other mode would have said.
+    refresh();
+
+    // Choosing the fast loop is the moment to say what it costs, and the log is
+    // where there is room to say it with the reasons attached. Once per choice,
+    // not once per launch, so pressing F5 all afternoon stays quiet.
+    if (m_run->mode() != LaunchMode::Offline) return;
+    appendLog(QStringLiteral("--- Offline. What this run will not show:"));
+    for (const OfflineLimit &limit : offlineLimits(m_run->paths().modChain))
+        appendLog(QStringLiteral("  %1").arg(limit.line()));
+}
+
+void TestPanel::chooseMission()
+{
+    m_run->setMission(m_mission->currentData().toString());
+    refresh();
 }
 
 void TestPanel::reveal()
@@ -184,7 +262,48 @@ void TestPanel::reveal()
 void TestPanel::refresh()
 {
     m_run->refresh(m_doc->project());
+    const TestRunPaths &paths = m_run->paths();
     const QVector<PrereqCheck> checks = m_run->check();
+
+    // Blocked while it is refilled: setting the index would otherwise come back
+    // as a user choice and refresh again, and again.
+    {
+        const QSignalBlocker block(m_mission);
+        m_mission->clear();
+        for (const QString &path : paths.missions)
+            m_mission->addItem(QFileInfo(path).fileName(), path);
+        const int at = m_mission->findData(paths.mission);
+        if (at >= 0) m_mission->setCurrentIndex(at);
+        // One mission is not a choice, and no mission is not one either.
+        m_mission->setEnabled(m_mission->count() > 1);
+        m_mission->setToolTip(
+            paths.mission.isEmpty()
+                ? QStringLiteral("No mission under the mod folder.")
+                : QStringLiteral("%1\n%2")
+                      .arg(QDir::toNativeSeparators(paths.mission),
+                           paths.missionFrom));
+    }
+
+    // Rebuilt every time because the last entry depends on the mod chain, and
+    // the chain changes when a dependency is added. The short halves go on the
+    // one line there is room for; the reasons are a hover away and go into the
+    // log the moment offline is chosen, which is where they will be read.
+    const QVector<OfflineLimit> limits = offlineLimits(paths.modChain);
+    QStringList shortForm;
+    QStringList fullForm;
+    for (const OfflineLimit &limit : limits) {
+        QString what = limit.what;
+        if (!what.isEmpty()) what[0] = what.at(0).toLower();
+        shortForm << what;
+        fullForm << limit.line();
+    }
+    // "or" on the last one, so the line reads as a sentence rather than as a
+    // list that ran out.
+    if (shortForm.size() > 1)
+        shortForm.last().prepend(QStringLiteral("or "));
+    m_offlineNotes->setText(QStringLiteral("An offline run will not show: %1.")
+                                .arg(shortForm.join(QStringLiteral(", "))));
+    m_offlineNotes->setToolTip(fullForm.join(QStringLiteral("\n\n")));
 
     m_checks->clear();
     int missing = 0;
@@ -295,14 +414,18 @@ void TestPanel::buildPbo()
 void TestPanel::launchTest()
 {
     reveal();
-    appendLog(QStringLiteral("--- Launch test"));
+    const bool offline = m_run->mode() == LaunchMode::Offline;
+    appendLog(offline ? QStringLiteral("--- Launch offline")
+                      : QStringLiteral("--- Launch dev server"));
     QString error;
     if (!m_run->startTest(&error)) {
         appendLog(QStringLiteral("! %1").arg(error));
         emit statusMessage(error);
         return;
     }
-    emit statusMessage(QStringLiteral("Server starting, client to follow."));
+    emit statusMessage(offline
+                           ? QStringLiteral("Offline session starting.")
+                           : QStringLiteral("Server starting, client to follow."));
 }
 
 void TestPanel::stopTest()

@@ -45,6 +45,37 @@ QPixmap branding::splashArt(qreal dpr)
     return art;
 }
 
+// The part of `image` that is not the flat ground it was laid on. Measured
+// against the top-left pixel, which on every lockup in the pack is background
+// by construction. The tolerance is there because the export is not lossless at
+// the edges of the fill.
+static QRect drawnArea(const QImage &image)
+{
+    if (image.isNull()) return {};
+    const QRgb background = image.pixel(0, 0);
+    const auto isBackground = [background](QRgb pixel) {
+        if (qAlpha(pixel) == 0) return true;
+        return qAbs(qRed(pixel) - qRed(background)) <= 6
+               && qAbs(qGreen(pixel) - qGreen(background)) <= 6
+               && qAbs(qBlue(pixel) - qBlue(background)) <= 6;
+    };
+
+    int left = image.width(), right = -1, top = image.height(), bottom = -1;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            if (isBackground(image.pixel(x, y))) continue;
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+        }
+    }
+    // A uniform image has nothing to trim to, and cropping it to nothing would
+    // lose the art rather than tighten it.
+    if (right < left || bottom < top) return QRect(QPoint(), image.size());
+    return QRect(QPoint(left, top), QPoint(right, bottom));
+}
+
 QPixmap branding::cornerMark(int logicalHeight, qreal dpr)
 {
     if (logicalHeight <= 0 || dpr <= 0.0) return {};
@@ -56,6 +87,23 @@ QPixmap branding::cornerMark(int logicalHeight, qreal dpr)
     // second scale to do at paint time.
     QPixmap out = src.scaledToHeight(qRound(logicalHeight * dpr),
                                      Qt::SmoothTransformation);
+    out.setDevicePixelRatio(dpr);
+    return out;
+}
+
+QPixmap branding::lockup(int logicalHeight, qreal dpr)
+{
+    if (logicalHeight <= 0 || dpr <= 0.0) return {};
+    const QImage file(QStringLiteral(":/brand/lockup-dark.png"));
+    if (file.isNull()) return {};
+
+    const QImage art = file.copy(drawnArea(file));
+    // Scaled once, to the exact device height it will be painted at, then told
+    // what ratio that was. The file is 372px tall against a mark drawn at a
+    // fifth of that, so leaving the resample to paint time is where it goes
+    // soft.
+    QPixmap out = QPixmap::fromImage(
+        art.scaledToHeight(qRound(logicalHeight * dpr), Qt::SmoothTransformation));
     out.setDevicePixelRatio(dpr);
     return out;
 }

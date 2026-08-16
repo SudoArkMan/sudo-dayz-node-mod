@@ -331,8 +331,30 @@ static void report(const QString &title, const Corpus &c)
                   return a.first > b.first;
               });
     o << "    top reasons" << Qt::endl;
-    for (int i = 0; i < sorted.size() && i < 8; ++i)
+    for (int i = 0; i < sorted.size() && i < 14; ++i)
         o << "      " << sorted.at(i).first << "  " << sorted.at(i).second << Qt::endl;
+}
+
+// CF and Dabs, the two frameworks most installed mods build on. Third-party
+// code is the harder corpus and the one the mod importer meets, so the round
+// trip is worth holding against it and not only against vanilla. Absent is not
+// a failure, the same as P:/scripts. SUDO_THIRD_PARTY_SCRIPTS overrides, as a
+// path list, for a machine that keeps them somewhere else.
+static QStringList thirdPartyRoots()
+{
+    const QByteArray env = qgetenv("SUDO_THIRD_PARTY_SCRIPTS");
+    QStringList roots;
+    if (!env.isEmpty())
+        roots = QString::fromLocal8Bit(env).split(QLatin1Char(';'), Qt::SkipEmptyParts);
+    else
+        roots = QStringList{
+            QStringLiteral("C:/Users/dilla/Downloads/DayZ-CommunityFramework-production"),
+            QStringLiteral("C:/Users/dilla/Downloads/DayZ-Dabs-Framework-production"),
+        };
+    QStringList out;
+    for (const QString &r : roots)
+        if (QDir(r).exists()) out << r;
+    return out;
 }
 
 // Method bodies out of a vanilla file. A definition is the only place `) {`
@@ -504,6 +526,11 @@ int main(int argc, char **argv)
         QStringLiteral("Param2<float, float> p = Param2<float, float>.Cast(param);"),
         QStringLiteral("if (!JsonFileLoader<ref CTSaveStructure>.LoadFile(path, data))\n"
                        "{\n\treturn;\n}"),
+        // playerbase.c line 796. A block comment over several lines used to be
+        // read as a comment nobody closed, which reported a syntax error on the
+        // whole body and stopped any of it being modelled.
+        QStringLiteral("if (allow)\n{\n\t/*\n\tPrint(\"ON Enabling effect \" + trigger);\n"
+                       "\t*/\n\tm_CurrentEffectTrigger = trigger;\n}"),
     };
     for (const QString &c : corpus) checkRoundTrip(c);
 
@@ -611,6 +638,87 @@ int main(int argc, char **argv)
         const ParseResult r = parseEnforceBody(QString());
         check(r.statements.empty() && r.errors.isEmpty(), "empty input is not an error");
     }
+
+    o << Qt::endl << "block comments" << Qt::endl;
+    {
+        // playerbase.c line 796, the shape that cost 266 vanilla bodies. The
+        // lexer works a line at a time, so the opening line of a block comment
+        // and one that is never closed are the same token.
+        const ParseResult r = parseEnforceBody(
+            QStringLiteral("if (allow)\n{\n\t/*\n\tPrint(\"ON Enabling effect \" + trigger);\n"
+                           "\t*/\n\tm_CurrentEffectTrigger = trigger;\n}"));
+        check(r.errors.isEmpty(), "a block comment over several lines is not a syntax error");
+        check(r.statementCount == 2 && r.rawCount == 0,
+              "and the code around it is modelled rather than kept as text");
+    }
+    {
+        const ParseResult r = parseEnforceBody(QStringLiteral("/* {\n} */\nint a = 1;"));
+        check(r.errors.isEmpty() && r.statementCount == 1 && r.rawCount == 0,
+              "braces inside a block comment are not braces");
+    }
+    {
+        const ParseResult r = parseEnforceBody(QStringLiteral("int a = 1;\n/* opened\nand left"));
+        check(!r.errors.isEmpty(), "a comment that really is not closed is still an error");
+    }
+    {
+        // Three characters, and the shortest closed block comment is four, so
+        // this one is open. Reading the token text rather than the lexer's state
+        // gets this backwards.
+        const ParseResult r = parseEnforceBody(QStringLiteral("/*/\nint a = 1;"));
+        check(!r.errors.isEmpty(), "`/*/` opens a comment, it does not open and close one");
+    }
+    {
+        const ParseResult r = parseEnforceBody(QStringLiteral("/* a */ int x = 1; /* b */"));
+        check(r.errors.isEmpty() && r.statementCount == 1,
+              "two closed comments on one line leave nothing open");
+    }
+
+    o << Qt::endl << "declarations the graph has no shape for" << Qt::endl;
+    {
+        // dayzplayerinventory.c line 2641. Enforce declares a local and runs its
+        // constructor in one statement. The graph has no shape for it, so the
+        // statement keeps its text; what it must not do is come apart into a
+        // bare `ScriptInputUserData` and a call to a function of that name.
+        const ParseResult r = parseEnforceBody(
+            QStringLiteral("ScriptInputUserData serializer();\nserializer.Write(reason);"));
+        check(r.statements.size() == 2 && r.rawCount == 1
+                  && r.statements.front()->kind == StmtKind::Raw
+                  && r.statements.front()->text
+                         == QLatin1String("ScriptInputUserData serializer();"),
+              "a declaration that runs a constructor is one statement, kept whole");
+    }
+    {
+        // CF_MathExpression.c line 2. The same shape with a generic type, which
+        // used to be turned down as an unexpected `ref`.
+        const ParseResult r = parseEnforceBody(
+            QStringLiteral("array<ref CF_ExpressionCompileToken> dataStackStore();"));
+        check(r.statements.size() == 1 && r.rawCount == 1
+                  && r.statements.front()->text
+                         == QLatin1String("array<ref CF_ExpressionCompileToken> "
+                                          "dataStackStore();"),
+              "and the same with a generic type");
+    }
+    {
+        // actiondigoutstash.c line 23, the shape with constructor arguments.
+        const ParseResult r = parseEnforceBody(
+            QStringLiteral("DigOutStashLambda lambda(stash, \"\", action_data.m_Player);"));
+        check(r.statements.size() == 1 && r.rawCount == 1,
+              "constructor arguments do not make it a call to `lambda`");
+    }
+    {
+        check(firstExprShape(QStringLiteral("Spawn(item);"))
+                  == QLatin1String("(call Spawn item)"),
+              "a plain call is still a call");
+    }
+    {
+        // endebug.c line 9, and 176 more across vanilla. Refused on purpose: the
+        // graph has no field for the size, and a VarDecl without it would come
+        // back out as `vector pts;`. Pinned so the refusal stays a decision.
+        const ParseResult r = parseEnforceBody(QStringLiteral("vector pts[5];"));
+        check(r.statements.size() == 1 && r.rawCount == 1
+                  && r.statements.front()->text == QLatin1String("vector pts[5];"),
+              "a fixed-size array declaration keeps its text, size and all");
+    }
     {
         QString deep;
         for (int i = 0; i < 400; ++i) deep += QStringLiteral("if (a) {");
@@ -656,6 +764,26 @@ int main(int argc, char **argv)
                   .arg(vanilla.unstable));
     } else {
         o << "  P: is not mounted, skipping the vanilla corpus" << Qt::endl;
+    }
+
+    const QStringList third = thirdPartyRoots();
+    if (!third.isEmpty()) {
+        Corpus frameworks;
+        for (const QString &root : third) scanVanilla(frameworks, root, 100000);
+        report(QStringLiteral("third-party frameworks (CF, Dabs)"), frameworks);
+        check(frameworks.statements > 5000,
+              QStringLiteral("parsed %1 third-party statements").arg(frameworks.statements));
+        check(frameworks.rawPercent() < 10.0,
+              QStringLiteral("third-party raw rate %1 %% is under 10 %%")
+                  .arg(QString::number(frameworks.rawPercent(), 'f', 2)));
+        check(frameworks.changed == 0,
+              QStringLiteral("%1 third-party bodies came back as different code")
+                  .arg(frameworks.changed));
+        check(frameworks.unstable == 0,
+              QStringLiteral("%1 third-party bodies do not print to a fixed point")
+                  .arg(frameworks.unstable));
+    } else {
+        o << "  CF and Dabs are not on disk, skipping the third-party corpus" << Qt::endl;
     }
 
     const QString projectPath = resources + QStringLiteral("/SUDO_Link.sdzn");

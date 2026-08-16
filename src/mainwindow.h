@@ -3,12 +3,20 @@
 #pragma once
 
 #include "analysis.h"
+#include "recentprojects.h"
 
+#include <QList>
 #include <QMainWindow>
 #include <QPointF>
+#include <QPointer>
 
+struct ImportResult;
 struct PinRef;
+struct StartTemplate;
 class Document;
+class StartPage;
+class QDockWidget;
+class QStackedWidget;
 class NodeScene;
 class NodeView;
 class PalettePanel;
@@ -34,13 +42,24 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // The last chance to keep unsaved work, so it is the one place that has to
+    // be able to refuse the close.
+    void closeEvent(QCloseEvent *event) override;
 
 public slots:
     void openProject();
     void openProjectPath(const QString &path);
-    void saveProject();
-    void saveProjectAs();
+    // Both report whether the project reached disk: a cancelled Save as is a
+    // refusal, and treating it as a success is how a close prompt throws away
+    // the work it just offered to keep.
+    bool saveProject();
+    bool saveProjectAs();
     void newProject();
+    // The start page, in place of the editor. The editor is not torn down; it
+    // keeps its graph, its docks and its scroll position and comes back as it
+    // was.
+    void showStartPage();
+    void showEditor();
     // Scaffolds a mod folder from the bundled template and starts a project
     // inside it. "New project" stays the bare graph with no folder behind it.
     void newMod();
@@ -82,11 +101,30 @@ private slots:
     // Unreal's custom event: a method this script declares. Asks for a name,
     // declares `void <name>()` and drops its entry node, as one undo step.
     void addCustomEvent();
+    // A tile from the start page: a project that ships with the app, or a
+    // skeleton imported into a project of its own.
+    void startFromTemplate(const StartTemplate &tpl);
+    // Writes the open project to its sidecar. Does nothing for a project with
+    // no file behind it: the sidecar lives beside the project so that its
+    // relative paths resolve, and there is nowhere to put one otherwise.
+    void writeAutosave();
 
 private:
     Document *m_doc;
     NodeScene *m_scene;
     NodeView *m_view;
+    // The editor and the start page, one shown at a time. The stack is the
+    // central widget, so switching costs a page change and nothing is rebuilt.
+    QStackedWidget *m_stack = nullptr;
+    QWidget *m_editor = nullptr;
+    StartPage *m_startPage = nullptr;
+    RecentProjects m_recent;
+    // Docks and toolbar put away while the start page is up, so they can come
+    // back exactly as they were. Held as guarded pointers because the View menu
+    // can close a dock while the page is showing.
+    QList<QPointer<QDockWidget>> m_putAwayDocks;
+    bool m_putAwayToolBar = false;
+    QTimer *m_autosaveTimer = nullptr;
     QTabBar *m_tabs;
     QToolButton *m_tabList;
     PalettePanel *m_palette;
@@ -160,4 +198,25 @@ private:
     void showConnectSearch(const PinRef &from, const QPointF &scenePos);
     // Every script in the project, for when the tab bar cannot show them all.
     void showTabList();
+    // Save, Discard, Cancel over unsaved work, where `action` names what is
+    // about to happen. False means the user cancelled and the caller must stop:
+    // a Cancel that is treated as a yes destroys exactly the work the prompt
+    // was protecting.
+    bool maybeSaveChanges(const QString &action);
+    // Called after the project reaches disk: the sidecar is stale, the recent
+    // list has a new front entry, and the title has lost its asterisk.
+    void afterSave(const QString &path);
+    // Turns one imported file into script entries on the project, returning the
+    // id of the first. `sourcePath` is the .c it came from, empty for a
+    // skeleton that was never on disk.
+    QString appendImportedScripts(const ImportResult &result,
+                                  const QString &sourcePath, const QString &module);
+    // <project>.sdzn.autosave, or empty when there is no project file.
+    QString autosavePathFor(const QString &projectPath) const;
+    void clearAutosave(const QString &projectPath);
+    // Offers a sidecar newer than the project. Returns the file to load, which
+    // is the project itself unless the user asked for the recovery. Nothing is
+    // ever written back over the project here: a recovered graph is loaded as
+    // unsaved work and stays that way until the user saves it.
+    QString recoveryFor(const QString &projectPath);
 };

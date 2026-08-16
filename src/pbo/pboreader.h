@@ -20,11 +20,16 @@
 //   trailer        one zero byte and a 20 byte SHA1 of everything before it.
 //
 // Every field here came off the internet. A mod is a file somebody uploaded,
-// and three of the 254 installed on this machine are run through an obfuscator
-// that writes half a million junk entries carrying control characters and `..`
-// in their names. Sizes are checked against the length of the file, names are
-// checked before anything is written, and an entry whose bytes cannot be
-// reproduced exactly is refused with a reason rather than guessed at.
+// and 104 of the 1874 archives installed on this machine went through a packer
+// that writes junk entries carrying control characters and `..` in their names,
+// one of them a million of them. Sizes are checked against the length of the
+// file, names are checked before anything is written, and an entry whose bytes
+// cannot be reproduced exactly is refused with a reason rather than guessed at.
+//
+// Measured over those 1874 archives: all 1874 open, 9,343,981 packed entries
+// decode and match the checksum each one carries, and the 648 entries sampled
+// against BankRev.exe come back byte for byte. BankRev turns down every one of
+// the 104 packed archives; this reads them.
 #pragma once
 
 #include <QByteArray>

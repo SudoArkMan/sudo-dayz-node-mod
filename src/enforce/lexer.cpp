@@ -175,7 +175,7 @@ QVector<Token> EnforceLexer::tokenize(const QString &line, LexState &state)
     return out;
 }
 
-QVector<Token> EnforceLexer::tokenizeAll(const QString &text)
+QVector<Token> EnforceLexer::tokenizeAll(const QString &text, LexState *endState)
 {
     QVector<Token> out;
     LexState state = LexState::Normal;
@@ -197,13 +197,16 @@ QVector<Token> EnforceLexer::tokenizeAll(const QString &text)
             out.append(nl);
         }
     }
+    if (endState) *endState = state;
     return out;
 }
 
 EnforceScan scanEnforce(const QString &code)
 {
     EnforceScan scan;
-    const QVector<Token> tokens = EnforceLexer::tokenizeAll(code);
+    LexState endState = LexState::Normal;
+    const QVector<Token> tokens = EnforceLexer::tokenizeAll(code, &endState);
+    scan.unterminatedComment = endState == LexState::InBlockComment;
 
     QSet<QString> seenIdent, seenCall, seenMember, seenAssign;
     // Walk the significant tokens; whitespace and comments carry no meaning
@@ -255,11 +258,6 @@ EnforceScan scanEnforce(const QString &code)
             scan.assignedTo << t.text;
         }
     }
-
-    LexState endState = LexState::Normal;
-    for (const QString &line : code.split(QLatin1Char('\n')))
-        EnforceLexer::tokenize(line, endState);
-    scan.unterminatedComment = endState == LexState::InBlockComment;
 
     if (scan.statements == 0 && !sig.isEmpty()) scan.statements = 1;
     scan.summary = enforceSummary(code);

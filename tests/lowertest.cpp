@@ -275,6 +275,24 @@ QString bodyOf(const QString &generated)
     return body.join(QLatin1Char('\n'));
 }
 
+// The generated body arrives indented to where it sits in the class. Taking
+// that common indent off is what makes it comparable with the source line it
+// came from, without forgiving any indentation inside the block.
+QString dedent(const QString &code)
+{
+    QStringList lines = code.split(QLatin1Char('\n'));
+    int common = -1;
+    for (const QString &l : lines) {
+        if (l.trimmed().isEmpty()) continue;
+        int tabs = 0;
+        while (tabs < l.size() && l.at(tabs) == QLatin1Char('\t')) tabs++;
+        common = common < 0 ? tabs : qMin(common, tabs);
+    }
+    if (common <= 0) return code;
+    for (QString &l : lines) l = l.mid(qMin(common, l.size()));
+    return lines.join(QLatin1Char('\n')).trimmed();
+}
+
 struct Outcome {
     Match match = Match::Different;
     int lowered = 0;
@@ -352,6 +370,9 @@ int main(int argc, char *argv[])
     member("m_Timer", "Timer");
     member("m_Items", "array<ref ItemBase>");
     member("m_Owner", "EntityAI");
+    // `m_MinDamageIngredient[0] = -1;` out of Sudo Server Pack is the shape
+    // behind the Set Element node, so the fixture carries something to index.
+    member("m_Damage", "array<float>");
 
     // ------------------------------------------------------------- corpus
     // Every line here is a shape the importer used to leave as a text box.
@@ -456,6 +477,112 @@ int main(int argc, char *argv[])
 
     // Variables must not be invented for a local that is only written once:
     // that is the whole difference between a graph and a pile of boxes.
+    // --------------------------------------- statements that used to keep text
+    // Each of these is a line out of the installed mods, ranked by how many
+    // statements its shape was holding back. The check is the exact text, not
+    // the token comparison above: these exist because a method is only taken as
+    // nodes when it regenerates character for character, so "close enough" is
+    // the same as not converting at all.
+    out << Qt::endl << "shapes that used to keep their text" << Qt::endl;
+    {
+        struct Exact {
+            const char *name;
+            const char *code;
+            const char *node;  // a node ref the result has to contain
+            int nodes;         // how many of it
+        };
+        const QVector<Exact> exacts = {
+            // Sudo Server Pack 1: assignment to one slot of an array.
+            {"one slot of an array", "m_Damage[0] = -1;", "bi.setElement", 1},
+            // 3D Printer: a member the base class owns, which the graph cannot
+            // declare and so had no Set node for.
+            {"a member the base class owns", "m_bIsPrinting = true;", "bi.setMember", 1},
+            // CashRobbery: a field on an object of a type nothing here declares.
+            {"a field on an unknown object", "weapons.Min = 1;", "bi.setMember", 1},
+            // BS Patrol Tank: one line the graph cannot read used to take the
+            // whole `if` around it back to text.
+            {"an unreadable line stays on its own",
+             "if (m_Ready)\n{\n\tdelete m_Timer;\n\tSetQuantity(1);\n}", "bi.raw", 1},
+        };
+        for (const Exact &c : exacts) {
+            const QString code = QString::fromUtf8(c.code);
+            const Outcome o = roundTrip(code, cat, builtins, project, base,
+                                        base.baseClass, {});
+            LowerOptions opts;
+            opts.selfClass = base.baseClass;
+            const LowerResult r = lowerEnforceCode(code, cat, builtins, base, project, opts);
+            int found = 0;
+            for (const GraphNode &n : r.nodes)
+                if (n.ref == QLatin1String(c.node)) found++;
+            const QString got = dedent(o.generated);
+            check(found == c.nodes && got == code, QString::fromUtf8(c.name));
+            if (found != c.nodes || got != code) {
+                out << "         want " << c.nodes << " " << c.node << ", got " << found
+                    << Qt::endl;
+                out << "         in:  " << QString(code).replace('\n', "\\n") << Qt::endl;
+                out << "         out: " << QString(got).replace('\n', "\\n") << Qt::endl;
+            }
+        }
+    }
+
+    // The generator used to bracket every operator, so `m_Count + 1` came back
+    // as `(m_Count + 1)` and the method around it was turned down for being
+    // spelled differently. It now brackets by precedence, which is the one
+    // change here that could quietly alter what a graph means, so these are
+    // checked as exact text: the comparison further up drops brackets and would
+    // pass a tree that had been rewired.
+    out << Qt::endl << "brackets only where they change the meaning" << Qt::endl;
+    {
+        const QVector<QPair<const char *, const char *>> spelled = {
+            {"a plain operator", "m_Count = m_Count + 1;"},
+            {"tighter on the right", "m_Count = m_Count + 1 * 2;"},
+            {"looser on the left", "m_Count = (m_Count + 1) * 2;"},
+            {"the same on the right", "m_Count = m_Count - (m_Count - 1);"},
+            {"the same on the left", "m_Count = m_Count - m_Count - 1;"},
+            {"divide keeps its right side", "m_Count = m_Count / (m_Count / 2);"},
+            {"comparison inside and", "m_Ready = m_Count > 0 && m_Ready;"},
+            {"or inside and", "m_Ready = (m_Ready || m_Count > 0) && m_Ready;"},
+            {"not on a name", "m_Ready = !m_Ready;"},
+            {"not on a comparison", "m_Ready = !(m_Count > 0);"},
+            {"a ternary", "m_Count = m_Ready ? 1 : 2;"},
+            {"a ternary inside an operator", "m_Count = (m_Ready ? 1 : 2) + 1;"},
+        };
+        for (const auto &c : spelled) {
+            const QString code = QString::fromUtf8(c.second);
+            const Outcome o = roundTrip(code, cat, builtins, project, base,
+                                        base.baseClass, {});
+            const QString got = dedent(o.generated);
+            check(got == code, QString::fromUtf8(c.first));
+            if (got != code)
+                out << "         want: " << code << Qt::endl
+                    << "         got:  " << got << Qt::endl;
+        }
+    }
+
+    // A name declared on several classes with one signature between them is not
+    // a choice at all: the generator writes `target.Count()` whichever one is
+    // meant, so refusing it only cost the method around it.
+    {
+        LowerOptions opts;
+        opts.selfClass = base.baseClass;
+        opts.knownLocals.insert(QStringLiteral("holder"),
+                                QStringLiteral("SUDO_NotInTheCatalogue"));
+        const LowerResult r = lowerEnforceCode(QStringLiteral("m_Count = holder.Count();"),
+                                               cat, builtins, base, project, opts);
+        int raw = 0;
+        int calls = 0;
+        for (const GraphNode &n : r.nodes) {
+            if (n.ref == bi::Raw) raw++;
+            if (n.kind == NodeKind::Call) calls++;
+        }
+        const Graph g = graphFor(r, base);
+        const QString got = dedent(bodyOf(generateEnforce(g, cat, builtins, project).code));
+        check(raw == 0 && calls == 1 && got == QLatin1String("m_Count = holder.Count();"),
+              QStringLiteral("a name several classes declare the same way"));
+        if (got != QLatin1String("m_Count = holder.Count();"))
+            out << "         out: " << QString(got).replace('\n', "\\n") << Qt::endl;
+    }
+
     out << Qt::endl << "single-assignment locals stay wires" << Qt::endl;
     {
         LowerOptions opts;

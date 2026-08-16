@@ -3,6 +3,12 @@
 // Three bands, in the order the questions get asked. What is not ready, and
 // why. What to press. What happened when you pressed it.
 //
+// The mode selector sits between the buttons and the checklist, with the list
+// of what offline cannot show printed under it. That list is the reason the
+// selector is here at all: a mod that comes up offline can still be broken on
+// a server, and the cheapest place to learn which of the two you are looking at
+// is beside the button, before it is pressed.
+//
 // The checklist is the important half. Every reason a build or a launch cannot
 // work is a stat call away, so there is no excuse for finding out from a game
 // that closed itself, and each row carries the fix rather than only the fault.
@@ -22,6 +28,7 @@ struct RunStep;
 
 class QAction;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class QTreeWidget;
@@ -57,9 +64,16 @@ private slots:
     void launchTest();
     void stopTest();
     void chooseToolsFolder();
+    // The mode changes what the launch button says and whether a missing
+    // mission blocks, so the checklist is re-read rather than left stale.
+    void chooseMode();
+    void chooseMission();
 
 private:
     void buildUi();
+    // The launch button's wording follows the mode. One action, two names, so
+    // the menu entry and the button can never disagree about what F5 does.
+    void applyMode();
     // Brings this dock to the front when it is tabbed behind another. Pressing
     // a shortcut should put the log where the answer will appear.
     void reveal();
@@ -75,6 +89,9 @@ private:
     QLabel *m_summary;
     QPlainTextEdit *m_log;
     QCheckBox *m_clean;
+    QComboBox *m_mode;
+    QComboBox *m_mission;
+    QLabel *m_offlineNotes;
     QAction *m_linkAction;
     QAction *m_buildAction;
     QAction *m_launchAction;
