@@ -35,6 +35,7 @@ class Builtins;
 class Catalog;
 class QThread;
 struct Project;
+struct ScriptEntry;
 
 // ------------------------------------------------------------------ the scan
 
@@ -198,6 +199,49 @@ void markGraphReadOnly(Graph &g, const QString &modName, const QString &pbo,
 bool graphIsReadOnly(const Graph &g);
 // "3D Printer: Project3DPrinter_Scripts.pbo/scripts/4_World/printer.c", or empty.
 QString graphOrigin(const Graph &g);
+
+// ------------------------------------------------------- what may be written
+//
+// A browsed graph is a reader, not a source file. It is allowed to sit in the
+// project and to be saved into the .sdzn, because coming back to what you read
+// is the point of the browser, and the mark above rides the file so it comes
+// back read only. What it may never do is be generated into a mod folder.
+// Export scripts leaves it out, Save script to file turns it down, and the .c
+// writer under both drops it, so no write the app makes on its own puts another
+// author's class in the user's mod.
+//
+// The rule is here rather than in the window so that every write site asks one
+// question, and so a test can ask it without building a window.
+bool scriptIsWritable(const ScriptEntry &script);
+
+// One key per file on disk, for comparing two paths that name the same script.
+// Cleaned rather than canonical: a file about to be written has no canonical
+// path yet. Case folded on Windows, where PlayerInfo.c and playerinfo.c are one
+// file. The plan below and whoever writes it have to agree on this, or a file
+// with two classes in it is written once per class and the second write wins.
+QString scriptFileKey(const QString &path);
+bool sameScriptFile(const QString &a, const QString &b);
+
+// One file an export would write. The pointers are into the project that was
+// planned, so a plan is only good for as long as that project holds still.
+struct ExportTarget {
+    // The first script bound for `path`. A file holding two classes appears
+    // once, and writing it regenerates the whole file rather than this class.
+    const ScriptEntry *script = nullptr;
+    QString path;             // absolute
+    bool intoSource = false;  // it came from a .c and goes back to that .c
+};
+
+// Writable scripts that never came from a file, so an export has to be told
+// where to put them. Zero means Export scripts has nothing to ask about.
+int scriptsNeedingFolder(const Project &project);
+
+// What Export scripts would write, in project order, one entry per file.
+// `dir` is the folder chosen for scripts with no file behind them and may be
+// empty when scriptsNeedingFolder says there are none. Anything the mod browser
+// produced is left out, and named in `browsed` so the caller can say so.
+QVector<ExportTarget> exportPlan(const Project &project, const QString &dir,
+                                 QVector<const ScriptEntry *> *browsed = nullptr);
 
 // -------------------------------------------------------------- the library
 

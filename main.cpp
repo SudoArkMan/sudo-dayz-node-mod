@@ -18,6 +18,7 @@
 #include <QThread>
 #include <QTimer>
 
+#include <cstdlib>
 #include <memory>
 #include <utility>
 
@@ -160,10 +161,13 @@ int main(int argc, char *argv[])
 
     if (parser.isSet(shotOpt)) {
         const QString out = parser.value(shotOpt);
-        // Let layout settle, paint once, then quit.
+        // Let layout settle, paint once, then leave. Not quit(): that closes the
+        // window, the close handler asks whether to save, and a modal box with
+        // nobody at the keyboard is a run that never ends. A screenshot changes
+        // nothing on disk, so there is nothing here worth asking about.
         QTimer::singleShot(1200, &app, [&win, out]() {
-            win.grab().save(out);
-            QCoreApplication::quit();
+            const bool saved = win.grab().save(out);
+            std::_Exit(saved ? 0 : 1);
         });
     }
 

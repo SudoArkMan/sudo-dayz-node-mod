@@ -64,6 +64,18 @@ protected:
                           fm.elidedText(title, Qt::ElideRight, qMax(0, text.width())));
         painter->restore();
     }
+
+    QSize sizeHint(const QStyleOptionViewItem &option,
+                   const QModelIndex &index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        // A row as wide as its own text makes the view wider than its viewport,
+        // and then the paint above puts the dim class column past the right
+        // edge, where it is cut mid-character instead of elided. Only the height
+        // of this hint is wanted; the width comes from the viewport.
+        size.setWidth(1);
+        return size;
+    }
 };
 
 // First line only: a sticky note can hold a paragraph, a list row cannot.
@@ -95,6 +107,9 @@ OutlinerPanel::OutlinerPanel(Document *doc, QWidget *parent)
     m_list->setUniformItemSizes(true);
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
     m_list->setTextElideMode(Qt::ElideRight);
+    // Rows elide to the width they are given, so there is nothing off to the
+    // side to scroll to, and the bar was costing a row of a short list.
+    m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setItemDelegate(new RowDelegate(m_list));
     layout->addWidget(m_list, 1);
 

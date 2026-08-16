@@ -334,9 +334,10 @@ VariablesPanel::VariablesPanel(Document *doc, QWidget *parent)
     m_table->setItemDelegateForColumn(ColType, new TypeDelegate(m_doc, m_table));
     layout->addWidget(m_table, 1);
 
+    // One line. The second line of the old wording cost a row of the table in
+    // the height this dock actually gets, and the table is the panel.
     auto *hint = new QLabel(
-        tr("Drag a row onto the canvas to place it. Hold Ctrl for a set node, "
-           "Alt for a get node."),
+        tr("Drag a row onto the canvas. Ctrl for a set node, Alt for a get node."),
         this);
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color: %1").arg(theme::textDim().name()));

@@ -45,3 +45,17 @@ struct GenResult {
 GenResult generateEnforce(const Graph &graph, const Catalog &cat,
                           const Builtins &builtins, const Project &project,
                           const QString &previous = QString());
+
+// One .c file out of the classes that belong in it.
+//
+// generateEnforce answers for a single class. A file can hold several, and it
+// can hold a preamble: an enum, a global function, a #define, anything the
+// graph has no room for. The lead-in and the blank line between two classes are
+// this function's own lines, so it is the only thing that can put the file's
+// ending on them. Everything upstream works in bare newlines.
+//
+// `eol` is the ending the file was read with, from `Graph::eol`. An empty
+// string means the source mixed the two, which has no answer that reproduces
+// it, so the text is left on bare newlines.
+QString assembleScriptFile(const QStringList &classes, const QString &preamble,
+                           const QString &eol);

@@ -34,6 +34,10 @@ constexpr double kGridMinor = 20.0;
 constexpr int kMajorEvery = 5;
 // Below this the minor grid is a grey wash that costs more than it says.
 constexpr double kMinorCutoff = 0.5;
+// Scene units of canvas left above and to the left of a graph that is opened
+// too big to frame. Enough to read as a margin, little enough that the first
+// node is still the first thing in the corner.
+constexpr double kOpeningMargin = 60.0;
 
 // A pin under the cursor, or an invalid ref. Pins overhang the node body, so
 // this walks every item at the point rather than trusting the topmost one.
@@ -88,6 +92,12 @@ QString nodeIdAt(const QGraphicsView *view, const QPoint &viewPos)
         if (auto *node = dynamic_cast<NodeItem *>(it)) return node->nodeId();
     return QString();
 }
+
+// Viewport size the last framing was measured against, kept on the view as a
+// dynamic property. Every caller asks for a fit in the same turn as the switch
+// that gives the canvas its real size, so the size a fit is computed from is
+// routinely a layout out of date.
+constexpr char kFitMeasure[] = "sudoFitViewport";
 
 // Frames a rect and returns the zoom that survived the clamp.
 double fitToRect(QGraphicsView *view, const QRectF &rect)
@@ -200,12 +210,26 @@ void NodeView::zoomToFit()
         setTransform(QTransform::fromScale(kLegibleZoom, kLegibleZoom));
         m_zoom = kLegibleZoom;
         const QSizeF viewSize = viewport()->size() / kLegibleZoom;
-        centerOn(bounds.left() + viewSize.width() / 2 - 80,
-                 bounds.top() + viewSize.height() / 2 - 80);
+        centerOn(bounds.left() + viewSize.width() / 2 - kOpeningMargin,
+                 bounds.top() + viewSize.height() / 2 - kOpeningMargin);
     } else {
         m_zoom = fitted;
     }
     emit zoomChanged(m_zoom);
+
+    // Opening a project switches to the editor, shows every dock and asks for
+    // this, all in one turn, and the layout for that has not run yet: the size
+    // read above is the one the viewport had before any of it. Measuring again
+    // next turn is what puts the graph where the user can see it instead of
+    // off the corner of a canvas that turned out to be a different shape. One
+    // turn agreeing with the last is the end of it.
+    const QSize measured = viewport()->size();
+    if (property(kFitMeasure).toSize() == measured) {
+        setProperty(kFitMeasure, QVariant());
+        return;
+    }
+    setProperty(kFitMeasure, measured);
+    QTimer::singleShot(0, this, [this]() { zoomToFit(); });
 }
 
 void NodeView::resetZoom()

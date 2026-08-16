@@ -26,6 +26,13 @@ public:
     void setLive(bool live);
     bool isLive() const { return m_live; }
 
+    // What the dock asks for, in pixels, measured in lines of the font this pane
+    // actually draws with. The canvas is the surface the app exists for, so the
+    // read-only view of its output asks for enough lines to read a method
+    // through and leaves the rest of the window to the graph.
+    int preferredDockHeight() const;
+    QSize sizeHint() const override;
+
 public slots:
     // Queues a regeneration. Cheap to call often; the work is debounced.
     void scheduleRefresh();
@@ -51,6 +58,7 @@ private:
     QToolButton *m_liveToggle;
     bool m_live = true;
     // Parallel to the visible lines: which node produced each one.
+    QString m_code;
     QVector<QString> m_lineOwners;
     QString m_revealed;   // node whose lines are currently marked
     bool m_syncingCursor = false;

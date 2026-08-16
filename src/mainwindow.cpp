@@ -8,11 +8,13 @@
 #include "codegen.h"
 #include "document.h"
 #include "enforce/import.h"
+#include "modlibrary.h"
 #include "modtemplate.h"
 #include "panels/codeviewpanel.h"
 #include "panels/eventspanel.h"
 #include "panels/explorerpanel.h"
 #include "panels/inspectorpanel.h"
+#include "panels/modbrowser.h"
 #include "panels/outlinerpanel.h"
 #include "panels/palettepanel.h"
 #include "panels/testpanel.h"
@@ -31,6 +33,7 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -50,10 +53,12 @@
 #include <QSaveFile>
 #include <QScreen>
 #include <QSet>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
+#include <QThread>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -79,12 +84,19 @@ const QLatin1String kAddEventKey("add.event");
 constexpr int kFitScan = 400;
 constexpr int kFitKeep = 40;
 
+// QDockWidget::setWidget reparents the panel onto the dock, so a panel always
+// knows the dock it is in and nothing has to carry both pointers around.
+QDockWidget *dockOf(QWidget *panel)
+{
+    return panel ? qobject_cast<QDockWidget *>(panel->parentWidget()) : nullptr;
+}
+
 // Brings the dock a panel lives in to the front when it is stacked behind
 // another. Docks are split by default, where raise does nothing, but the layout
 // is the user's to rearrange and a tabbed inspector shows nothing at all.
 void revealDock(QWidget *panel)
 {
-    auto *dock = panel ? qobject_cast<QDockWidget *>(panel->parentWidget()) : nullptr;
+    QDockWidget *dock = dockOf(panel);
     // A dock closed from the View menu stays closed. Raising it would reopen it
     // and take the space back every time a node was selected.
     if (!dock || !dock->toggleViewAction()->isChecked()) return;
@@ -156,25 +168,9 @@ QString prefixOfModFolder(const QString &modRoot)
     return root.dirName();
 }
 
-// One key per file on disk, for comparing two paths that name the same script.
-// Cleaned rather than canonical: a file about to be written has no canonical
-// path yet, and both sides here come from the same file system.
-QString fileKey(const QString &path)
+QString countOf(int n, const QString &one, const QString &many)
 {
-    if (path.isEmpty()) return {};
-    const QString clean = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-#ifdef Q_OS_WIN
-    // Windows compares names without case, so PlayerInfo.c and playerinfo.c are
-    // one file and must not import twice.
-    return clean.toLower();
-#else
-    return clean;
-#endif
-}
-
-bool sameFile(const QString &a, const QString &b)
-{
-    return !a.isEmpty() && !b.isEmpty() && fileKey(a) == fileKey(b);
+    return QStringLiteral("%1 %2").arg(n).arg(n == 1 ? one : many);
 }
 
 // Where a class starts in a file already on disk, or -1.
@@ -219,14 +215,6 @@ QString readFileText(const QString &path)
 
 // The preamble put back in front of the class, ending in exactly one blank
 // line, so writing a file twice does not add spacing each time.
-QString preambleLeadIn(const QString &preamble)
-{
-    QString text = preamble;
-    while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r')))
-        text.chop(1);
-    return text.isEmpty() ? QString() : text + QStringLiteral("\n\n");
-}
-
 // Re-reads the widget's style so a `severity` property change actually repaints.
 // Colour has to come from the sheet: every QLabel rule in theme.cpp names a
 // colour, and a stylesheet colour beats QWidget::setPalette.
@@ -513,6 +501,27 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     tabLayout->addWidget(m_tabList);
 
     layout->addWidget(tabRow);
+
+    // Directly over the canvas, because that is where the graph is read and the
+    // one place a warning about it cannot be missed. Hidden for the user's own
+    // scripts, which is every script until they open the mod browser.
+    m_readOnlyBar = new QLabel(central);
+    m_readOnlyBar->setObjectName(QStringLiteral("readOnlyBar"));
+    m_readOnlyBar->setContentsMargins(8, 4, 8, 4);
+    m_readOnlyBar->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_readOnlyBar->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    // The line is elided to the bar's own width, and the window's resize event
+    // arrives before the layout has given the bar its new one. Watching the bar
+    // itself is what keeps the text and the width in step.
+    m_readOnlyBar->installEventFilter(this);
+    m_readOnlyBar->setStyleSheet(
+        QStringLiteral("QLabel#readOnlyBar { background: %1; color: %2; "
+                       "border-bottom: 1px solid %3; }")
+            .arg(theme::headerBg().name(), theme::warningColor().name(),
+                 theme::warningColor().name()));
+    m_readOnlyBar->hide();
+    layout->addWidget(m_readOnlyBar);
+
     layout->addWidget(m_view, 1);
 
     m_recent.load();
@@ -540,6 +549,7 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
         refreshTabs();
         m_view->zoomToFit();
     });
+    connect(m_doc, &Document::graphChanged, this, &MainWindow::updateReadOnlyBar);
     connect(m_doc, &Document::modifiedChanged, this, [this](bool) { updateWindowTitle(); });
     connect(m_tabs, &QTabBar::currentChanged, this, &MainWindow::onTabChanged);
     connect(m_palette, &PalettePanel::nodeRequested,
@@ -572,6 +582,7 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
         const Graph *g = m_doc->activeGraph();
         const GraphNode *node = g ? g->node(id) : nullptr;
         if (!node || !isCodeNode(*node)) return;
+        if (refuseReadOnlyEdit()) return;
         CodeDialog::editNodeCode(this, m_doc, id);
     });
 
@@ -675,9 +686,15 @@ void MainWindow::buildMenus()
     redo->setShortcuts(QKeySequence::Redo);
     edit->addSeparator();
     edit->addAction(QStringLiteral("Duplicate"), QKeySequence(Qt::CTRL | Qt::Key_D),
-                    this, [this]() { m_scene->duplicateSelection(); });
+                    this, [this]() {
+        if (refuseReadOnlyEdit()) return;
+        m_scene->duplicateSelection();
+    });
     edit->addAction(QStringLiteral("Delete"), QKeySequence::Delete,
-                    this, [this]() { m_scene->deleteSelectedNodes(); });
+                    this, [this]() {
+        if (refuseReadOnlyEdit()) return;
+        m_scene->deleteSelectedNodes();
+    });
     edit->addSeparator();
     edit->addAction(QStringLiteral("Add node here..."), QKeySequence(Qt::CTRL | Qt::Key_Space),
                     this, [this]() {
@@ -799,6 +816,13 @@ void MainWindow::resizeEvent(QResizeEvent *event)
     updateCornerMark();
 }
 
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_readOnlyBar && event->type() == QEvent::Resize)
+        updateReadOnlyBar();
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::buildLayoutActions(QMenu *menu, QToolBar *bar)
 {
     struct Entry {
@@ -884,6 +908,27 @@ void MainWindow::buildStatusBar()
         zoomLabel->setText(QStringLiteral("%1%").arg(qRound(z * 100)));
     });
     zoomLabel->setText(QStringLiteral("100%"));
+
+    // Both counters and the zoom describe the graph on the canvas. The start
+    // page has no graph to have errors in and nothing to zoom, so they step out
+    // there and leave the bar to whatever the page has just done.
+    //
+    // Emptied as well as hidden: a status bar shows and hides its own
+    // non-permanent widgets whenever it is asked to lay out again, and a label
+    // that came back carrying the last project's counts would be worse than one
+    // that had never left.
+    const auto followPage = [this, zoomLabel]() {
+        const bool editing = m_stack && m_stack->currentWidget() == m_editor;
+        if (editing) updateStatusCounts();
+        else m_status->clear();
+        zoomLabel->setText(editing ? QStringLiteral("%1%").arg(qRound(m_view->zoom() * 100))
+                                   : QString());
+        m_status->setVisible(editing);
+        zoomLabel->setVisible(editing);
+    };
+    connect(m_stack, &QStackedWidget::currentChanged, this,
+            [followPage](int) { followPage(); });
+    followPage();
 }
 
 void MainWindow::buildDocks()
@@ -908,6 +953,7 @@ void MainWindow::buildDocks()
     m_minimap = new MiniMapWidget(m_scene, m_view, this);
     m_codeView = new CodeViewPanel(m_doc, this);
     m_explorer = new ExplorerPanel(m_doc, this);
+    m_modBrowser = new ModBrowserPanel(m_doc, this);
     m_testRun = new TestPanel(m_doc, this);
 
     QDockWidget *outlinerDock =
@@ -918,6 +964,8 @@ void MainWindow::buildDocks()
         makeDock(QStringLiteral("Events"), m_events, Qt::LeftDockWidgetArea);
     QDockWidget *explorerDock =
         makeDock(QStringLiteral("Mod Explorer"), m_explorer, Qt::LeftDockWidgetArea);
+    QDockWidget *browserDock =
+        makeDock(QStringLiteral("Mod Browser"), m_modBrowser, Qt::LeftDockWidgetArea);
     QDockWidget *varsDock =
         makeDock(QStringLiteral("Variable Manager"), m_variables, Qt::RightDockWidgetArea);
     QDockWidget *inspectorDock =
@@ -938,28 +986,22 @@ void MainWindow::buildDocks()
     codeDock->raise();
 
     splitDockWidget(outlinerDock, paletteDock, Qt::Vertical);
-    // Events sits under the palette, not under the explorer: the two node
-    // sources belong together, and files are the thing you come back to least.
     splitDockWidget(paletteDock, eventsDock, Qt::Vertical);
-    splitDockWidget(eventsDock, explorerDock, Qt::Vertical);
+    // Three tabs in the last slice rather than three more slices of a column
+    // that was already showing the Mod Explorer one line of prose at a time.
+    // Nothing loses height by this: whichever of the three is up gets the whole
+    // slice, which is more than the Events list had when it sat there alone.
+    // They are also the three you use one at a time, the hooks this class can
+    // override, your own mod's files, and somebody else's.
+    tabifyDockWidget(eventsDock, explorerDock);
+    tabifyDockWidget(explorerDock, browserDock);
+    eventsDock->raise();
+    // Queued: the signal arrives while the tab group is still swapping, and a
+    // resize asked for there is measured against the layout on its way out.
+    connect(browserDock, &QDockWidget::visibilityChanged, this,
+            [this]() { QTimer::singleShot(0, this, [this]() { applyLeftColumnSizes(); }); });
     splitDockWidget(varsDock, inspectorDock, Qt::Vertical);
     splitDockWidget(inspectorDock, minimapDock, Qt::Vertical);
-
-    // Four panels in one column. Events takes the largest share because it is
-    // the only one that is read rather than searched: its whole job is showing
-    // hooks the user could not have named. The palette keeps enough rows for a
-    // search result, and the outliner and the explorer are scanned down a list.
-    resizeDocks({outlinerDock, paletteDock, eventsDock, explorerDock},
-                {120, 170, 520, 110}, Qt::Vertical);
-    resizeDocks({varsDock, inspectorDock, minimapDock}, {240, 300, 160}, Qt::Vertical);
-    resizeDocks({outlinerDock, varsDock}, {320, 380}, Qt::Horizontal);
-    // Tall enough to read a method without scrolling. resizeDocks only gets a
-    // say once the window has a size, so the panel carries its own minimum.
-    m_codeView->setMinimumHeight(180);
-    resizeDocks({codeDock}, {320}, Qt::Vertical);
-    // Same reason, and the number that matters here is rows: the lifecycle
-    // hooks a mod starts from have to be on screen without a scroll.
-    m_events->setMinimumHeight(320);
 
     // Clicking a line in the generated file selects the node behind it, and
     // selecting a node marks the lines it produced.
@@ -970,6 +1012,13 @@ void MainWindow::buildDocks()
         const QStringList sel = m_doc->selection();
         if (sel.size() == 1) m_codeView->revealNode(sel.first());
     });
+
+    // Direct, and it has to stay direct: Graph is not a registered metatype, so
+    // a queued connection could not carry the argument at all.
+    connect(m_modBrowser, &ModBrowserPanel::graphRequested, this,
+            &MainWindow::openBrowsedGraph, Qt::DirectConnection);
+    connect(m_modBrowser, &ModBrowserPanel::statusChanged, this,
+            &MainWindow::flashStatus);
 
     // A .c is a graph, a .cpp is a config tree, a .sdzn is a project, and
     // everything else is text, so the explorer says which of the four it found
@@ -988,10 +1037,141 @@ void MainWindow::buildDocks()
     for (QAction *a : menuBar()->actions()) {
         if (a->text() != QLatin1String("&View") || !a->menu()) continue;
         for (QDockWidget *d : {outlinerDock, paletteDock, eventsDock, explorerDock,
-                               varsDock, inspectorDock, minimapDock, codeDock,
-                               testDock})
+                               browserDock, varsDock, inspectorDock, minimapDock,
+                               codeDock, testDock})
             a->menu()->addAction(d->toggleViewAction());
     }
+}
+
+void MainWindow::applyDockSizes()
+{
+    // The generated file is a view of what the canvas already holds, so it opens
+    // at the lines the panel asks for and not at the two fifths of the window it
+    // used to take. Capped by the window as well, because a dozen lines of a
+    // large font on a short screen is the canvas's room again.
+    const int usable = qMax(400, height());
+    // A quarter, not a third: at 800 tall a third of the window put more pixels
+    // under the generated file than were left for the canvas, which is the one
+    // thing the app exists to show.
+    const int codeHeight = qBound(160, m_codeView->preferredDockHeight(), usable / 4);
+    resizeDocks({dockOf(m_codeView)}, {codeHeight}, Qt::Vertical);
+
+    // Three slices for the left column, near enough to even that no list is
+    // starved to feed another. The last slice keeps a little more because it is
+    // shared by three panels and one of them holds two lists; it is named by the
+    // browser rather than by the tab in front of it, because a tab group has one
+    // height and the browser is what sets it. The old 380 there left the
+    // outliner and the palette under four rows on a short window, which is the
+    // same defect the Events dock used to have when it owned the share.
+    //
+    // The exception is the browser itself. It is the only panel down there that
+    // stacks two lists, so while it is the tab in front it needs about half the
+    // column, and while it is behind another tab that height is the outliner's
+    // and the palette's. A tab group has one height whichever way round it is,
+    // so the share has to follow the tab rather than be picked once.
+    applyLeftColumnSizes();
+
+    // The variable table is the panel; the inspector and the minimap both read
+    // fine at their own minimum, so the table is what the spare height goes to.
+    resizeDocks({dockOf(m_variables), dockOf(m_inspector), dockOf(m_minimap)},
+                {320, 230, 150}, Qt::Vertical);
+    resizeDocks({dockOf(m_outliner), dockOf(m_variables)}, {320, 380}, Qt::Horizontal);
+}
+
+void MainWindow::applyLeftColumnSizes()
+{
+    if (!m_docksSized) return;
+    QDockWidget *browser = dockOf(m_modBrowser);
+    resizeDocks({dockOf(m_outliner), dockOf(m_palette), browser}, {220, 210, 240},
+                Qt::Vertical);
+
+    // While the browser is the tab in front it is the only panel in the column
+    // stacking two lists, so it gets asked for half the column on its own.
+    // On its own deliberately: a three-way list whose sum is over the height
+    // there is gets scaled by Qt, and the largest request takes the largest cut,
+    // so asking for more inside the list of three lands the browser with less.
+    if (browser && browser->isVisible()) {
+        const int column = qMax(360, centralWidget() ? centralWidget()->height() : 500);
+        resizeDocks({browser}, {column * 5 / 9}, Qt::Vertical);
+    }
+}
+
+void MainWindow::showEvent(QShowEvent *event)
+{
+    QMainWindow::showEvent(event);
+    // Once. A layout the user has dragged into shape is theirs, and re-running
+    // this on every show would take it back off them.
+    if (m_docksSized) return;
+    m_docksSized = true;
+
+    // Two hooks for the headless UI check, both unset in a normal run. The
+    // window is built at one size by main.cpp and the docks only divide the
+    // height they are given, so a layout that fails on a small screen cannot be
+    // seen at all without being able to ask for that screen.
+    const QString size = qEnvironmentVariable("SUDO_UI_SIZE");
+    const QStringList wh = size.split(QLatin1Char('x'), Qt::SkipEmptyParts);
+    if (wh.size() == 2 && wh.at(0).toInt() > 0 && wh.at(1).toInt() > 0)
+        resize(wh.at(0).toInt(), wh.at(1).toInt());
+
+    applyDockSizes();
+    browseForScreenshot();
+
+    // The canvas only gets its real width once the docks have taken theirs, and
+    // a graph framed against the window's first guess sits off to one side of
+    // it. Queued, because the layout runs after this returns.
+    QTimer::singleShot(0, this, [this]() { m_view->zoomToFit(); });
+}
+
+void MainWindow::browseForScreenshot()
+{
+    // "3D Printer" opens that mod's first class; "3D Printer#4" opens the fifth
+    // row, because the first class in a mod is often one the importer kept as
+    // text and a picture of an empty canvas says nothing about the browser.
+    QString wanted = qEnvironmentVariable("SUDO_UI_BROWSE").trimmed();
+    if (wanted.isEmpty() || !m_modBrowser) return;
+    int row = 0;
+    const int hash = wanted.lastIndexOf(QLatin1Char('#'));
+    if (hash > 0) {
+        row = qMax(0, wanted.mid(hash + 1).toInt());
+        wanted = wanted.left(hash);
+    }
+
+    if (QDockWidget *dock = dockOf(m_modBrowser)) {
+        dock->show();
+        dock->raise();
+    }
+
+    // The scan is on a worker thread and the import is spread over timer ticks.
+    // Both are waited out here rather than hoped for, because a picture taken
+    // during either shows an empty list and says nothing.
+    const auto settle = [](const std::function<bool()> &busy, int ms) {
+        QElapsedTimer clock;
+        clock.start();
+        while (busy() && clock.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(5);
+        }
+        QCoreApplication::processEvents();
+    };
+
+    ModLibrary *library = m_modBrowser->library();
+    settle([library]() { return library->isScanning(); }, 60000);
+
+    QString folder;
+    for (const ModEntry &mod : library->mods()) {
+        if (!mod.hasScripts()) continue;
+        if (!mod.name.contains(wanted, Qt::CaseInsensitive)
+            && !mod.folderName.contains(wanted, Qt::CaseInsensitive))
+            continue;
+        folder = mod.folder;
+        break;
+    }
+    if (folder.isEmpty() || !m_modBrowser->selectMod(folder)) return;
+
+    ModBrowserPanel *browser = m_modBrowser;
+    settle([browser]() { return browser->isOpening(); }, 60000);
+    if (!m_modBrowser->openClassAt(row)) m_modBrowser->openClassAt(0);
+    QCoreApplication::processEvents();
 }
 
 void MainWindow::buildTestMenu()
@@ -1020,10 +1200,78 @@ void MainWindow::refreshTabs()
         const ScriptEntry &s = p.scripts.at(i);
         m_tabs->addTab(s.name);
         m_tabs->setTabData(i, s.id);
-        m_tabs->setTabToolTip(i, QStringLiteral("%1/%2.c").arg(s.folder, s.name));
+        // A browsed class has no file of its own to name, and saying where it
+        // really came from is the more useful answer anyway.
+        const QString origin = graphIsReadOnly(s.graph) ? graphOrigin(s.graph) : QString();
+        if (origin.isEmpty()) {
+            m_tabs->setTabToolTip(i, QStringLiteral("%1/%2.c").arg(s.folder, s.name));
+        } else {
+            m_tabs->setTabToolTip(
+                i, QStringLiteral("Read only, from %1").arg(origin));
+            // Dimmed, so a tab that cannot be exported does not read as one of
+            // the user's own while it is sitting in the background.
+            m_tabs->setTabTextColor(i, theme::textDim());
+        }
         if (s.id == p.activeId) active = i;
     }
     m_tabs->setCurrentIndex(active);
+    updateReadOnlyBar();
+}
+
+void MainWindow::updateReadOnlyBar()
+{
+    if (!m_readOnlyBar) return;
+    const Graph *g = m_doc->activeGraph();
+    if (!g || !graphIsReadOnly(*g)) {
+        m_readOnlyBar->hide();
+        return;
+    }
+
+    const QString origin = graphOrigin(*g);
+    const QString head = QStringLiteral("Read only. %1 was read out of ").arg(g->className);
+    // Says what is guaranteed and no more. Export leaves it out and no write
+    // this window makes puts it in the user's mod; the Copy and Save as buttons
+    // under the canvas are still the user's to press, on code they are looking
+    // at, and a bar that claimed otherwise would be wrong the first time
+    // somebody tried it.
+    const QString tail = QStringLiteral(". Export leaves it out, and nothing here "
+                                        "writes it into your mod.");
+    const QString where = origin.isEmpty() ? QStringLiteral("another author's mod")
+                                           : origin;
+    m_readOnlyBar->setToolTip(head + where + tail);
+
+    // Three lines for three widths, and the order they are given up in is the
+    // order they are worth. The pbo path goes first, then where it came from at
+    // all; the rule itself is the last thing to go, because a bar that has room
+    // for the file name and not for what the file may not do is the wrong half.
+    // The tooltip keeps all of it whatever is shown.
+    const QString shorter =
+        QStringLiteral("Read only. %1 came out of another mod, and export leaves it out.")
+            .arg(g->className);
+    const QFontMetrics metrics(m_readOnlyBar->font());
+    const int avail = qMax(120, m_readOnlyBar->width() - 16);
+    const int room = avail - metrics.horizontalAdvance(head + tail);
+
+    QString shown;
+    if (metrics.horizontalAdvance(head + where + tail) <= avail)
+        shown = head + where + tail;
+    else if (room >= 80)
+        shown = head + metrics.elidedText(where, Qt::ElideLeft, room) + tail;
+    else
+        shown = metrics.elidedText(shorter, Qt::ElideRight, avail);
+    m_readOnlyBar->setText(shown);
+    m_readOnlyBar->show();
+}
+
+bool MainWindow::refuseReadOnlyEdit()
+{
+    const Graph *g = m_doc->activeGraph();
+    if (!g || !graphIsReadOnly(*g)) return false;
+    flashStatus(QStringLiteral("%1 is read only. It came out of another mod, so "
+                               "it is there to be read.")
+                    .arg(g->className));
+    m_message->setToolTip(graphOrigin(*g));
+    return true;
 }
 
 void MainWindow::onTabChanged(int index)
@@ -1035,6 +1283,7 @@ void MainWindow::onTabChanged(int index)
 
 void MainWindow::editSelectedCode()
 {
+    if (refuseReadOnlyEdit()) return;
     const QStringList selection = m_doc->selection();
     const Graph *g = m_doc->activeGraph();
     const GraphNode *node = (selection.size() == 1 && g)
@@ -1117,6 +1366,12 @@ void MainWindow::flashStatus(const QString &text)
 
 void MainWindow::onPaletteNodeRequested(const QString &key)
 {
+    // Every surface that adds a node arrives here, so this is the one place the
+    // read only question has to be asked on the way in.
+    if (refuseReadOnlyEdit()) {
+        m_hasPendingAdd = false;
+        return;
+    }
     // A right-click on the canvas says where the next node goes, whichever
     // surface it is finally picked from. Consumed here, so it can never apply
     // to a second node.
@@ -1134,6 +1389,9 @@ void MainWindow::onContextAdd(const QPointF &scenePos)
 
 void MainWindow::showAddNodeSearch(const QPointF &scenePos)
 {
+    // Ahead of the popup rather than after it: a search that offers a list and
+    // then turns down whatever is picked wastes the gesture it invited.
+    if (refuseReadOnlyEdit()) return;
     m_pendingAddPos = scenePos;
     m_hasPendingAdd = true;
 
@@ -1146,6 +1404,7 @@ void MainWindow::showAddNodeSearch(const QPointF &scenePos)
 
 void MainWindow::showEventSearch(const QPointF &scenePos)
 {
+    if (refuseReadOnlyEdit()) return;
     m_pendingAddPos = scenePos;
     m_hasPendingAdd = true;
     const QPoint at = m_view->viewport()->mapToGlobal(m_view->mapFromScene(scenePos));
@@ -1184,6 +1443,7 @@ void MainWindow::addCustomEvent()
         flashStatus(QStringLiteral("Open a script before adding events."));
         return;
     }
+    if (refuseReadOnlyEdit()) return;
 
     bool accepted = false;
     const QString name =
@@ -1233,6 +1493,7 @@ void MainWindow::addCustomEvent()
 
 void MainWindow::showConnectSearch(const PinRef &from, const QPointF &scenePos)
 {
+    if (refuseReadOnlyEdit()) return;
     const PinType type = m_scene->typeOfPin(from);
     const QPoint at = m_view->viewport()->mapToGlobal(m_view->mapFromScene(scenePos));
 
@@ -1405,6 +1666,63 @@ void MainWindow::setModFolder()
                     .arg(QDir::toNativeSeparators(p.modRoot)));
 }
 
+void MainWindow::openBrowsedGraph(const QString &name, const Graph &graph)
+{
+    Project &p = m_doc->project();
+    const QString origin = graphOrigin(graph);
+
+    // The same class twice is the tab the user already has. Keyed on the origin
+    // rather than the class name: two mods that both mod PlayerBase are two
+    // different pieces of code with one name.
+    // The browser is reachable from the start page, and a class opened there
+    // used to land on a canvas nobody was looking at: the status line said it
+    // had opened and the window still showed the start page.
+    showEditor();
+
+    if (!origin.isEmpty()) {
+        for (const ScriptEntry &s : p.scripts) {
+            if (graphOrigin(s.graph) != origin) continue;
+            m_doc->setActiveScript(s.id);
+            m_view->zoomToFit();
+            flashStatus(QStringLiteral("%1 is already open.").arg(s.name));
+            return;
+        }
+    }
+
+    ScriptEntry entry;
+    // The counter behind nextId restarts every launch and knows nothing about
+    // the ids already in this project.
+    do {
+        entry.id = nextId(QStringLiteral("s"));
+    } while (p.script(entry.id));
+    entry.graph = graph;
+    entry.name = entry.graph.className.isEmpty() ? name : entry.graph.className;
+    if (entry.name.isEmpty()) entry.name = QStringLiteral("Untitled");
+    entry.folder = entry.graph.module.isEmpty() ? QStringLiteral("4_World")
+                                                : entry.graph.module;
+    // sourcePath stays empty, and that is the point. It names the file a script
+    // is written back to, and this one is written back nowhere.
+    //
+    // The panel marks what it hands over and this marks it again, because every
+    // write in this file asks the mark rather than asking where the graph came
+    // from. An unmarked graph reaching here would be exported.
+    if (!graphIsReadOnly(entry.graph))
+        markGraphReadOnly(entry.graph, name, QString(), QString());
+
+    p.scripts.append(entry);
+    m_doc->setActiveScript(entry.id);
+    // The project holds a script the .sdzn does not, so it is behind again. A
+    // save keeps the graph, and the mark rides the file, so it comes back read
+    // only rather than as a script of the user's own.
+    m_doc->touchGraph();
+    refreshTabs();
+
+    flashStatus(QStringLiteral("Opened %1, read only. Export leaves it out, and "
+                               "nothing here writes it into your mod.")
+                    .arg(entry.name));
+    if (!origin.isEmpty()) m_message->setToolTip(origin);
+}
+
 void MainWindow::openModFile(const QString &path)
 {
     QString error;
@@ -1461,7 +1779,7 @@ void MainWindow::openModScript(const QString &path)
     // whichever is written last silently wins. The tab the user already has is
     // the one they mean.
     for (const ScriptEntry &s : p.scripts) {
-        if (!sameFile(s.sourcePath, path)) continue;
+        if (!sameScriptFile(s.sourcePath, path)) continue;
         const QString id = s.id;
         m_doc->setActiveScript(id);
         m_view->zoomToFit();
@@ -1773,12 +2091,27 @@ bool MainWindow::writeScriptFile(const QString &path, QString *error)
 {
     const Project &p = m_doc->project();
     QVector<const ScriptEntry *> parts;
-    for (const ScriptEntry &s : p.scripts)
-        if (sameFile(s.sourcePath, path)) parts.append(&s);
+    int browsed = 0;
+    for (const ScriptEntry &s : p.scripts) {
+        if (!sameScriptFile(s.sourcePath, path)) continue;
+        // The last gate before bytes. Callers check first and this checks
+        // again, because it is the only function in the app that turns a graph
+        // into a .c, and one gate that cannot be talked past is worth more than
+        // four that agree with each other.
+        if (!scriptIsWritable(s)) {
+            browsed++;
+            continue;
+        }
+        parts.append(&s);
+    }
     if (parts.isEmpty()) {
         if (error)
-            *error = QStringLiteral("no script in this project came from %1")
-                         .arg(QDir::toNativeSeparators(path));
+            *error = browsed > 0
+                         ? QStringLiteral("it was read out of another mod, so it is "
+                                          "not written back to %1")
+                               .arg(QDir::toNativeSeparators(path))
+                         : QStringLiteral("no script in this project came from %1")
+                               .arg(QDir::toNativeSeparators(path));
         return false;
     }
 
@@ -1788,19 +2121,28 @@ bool MainWindow::writeScriptFile(const QString &path, QString *error)
     QStringList names;
     for (const ScriptEntry *s : parts) names << s->graph.className;
 
-    QString text;
+    QString preamble;
     for (const ScriptEntry *s : parts) {
         if (s->preamble.isEmpty()) continue;
-        text = preambleLeadIn(s->preamble);
+        preamble = s->preamble;
         break;
     }
-    for (int i = 0; i < parts.size(); ++i) {
-        const GenResult gen =
-            generateEnforce(parts.at(i)->graph, m_doc->catalog(), m_doc->builtins(), p,
-                            classSection(previous, names.at(i), names));
-        if (i > 0) text += QLatin1Char('\n');
-        text += gen.code;
-    }
+
+    QStringList classes;
+    for (int i = 0; i < parts.size(); ++i)
+        classes << generateEnforce(parts.at(i)->graph, m_doc->catalog(),
+                                   m_doc->builtins(), p,
+                                   classSection(previous, names.at(i), names))
+                       .code;
+
+    // Every class in one file was read out of that file, so they agree on the
+    // ending. If they ever do not, bare newlines is the answer that invents
+    // least.
+    QString eol = parts.first()->graph.eol;
+    for (const ScriptEntry *s : parts)
+        if (s->graph.eol != eol) eol = QStringLiteral("\n");
+
+    const QString text = assembleScriptFile(classes, preamble, eol);
 
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile out(path);
@@ -1827,6 +2169,16 @@ void MainWindow::saveScriptFile()
     ScriptEntry *script = p.active();
     if (!script) {
         flashStatus(QStringLiteral("There is no script to write."));
+        return;
+    }
+    if (!scriptIsWritable(*script)) {
+        QMessageBox::information(
+            this, QStringLiteral("Save script to file"),
+            QStringLiteral("%1 was read out of another mod, so this does not write "
+                           "it.\n\n%2\n\nThe browser opens somebody else's code to be "
+                           "read. Writing it into your own scripts would ship their "
+                           "work under your name.")
+                .arg(script->name, graphOrigin(script->graph)));
         return;
     }
 
@@ -1870,13 +2222,18 @@ void MainWindow::showGeneratedCode()
 
 void MainWindow::exportScripts()
 {
+    const Project &project = m_doc->project();
     // A script that was imported goes back to the file it came from, wherever
     // that is. Exporting it into the folder as well would leave two copies of
     // one class in the mod, and the compiler would take both.
-    int intoFolder = 0;
-    int intoSource = 0;
-    for (const ScriptEntry &s : m_doc->project().scripts)
-        (s.sourcePath.isEmpty() ? intoFolder : intoSource)++;
+    //
+    // Both counts come from the plan rather than from a second walk of the
+    // project, so what the question promises and what the writing does cannot
+    // drift apart. With no folder given the plan holds the source-bound files
+    // only, which is exactly the number the question needs.
+    QVector<const ScriptEntry *> browsed;
+    const int intoSource = exportPlan(project, QString(), &browsed).size();
+    const int intoFolder = scriptsNeedingFolder(project);
 
     // A project that came from the template already knows where its scripts go,
     // and picking that folder by hand every time is the step that eventually
@@ -1889,6 +2246,13 @@ void MainWindow::exportScripts()
         if (intoSource > 0)
             question += QStringLiteral("\n\n%1 more go back to the files they were "
                                        "opened from.").arg(intoSource);
+        if (!browsed.isEmpty())
+            question += QStringLiteral("\n\n%1 stays where it is: it was read out of "
+                                       "another mod and is not yours to write.")
+                            .arg(browsed.size() == 1
+                                     ? browsed.first()->name
+                                     : QStringLiteral("%1 read only scripts")
+                                           .arg(browsed.size()));
         QMessageBox box(QMessageBox::Question, QStringLiteral("Export scripts"),
                         question, QMessageBox::NoButton, this);
         QPushButton *here = box.addButton(QStringLiteral("Export here"),
@@ -1915,31 +2279,26 @@ void MainWindow::exportScripts()
     int written = 0;
     int returned = 0;
     QStringList problems;
-    // Two scripts can share one file, and that file is written once with both
-    // classes in it.
-    QSet<QString> filesDone;
-    for (const ScriptEntry &s : m_doc->project().scripts) {
-        if (!s.sourcePath.isEmpty()) {
-            const QString key = fileKey(s.sourcePath);
-            if (filesDone.contains(key)) continue;
-            filesDone.insert(key);
+    // One entry per file: two scripts sharing a file appear once, and that file
+    // is written with both classes in it. Nothing the browser produced is in
+    // here at all.
+    for (const ExportTarget &target : exportPlan(project, dir)) {
+        const ScriptEntry &s = *target.script;
+        if (target.intoSource) {
             QString error;
-            if (writeScriptFile(s.sourcePath, &error)) returned++;
+            if (writeScriptFile(target.path, &error)) returned++;
             else problems << QStringLiteral("%1: %2").arg(s.name, error);
             continue;
         }
 
-        const QString folder = QDir(dir).filePath(s.folder);
-        QDir().mkpath(folder);
-        const QString path = QDir(folder).filePath(s.name + ".c");
+        QDir().mkpath(QFileInfo(target.path).absolutePath());
 
         // Regenerating over an existing file keeps its user regions.
-        const QString previous = readFileText(path);
+        const QString previous = readFileText(target.path);
 
         const GenResult gen = generateEnforce(s.graph, m_doc->catalog(),
-                                              m_doc->builtins(), m_doc->project(),
-                                              previous);
-        QSaveFile out(path);
+                                              m_doc->builtins(), project, previous);
+        QSaveFile out(target.path);
         if (!out.open(QIODevice::WriteOnly) || (out.write(gen.code.toUtf8()), !out.commit())) {
             problems << QStringLiteral("%1: could not write").arg(s.name);
             continue;
@@ -1953,7 +2312,12 @@ void MainWindow::exportScripts()
         return;
     }
     if (written == 0 && returned == 0) {
-        flashStatus(QStringLiteral("There was nothing to export."));
+        flashStatus(browsed.isEmpty()
+                        ? QStringLiteral("There was nothing to export.")
+                        : QStringLiteral("There was nothing of yours to export. "
+                                         "%1 read only, out of another mod.")
+                              .arg(countOf(browsed.size(), QStringLiteral("script"),
+                                           QStringLiteral("scripts"))));
         return;
     }
     QString report;
@@ -1968,7 +2332,14 @@ void MainWindow::exportScripts()
                       .arg(returned == 1 ? QStringLiteral("file")
                                          : QStringLiteral("files"));
     }
-    flashStatus(report + QLatin1Char('.'));
+    report += QLatin1Char('.');
+    // Said every time rather than only when it is news: an export that quietly
+    // leaves a class out is the export somebody goes looking for at build time.
+    if (!browsed.isEmpty())
+        report += QStringLiteral(" %1 left alone, read only out of another mod.")
+                      .arg(countOf(browsed.size(), QStringLiteral("script"),
+                                   QStringLiteral("scripts")));
+    flashStatus(report);
 }
 
 void MainWindow::updateWindowTitle()

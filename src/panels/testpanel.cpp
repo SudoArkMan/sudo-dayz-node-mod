@@ -17,6 +17,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QToolButton>
@@ -114,7 +115,25 @@ void TestPanel::buildUi()
     m_toolsAction = new QAction(QStringLiteral("Set DayZ Tools folder..."), this);
     connect(m_toolsAction, &QAction::triggered, this, &TestPanel::chooseToolsFolder);
 
-    auto *layout = new QVBoxLayout(this);
+    // Four control rows, two wrapped paragraphs and a splitter add up to 224px
+    // of demanded height, and this panel is tabbed behind the generated file, so
+    // that number was the floor under the whole bottom dock and the canvas paid
+    // it at every window size. Inside a scroll area the panel asks for what it
+    // can use and scrolls for the rest, which is what lets the window be 800
+    // tall at all.
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *body = new QWidget(scroll);
+    scroll->setWidget(body);
+    outer->addWidget(scroll);
+    // The controls plus a row of the checklist. Below this the panel scrolls.
+    scroll->setMinimumHeight(132);
+
+    auto *layout = new QVBoxLayout(body);
     layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(4);
 
@@ -192,9 +211,14 @@ void TestPanel::buildUi()
     m_checks->setUniformRowHeights(true);
     m_checks->setSelectionMode(QAbstractItemView::SingleSelection);
     m_checks->header()->setStretchLastSection(true);
-    // Ten rows without a scroll. The whole value of the list is being able to
-    // see at a glance which one is red.
-    m_checks->setMinimumHeight(160);
+    // Ten rows is what the list opens at, through the splitter's sizes below,
+    // and not a floor under it. This panel is tabbed behind the generated file,
+    // so a floor here is a floor under the whole bottom dock and the canvas is
+    // what pays for it. The floor is the header and a row: enough to say what
+    // the list is, and it scrolls from there.
+    m_checks->setMinimumHeight(
+        m_checks->header()->sizeHint().height()
+        + QFontMetrics(m_checks->font()).lineSpacing() + 6);
     split->addWidget(m_checks);
 
     m_log = new QPlainTextEdit(split);
@@ -204,12 +228,16 @@ void TestPanel::buildUi()
     m_log->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_log->setPlaceholderText(
         QStringLiteral("Command lines and their output land here."));
+    // Two lines, for the same reason: the log is read by scrolling anyway, and
+    // whatever it insists on here comes off the canvas.
+    m_log->setMinimumHeight(QFontMetrics(m_log->font()).lineSpacing() * 2 + 8);
     split->addWidget(m_log);
 
     // The checklist leads until something has been run. The log grows into the
     // space the user gives it, which is what the splitter is for.
     split->setStretchFactor(0, 5);
     split->setStretchFactor(1, 3);
+    split->setSizes({160, 96});
     layout->addWidget(split, 1);
 
     applyMode();

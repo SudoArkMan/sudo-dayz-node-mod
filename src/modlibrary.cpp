@@ -245,6 +245,69 @@ QString graphOrigin(const Graph &g)
     return g.extra.value(kOriginKey).toString();
 }
 
+// ------------------------------------------------------- what may be written
+
+bool scriptIsWritable(const ScriptEntry &script)
+{
+    return !graphIsReadOnly(script.graph);
+}
+
+QString scriptFileKey(const QString &path)
+{
+    if (path.isEmpty()) return {};
+    const QString clean = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+#ifdef Q_OS_WIN
+    return clean.toLower();
+#else
+    return clean;
+#endif
+}
+
+bool sameScriptFile(const QString &a, const QString &b)
+{
+    return !a.isEmpty() && !b.isEmpty() && scriptFileKey(a) == scriptFileKey(b);
+}
+
+int scriptsNeedingFolder(const Project &project)
+{
+    int n = 0;
+    for (const ScriptEntry &s : project.scripts)
+        if (scriptIsWritable(s) && s.sourcePath.isEmpty()) ++n;
+    return n;
+}
+
+QVector<ExportTarget> exportPlan(const Project &project, const QString &dir,
+                                 QVector<const ScriptEntry *> *browsed)
+{
+    QVector<ExportTarget> plan;
+    QSet<QString> filesDone;
+    for (const ScriptEntry &script : project.scripts) {
+        // First, and on the graph's own mark rather than on where the entry
+        // says it came from: a .sdzn is a file anyone can hand you, and a
+        // browsed graph carrying a sourcePath must not become a write.
+        if (!scriptIsWritable(script)) {
+            if (browsed) browsed->append(&script);
+            continue;
+        }
+
+        ExportTarget target;
+        target.script = &script;
+        if (!script.sourcePath.isEmpty()) {
+            const QString key = scriptFileKey(script.sourcePath);
+            if (filesDone.contains(key)) continue;
+            filesDone.insert(key);
+            target.path = script.sourcePath;
+            target.intoSource = true;
+        } else {
+            if (dir.isEmpty()) continue;
+            const QString folder = QDir(dir).filePath(script.folder);
+            target.path = QDir(folder).filePath(script.name + QStringLiteral(".c"));
+        }
+        plan.append(target);
+    }
+    return plan;
+}
+
 // ------------------------------------------------------------------- scanning
 
 ModEntry ModLibrary::readMod(const QString &folder)
@@ -282,7 +345,12 @@ ModEntry ModLibrary::readMod(const QString &folder)
         const QString text = readTextFile(modPath);
         const ConfigFile parsed = parseConfig(text);
         const QString name = flatValue(parsed, text, QStringLiteral("name"));
-        if (!name.isEmpty()) entry.name = name;
+        // A stringtable key is a name the engine would look up and this cannot,
+        // and "$STR_nam_mod_terrain_name" at the top of the list is worse than
+        // the folder it sits in.
+        if (!name.isEmpty() && !name.startsWith(QLatin1Char('$'))
+            && !name.startsWith(QLatin1Char('#')))
+            entry.name = name;
         entry.author = flatValue(parsed, text, QStringLiteral("author"));
         entry.version = flatValue(parsed, text, QStringLiteral("version"));
         entry.picture = flatValue(parsed, text, QStringLiteral("picture"));
@@ -301,7 +369,9 @@ ModEntry ModLibrary::readMod(const QString &folder)
         const QString name = flatValue(parsed, text, QStringLiteral("name"));
         // mod.cpp wins: meta.cpp carries the workshop title, which is often the
         // listing name rather than what the mod calls itself in game.
-        if (!name.isEmpty() && entry.name == fallbackName) entry.name = name;
+        if (!name.isEmpty() && !name.startsWith(QLatin1Char('$'))
+            && !name.startsWith(QLatin1Char('#')) && entry.name == fallbackName)
+            entry.name = name;
         entry.publishedId = flatValue(parsed, text, QStringLiteral("publishedid"));
     }
 

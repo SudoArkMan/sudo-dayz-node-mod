@@ -10,6 +10,7 @@
 #include <QPointF>
 #include <QPointer>
 
+struct Graph;
 struct ImportResult;
 struct PinRef;
 struct StartTemplate;
@@ -27,6 +28,7 @@ class InspectorPanel;
 class MiniMapWidget;
 class CodeViewPanel;
 class ExplorerPanel;
+class ModBrowserPanel;
 class TestPanel;
 class QTabBar;
 class QLabel;
@@ -42,6 +44,13 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // Watches the read only bar for its own resize: the window's arrives before
+    // the layout has handed the bar its new width, and the text is elided to it.
+    bool eventFilter(QObject *watched, QEvent *event) override;
+    // Dock heights are shared out here rather than in buildDocks, because
+    // resizeDocks divides the space the window has and the window has none
+    // until it is shown.
+    void showEvent(QShowEvent *event) override;
     // The last chance to keep unsaved work, so it is the one place that has to
     // be able to refuse the close.
     void closeEvent(QCloseEvent *event) override;
@@ -76,6 +85,11 @@ public slots:
     void showGeneratedCode();
 
 private slots:
+    // A class the Mod Browser handed over, out of somebody else's mod. It joins
+    // the project as a read only script: it can be read, framed and generated
+    // on screen, and no export writes it. Connected directly, because Graph is
+    // not a registered metatype and a queued connection would drop it.
+    void openBrowsedGraph(const QString &name, const Graph &graph);
     // A text file from the Mod Explorer, in its own editor window.
     void openModFile(const QString &path);
     // A .c from the Mod Explorer, imported and opened as a graph. Falls back to
@@ -124,6 +138,7 @@ private:
     // can close a dock while the page is showing.
     QList<QPointer<QDockWidget>> m_putAwayDocks;
     bool m_putAwayToolBar = false;
+    bool m_docksSized = false;
     QTimer *m_autosaveTimer = nullptr;
     QTabBar *m_tabs;
     QToolButton *m_tabList;
@@ -135,6 +150,11 @@ private:
     MiniMapWidget *m_minimap;
     CodeViewPanel *m_codeView;
     ExplorerPanel *m_explorer;
+    ModBrowserPanel *m_modBrowser = nullptr;
+    // Shown over the canvas while the active script came out of another mod.
+    // The graph is honest about being read only or the user finds out by
+    // exporting it, which is the one moment it must not be a surprise.
+    QLabel *m_readOnlyBar = nullptr;
     // Null until buildDocks runs. syncExplorerRoot is called from in there, and
     // it refreshes this panel too.
     TestPanel *m_testRun = nullptr;
@@ -164,6 +184,24 @@ private:
     void buildDocks();
     void buildTestMenu();
     void buildStatusBar();
+    // Splits the dock columns over the window's real height. Called on the
+    // first show and never again, so a layout the user has dragged stays theirs.
+    void applyDockSizes();
+    // The left column's three slices. Split out because the share the browser
+    // needs depends on whether it is the tab in front, which changes after the
+    // one-time sizing above has run.
+    void applyLeftColumnSizes();
+    // Opens the Mod Browser on the mod named by SUDO_UI_BROWSE and hands its
+    // first class to the canvas, waiting out the scan and the import. For the
+    // headless UI check only: with the variable unset, which is every normal
+    // run, this returns at once.
+    void browseForScreenshot();
+    // The read only bar over the canvas, and the dim tab text that goes with it.
+    void updateReadOnlyBar();
+    // True when the active script came out of another author's mod, in which
+    // case it says so on the status line. Every command that would change the
+    // graph asks this first: a browsed graph is there to be read.
+    bool refuseReadOnlyEdit();
     void buildLayoutActions(QMenu *menu, QToolBar *bar);
     // Recuts the corner mark for the current toolbar height and hides it when
     // the bar has no room for it beside the actions.

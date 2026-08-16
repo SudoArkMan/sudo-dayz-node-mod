@@ -40,6 +40,10 @@ public:
 
     // Folder of the mod currently shown, or empty.
     QString currentMod() const { return m_openFolder; }
+    // True while an import is still being spent a few files at a time. The job
+    // outlives the run so its classes stay clickable, so the timer driving it is
+    // what says whether there is more to do.
+    bool isOpening() const;
 
 public slots:
     void refresh(bool force = false);
@@ -49,6 +53,11 @@ public slots:
     // Selects a mod by folder and starts reading it. False when the scan has
     // not turned that folder up, or the filter is hiding its row.
     bool selectMod(const QString &folder);
+    // Hands over the class on row `row` as if it had been activated, which is
+    // otherwise a double-click. False when the open has produced no such row. A
+    // headless check of the window has no hands, and a picture of the browser
+    // without the graph it produces is half the feature.
+    bool openClassAt(int row);
 
 signals:
     // A class the user activated. Connect this directly: the graph is passed by
@@ -58,6 +67,9 @@ signals:
     void graphRequested(const QString &name, const Graph &graph);
     // One line for the window's status bar.
     void statusChanged(const QString &text);
+    // The mod finished importing and its class list is complete. `ok` is false
+    // for a mod whose pbos gave up nothing, where the status line holds why.
+    void openFinished(const QString &folder, bool ok);
 
 private slots:
     void onFilterChanged();
@@ -79,6 +91,8 @@ private:
     void refreshClassList();
     void setStatus(const QString &text);
     void elideStatus();
+    // Drops the columns a narrow dock has no room for.
+    void fitColumns();
     QString filterText() const;
 
     Document *m_doc;

@@ -5,8 +5,12 @@
 // coming back to it is a switch and not a rebuild, and nothing here is a dead
 // end the user has to dismiss before the app becomes usable.
 //
-// Three columns, in the order the questions get asked: the project you already
-// have, a new one, and a shape to start it from.
+// Three regions, in the order the questions get asked: the project you already
+// have, a new one, and a shape to start it from. Each one is a bounded panel,
+// and the recent list is the only region whose height is not known in advance,
+// so it takes the left column on its own while the two fixed regions stack in
+// the right one. That is what keeps the page whole on a first run, where the
+// left panel holds one line and the right column is still full.
 #pragma once
 
 #include "widgets/newscriptdialog.h"
@@ -16,6 +20,7 @@
 
 class RecentProjects;
 
+class QHBoxLayout;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -81,16 +86,21 @@ private slots:
     void removeSelected();
 
 private:
-    QWidget *buildRecentColumn();
-    QWidget *buildStartColumn();
-    QWidget *buildTemplatesColumn();
+    QWidget *buildRecentPanel();
+    QWidget *buildStartPanel();
+    QWidget *buildTemplatesPanel();
     void rebuildRecent();
     QString selectedPath() const;
 
     RecentProjects *m_recent;
     QLabel *m_lockup;
+    // Holds the two columns. The recent panel's share of the width depends on
+    // whether it has anything in it, so the stretch is set from rebuildRecent.
+    QHBoxLayout *m_columns;
+    QWidget *m_recentPanel;   // aligned to the top while it is empty, see rebuildRecent
     QListWidget *m_list;
-    QLabel *m_listNote;   // stands in for the list while there is nothing in it
+    QWidget *m_empty;         // stands in for the list while there is nothing in it
+    QLabel *m_missingNote;    // footer, only while some entry has moved
     QWidget *m_gallery;
     QWidget *m_firstAction;  // where the keyboard lands when there are no rows
     QVector<StartTemplate> m_templates;

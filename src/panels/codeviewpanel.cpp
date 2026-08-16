@@ -10,6 +10,7 @@
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -31,6 +32,11 @@ namespace {
 
 constexpr int kHeaderHeight = 22;
 constexpr int kButtonHeight = 18;
+// Lines of generated script the pane opens at, and the fewest it will be
+// dragged down to. Fourteen is a short method with its signature and both
+// braces still on screen; six is enough to see that the file moved.
+constexpr int kOpenLines = 14;
+constexpr int kFloorLines = 6;
 // Long enough that dragging a node does not regenerate on every frame, short
 // enough that the file has caught up by the time the eye gets there.
 constexpr int kDebounceMs = 200;
@@ -225,6 +231,12 @@ CodeViewPanel::CodeViewPanel(Document *doc, QWidget *parent)
     outer->addWidget(bar);
     outer->addWidget(m_editor, 1);
 
+    // Carried by the panel rather than by the dock: resizeDocks only gets a say
+    // once the window has a size, and a floor set here also survives a dock the
+    // user has dragged.
+    setMinimumHeight(kHeaderHeight
+                     + QFontMetrics(m_editor->font()).lineSpacing() * kFloorLines);
+
     m_debounce->setSingleShot(true);
     m_debounce->setInterval(kDebounceMs);
     connect(m_debounce, &QTimer::timeout, this, &CodeViewPanel::regenerate);
@@ -250,6 +262,19 @@ CodeViewPanel::CodeViewPanel(Document *doc, QWidget *parent)
                   -1);
     setWarningText(m_warnings, {});
     scheduleRefresh();
+}
+
+int CodeViewPanel::preferredDockHeight() const
+{
+    return kHeaderHeight + QFontMetrics(m_editor->font()).lineSpacing() * kOpenLines;
+}
+
+QSize CodeViewPanel::sizeHint() const
+{
+    // The editor's own hint is a text box's, four hundred odd pixels tall
+    // whatever is in it, and a dock that opens at its widget's hint would take
+    // the canvas's room to say so.
+    return QSize(QWidget::sizeHint().width(), preferredDockHeight());
 }
 
 void CodeViewPanel::setLive(bool live)
@@ -319,6 +344,12 @@ void CodeViewPanel::regenerate()
     hbar->setValue(qMin(scrollX, hbar->maximum()));
     m_syncingCursor = false;
 
+    // Kept because a QPlainTextEdit document is not the file. It drops the
+    // carriage return out of every CRLF break and turns a lone one into a
+    // paragraph, so a string literal holding a return comes back out of
+    // toPlainText() with a real newline inside it. Copy and Save as hand over
+    // these bytes instead.
+    m_code = result.code;
     m_lineOwners = result.lineOwners;
     setHeaderText(m_header, graph->className, m_editor->blockCount());
     setWarningText(m_warnings, result.warnings);
@@ -385,7 +416,7 @@ void CodeViewPanel::revealNode(const QString &nodeId)
 
 void CodeViewPanel::copyAll()
 {
-    QGuiApplication::clipboard()->setText(m_editor->toPlainText());
+    QGuiApplication::clipboard()->setText(m_code);
 }
 
 void CodeViewPanel::saveAs()
@@ -409,7 +440,7 @@ void CodeViewPanel::saveAs()
     // UTF-8 with no BOM: the Enfusion compiler reads a script as plain bytes
     // and a BOM lands in the first token.
     QSaveFile out(path);
-    const QByteArray bytes = m_editor->toPlainText().toUtf8();
+    const QByteArray bytes = m_code.toUtf8();
     if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size()
         || !out.commit()) {
         QMessageBox::warning(this, tr("Save generated script"),

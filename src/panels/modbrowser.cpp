@@ -104,6 +104,11 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     m_mods->header()->setSectionResizeMode(1, QHeaderView::Interactive);
     m_mods->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_mods->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    // A scroll area asks for several rows and a scrollbar, and two of them
+    // stacked here set the floor under the whole left column: the window cannot
+    // be shorter than the sum of what its docks demand. One row and a header is
+    // a floor, not a target, and the weights in the window decide the rest.
+    m_mods->setMinimumHeight(44);
     split->addWidget(m_mods);
 
     m_classes->setColumnCount(3);
@@ -116,10 +121,14 @@ ModBrowserPanel::ModBrowserPanel(Document *doc, QWidget *parent)
     m_classes->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_classes->header()->setSectionResizeMode(1, QHeaderView::Interactive);
     m_classes->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_classes->setMinimumHeight(44);
     split->addWidget(m_classes);
 
-    split->setStretchFactor(0, 3);
-    split->setStretchFactor(1, 2);
+    // Even. The mod list is scrolled once to pick a mod and the class list is
+    // what you work in after that, so 3:2 in the mod list's favour left the
+    // class list at one row on a short window while the mod list had four.
+    split->setStretchFactor(0, 1);
+    split->setStretchFactor(1, 1);
     layout->addWidget(split, 1);
 
     auto *foot = new QHBoxLayout;
@@ -211,6 +220,20 @@ bool ModBrowserPanel::selectMod(const QString &folder)
         return true;
     }
     return false;
+}
+
+bool ModBrowserPanel::isOpening() const
+{
+    return m_openTimer->isActive();
+}
+
+bool ModBrowserPanel::openClassAt(int row)
+{
+    if (row < 0 || row >= m_classes->topLevelItemCount()) return false;
+    QTreeWidgetItem *item = m_classes->topLevelItem(row);
+    m_classes->setCurrentItem(item);
+    onClassActivated(item, 0);
+    return true;
 }
 
 void ModBrowserPanel::onFilterChanged()
@@ -323,10 +346,12 @@ void ModBrowserPanel::startOpen(const ModEntry &mod)
 
     if (!mod.hasScripts()) {
         setStatus(tr("%1 ships no script, so there is nothing to open here.").arg(mod.name));
+        emit openFinished(mod.folder, false);
         return;
     }
     if (!m_doc || !m_doc->catalog().isLoaded()) {
         setStatus(tr("The node catalogue is not loaded, so scripts cannot be read yet."));
+        emit openFinished(mod.folder, false);
         return;
     }
 
@@ -378,6 +403,7 @@ void ModBrowserPanel::stepOpen()
 
     if (!result.ok) {
         setStatus(result.error);
+        emit openFinished(result.folder, false);
         return;
     }
 
@@ -400,6 +426,7 @@ void ModBrowserPanel::stepOpen()
                       : countLabel(result.notes.size(), tr("note"), tr("notes")));
     if (result.truncated) parts << tr("stopped at the file cap");
     setStatus(parts.join(QStringLiteral(", ")));
+    emit openFinished(result.folder, true);
 }
 
 void ModBrowserPanel::refreshClassList()
@@ -490,4 +517,17 @@ void ModBrowserPanel::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     elideStatus();
+    fitColumns();
+}
+
+void ModBrowserPanel::fitColumns()
+{
+    // Four columns in a dock this narrow leaves the name, which is the column
+    // you are reading, about thirty pixels and an ellipsis. The name and the
+    // share modelled are what the list is for; the rest go when there is no
+    // room for them, and the row's tooltip still carries the author.
+    const int w = width();
+    m_mods->setColumnHidden(1, w < 440);
+    m_mods->setColumnHidden(2, w < 360);
+    m_classes->setColumnHidden(1, w < 400);
 }

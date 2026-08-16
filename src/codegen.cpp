@@ -2015,3 +2015,24 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     result.warnings = ctx.warnings;
     return result;
 }
+
+QString assembleScriptFile(const QStringList &classes, const QString &preamble,
+                           const QString &eol)
+{
+    QString text = preamble;
+    // The preamble is stored as the author wrote it, so it can arrive with any
+    // number of endings on it. They are taken off and two bare ones put back,
+    // because the ending is decided once at the bottom of this function.
+    while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r')))
+        text.chop(1);
+    if (!text.isEmpty()) text += QStringLiteral("\n\n");
+
+    for (int i = 0; i < classes.size(); ++i) {
+        if (i > 0) text += QLatin1Char('\n');
+        text += classes.at(i);
+    }
+    // Runs over the generated classes a second time, which costs nothing:
+    // withEol leaves a newline already behind a carriage return alone, so it
+    // writes the same bytes however often it is applied.
+    return nodefmt::withEol(text, eol);
+}

@@ -22,6 +22,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPen>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -70,12 +71,81 @@ QWidget *ruleLine(QWidget *parent)
     return line;
 }
 
-QLabel *columnHeading(const QString &text, QWidget *parent)
+// The app sheet names a colour for QLabel, and a sheet beats setPalette, so a
+// label that wants the muted grey has to ask for it the same way.
+void dimLabel(QLabel *label)
 {
-    auto *label = new QLabel(text, parent);
-    label->setFont(theme::uiFont(10, true));
-    return label;
+    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme::textDim().name()));
 }
+
+// A scrolling view whose height asks for what is in it.
+//
+// QScrollArea's own hint is its widget's, taken once and then capped at two
+// dozen lines whatever the widget says afterwards, so a panel sized from it
+// comes out tall enough for a gallery three times the one that ships. The
+// minimum stays QScrollArea's, which is what lets the page shrink: the tiles
+// scroll rather than the window growing to fit them.
+class TileScroll : public QScrollArea {
+public:
+    using QScrollArea::QScrollArea;
+
+    QSize sizeHint() const override
+    {
+        const QWidget *inner = widget();
+        if (!inner) return QScrollArea::sizeHint();
+        const QSize want = inner->sizeHint();
+        return QSize(want.width() + frameWidth() * 2, want.height() + frameWidth() * 2);
+    }
+
+protected:
+    // A scroll area's widget is not in any layout of ours, so nothing carries
+    // its change of mind outwards: the tiles settle on a height, and the panel
+    // is still sized from what they asked for before they had a width.
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == widget() && event->type() == QEvent::LayoutRequest)
+            updateGeometry();
+        return QScrollArea::eventFilter(watched, event);
+    }
+};
+
+// One region of the page: a heading, a hairline, and a body.
+//
+// All three regions get one. With a container on the recent list alone, that
+// column reads as a panel and the other two as stacks floating on the ground,
+// which is the same page whatever is in them.
+class StartPanel : public QFrame {
+public:
+    StartPanel(const QString &title, QWidget *parent)
+        : QFrame(parent), m_body(new QVBoxLayout)
+    {
+        setObjectName(QStringLiteral("startPanel"));
+        // Id selector: the rule has to land on the panel and not on the cards
+        // and lists inside it, which carry their own faces.
+        setStyleSheet(QStringLiteral("#startPanel { background: %1; "
+                                     "border: 1px solid %2; border-radius: 3px; }")
+                          .arg(theme::panelBg().name(), theme::border().name()));
+
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(12, 9, 12, 12);
+        layout->setSpacing(8);
+
+        auto *heading = new QLabel(title, this);
+        heading->setFont(theme::uiFont(10, true));
+        layout->addWidget(heading);
+        layout->addWidget(ruleLine(this));
+
+        m_body->setContentsMargins(0, 0, 0, 0);
+        m_body->setSpacing(8);
+        layout->addLayout(m_body, 1);
+    }
+
+    // Where a caller puts the region's content.
+    QVBoxLayout *body() const { return m_body; }
+
+private:
+    QVBoxLayout *m_body;
+};
 
 // One card, used for both the actions and the template tiles.
 //
@@ -90,10 +160,13 @@ public:
     {
         setFocusPolicy(Qt::StrongFocus);
         setCursor(Qt::PointingHandCursor);
-        // Minimum rather than Fixed: a Fixed policy caps the item's height at
-        // its size hint, and the hint cannot know the column width the summary
-        // will actually wrap to.
-        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+        // Shrinkable on purpose. A Minimum policy takes its floor from the size
+        // hint, and the hint of a card that has not been laid out yet is the
+        // five or six lines its summary wraps to at 200 pixels wide. A column of
+        // those puts the whole page's minimum height above the window, and a
+        // window that has been grown to fit a transient measurement never
+        // shrinks back. The floor is minimumSizeHint below instead.
+        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         policy.setHeightForWidth(true);
         setSizePolicy(policy);
         setToolTip(m_summary);
@@ -107,11 +180,30 @@ public:
         update();
     }
 
+    // Measured at the card's own width once it has one. The narrow figure is
+    // only for a card that has never been laid out.
+    //
+    // The width matters as much as the height here: a column's preferred height
+    // is its preferred height at its own preferred WIDTH, so a card that keeps
+    // asking for 200 pixels makes the column reserve the five or six lines a
+    // summary wraps to at 200 pixels, three times what it draws at.
     QSize sizeHint() const override
     {
-        const int width = qMax(200, QFontMetrics(theme::uiFont(9, true))
-                                        .horizontalAdvance(m_title) + kCardPadding * 2);
-        return QSize(width, heightForWidth(width));
+        const int unlaid = qMax(200, QFontMetrics(theme::uiFont(9, true))
+                                         .horizontalAdvance(m_title)
+                                     + kCardPadding * 2);
+        const int measured = width() > unlaid ? width() : unlaid;
+        return QSize(measured, heightForWidth(measured));
+    }
+
+    // Title, and one line of the summary to say there is more. A card squeezed
+    // this far elides rather than the page growing a scroll bar.
+    QSize minimumSizeHint() const override
+    {
+        const QFontMetrics titleMetrics(theme::uiFont(9, true));
+        const QFontMetrics bodyMetrics(theme::uiFont(8));
+        return QSize(140, kCardPadding * 2 + titleMetrics.height() + 3
+                              + bodyMetrics.lineSpacing());
     }
 
     bool hasHeightForWidth() const override { return true; }
@@ -130,15 +222,26 @@ protected:
     void enterEvent(QEnterEvent *) override { update(); }
     void leaveEvent(QEvent *) override { update(); }
 
+    // The hint depends on the width, so a width the card did not have when the
+    // column was last measured has to be handed back to the column.
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QAbstractButton::resizeEvent(event);
+        if (event->oldSize().width() != event->size().width()) updateGeometry();
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
 
         const bool on = isEnabled();
-        QColor fill = theme::panelBg();
+        // The card sits on a panel, so its face is the step above the panel
+        // body. Filling it with the panel colour would leave the border doing
+        // the whole job of saying where the card is.
+        QColor fill = theme::headerBg();
         if (on && isDown()) fill = theme::accent().darker(210);
-        else if (on && underMouse()) fill = theme::headerBg();
+        else if (on && underMouse()) fill = theme::headerBg().lighter(118);
 
         QColor edge = theme::border();
         if (on && hasFocus()) edge = theme::accent();
@@ -354,9 +457,10 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
 }
 
 StartPage::StartPage(RecentProjects *recent, QWidget *parent)
-    : QWidget(parent), m_recent(recent), m_lockup(nullptr), m_list(nullptr),
-      m_listNote(nullptr), m_gallery(nullptr), m_firstAction(nullptr),
-      m_templates(startTemplates())
+    : QWidget(parent), m_recent(recent), m_lockup(nullptr), m_columns(nullptr),
+      m_recentPanel(nullptr), m_list(nullptr), m_empty(nullptr),
+      m_missingNote(nullptr), m_gallery(nullptr),
+      m_firstAction(nullptr), m_templates(startTemplates())
 {
     setObjectName(QStringLiteral("startPage"));
     // The lockup is drawn on the pack's own ground, so the page has to be that
@@ -367,7 +471,7 @@ StartPage::StartPage(RecentProjects *recent, QWidget *parent)
     setAutoFillBackground(true);
 
     auto *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(24, 20, 24, 20);
+    outer->setContentsMargins(24, 18, 24, 18);
     outer->setSpacing(14);
 
     auto *header = new QHBoxLayout;
@@ -381,52 +485,94 @@ StartPage::StartPage(RecentProjects *recent, QWidget *parent)
     auto *version = new QLabel(
         QStringLiteral("v%1").arg(QCoreApplication::applicationVersion()), this);
     version->setFont(theme::monoFont(8));
-    QPalette dim = version->palette();
-    dim.setColor(QPalette::WindowText, theme::textDim());
-    version->setPalette(dim);
+    dimLabel(version);
     header->addWidget(version, 0, Qt::AlignRight | Qt::AlignBottom);
     outer->addLayout(header);
     outer->addWidget(ruleLine(this));
 
-    auto *columns = new QHBoxLayout;
-    columns->setContentsMargins(0, 0, 0, 0);
-    columns->setSpacing(20);
-    columns->addWidget(buildRecentColumn(), 4);
-    columns->addWidget(buildStartColumn(), 3);
-    columns->addWidget(buildTemplatesColumn(), 4);
-    outer->addLayout(columns, 1);
+    // Two columns rather than three. The recent list is the one region that
+    // grows with use, so it gets a column to itself and the two whose contents
+    // are known in advance stack in the other, which fills the right column at
+    // any window size the app runs at.
+    m_columns = new QHBoxLayout;
+    m_columns->setContentsMargins(0, 0, 0, 0);
+    m_columns->setSpacing(16);
+    m_recentPanel = buildRecentPanel();
+    m_columns->addWidget(m_recentPanel, 5);
+
+    auto *right = new QVBoxLayout;
+    right->setContentsMargins(0, 0, 0, 0);
+    right->setSpacing(14);
+    // Start takes its own height and templates take the rest, so a tile added
+    // later lands in room that is already there.
+    right->addWidget(buildStartPanel(), 0);
+    right->addWidget(buildTemplatesPanel(), 1);
+    m_columns->addLayout(right, 4);
+
+    // The panels take the height they have content for and the page keeps the
+    // rest, rather than three regions stretched to the bottom of whatever
+    // window this is with a third of each one empty inside. Weighted towards
+    // the bottom so the block sits above the middle, where a page is read from.
+    outer->addStretch(2);
+    outer->addLayout(m_columns, 0);
+    outer->addStretch(3);
 
     rebuildRecent();
 }
 
-QWidget *StartPage::buildRecentColumn()
+QWidget *StartPage::buildRecentPanel()
 {
-    auto *column = new QWidget(this);
-    auto *layout = new QVBoxLayout(column);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    layout->addWidget(columnHeading(QStringLiteral("Recent projects"), column));
+    auto *panel = new StartPanel(QStringLiteral("Recent projects"), this);
 
-    m_list = new QListWidget(column);
+    m_list = new QListWidget(panel);
     m_list->setItemDelegate(new RecentDelegate(m_list));
     m_list->setUniformItemSizes(true);
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
     m_list->setContextMenuPolicy(Qt::CustomContextMenu);
     m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    layout->addWidget(m_list, 1);
+    m_list->setFrameShape(QFrame::NoFrame);
+    // The panel is the container. Left at the app sheet's framed ground the
+    // list would be a second box drawn inside the first one.
+    m_list->setStyleSheet(
+        QStringLiteral("QListWidget { background: transparent; border: none; }"));
+    panel->body()->addWidget(m_list, 1);
 
-    m_listNote = new QLabel(column);
-    m_listNote->setWordWrap(true);
-    m_listNote->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    m_listNote->setContentsMargins(2, 4, 2, 0);
-    QPalette dim = m_listNote->palette();
-    dim.setColor(QPalette::WindowText, theme::textDim());
-    m_listNote->setPalette(dim);
-    layout->addWidget(m_listNote);
-    // Takes the space when the list is hidden, which is the first run. Without
-    // it the column has nothing that wants to grow and the heading drifts to
-    // the middle of an empty page.
-    layout->addStretch(0);
+    // A first run is the page most people see first, so the empty list says
+    // what will be here and where to start rather than leaving a blank panel.
+    m_empty = new QWidget(panel);
+    auto *emptyLayout = new QVBoxLayout(m_empty);
+    // The inset does the job a maximum width would: a wrapped label measured at
+    // one width and then held to a narrower one loses its last line.
+    emptyLayout->setContentsMargins(48, 0, 48, 0);
+    emptyLayout->setSpacing(6);
+    emptyLayout->addStretch(1);
+
+    auto *headline = new QLabel(QStringLiteral("Nothing opened yet"), m_empty);
+    headline->setFont(theme::uiFont(10, true));
+    headline->setAlignment(Qt::AlignCenter);
+    emptyLayout->addWidget(headline);
+
+    auto *hint = new QLabel(
+        QStringLiteral("Projects you open are listed here, newest first, with the "
+                       "mod they belong to and what is in them. Start one on the "
+                       "right, or open a .sdzn you already have."),
+        m_empty);
+    hint->setFont(theme::uiFont(9));
+    hint->setWordWrap(true);
+    hint->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    dimLabel(hint);
+    emptyLayout->addWidget(hint);
+    // Weighted, not even: text sitting on the true centre of a tall panel reads
+    // as low, and the panel is at its tallest exactly when this is showing.
+    emptyLayout->addStretch(2);
+    panel->body()->addWidget(m_empty, 1);
+
+    m_missingNote = new QLabel(panel);
+    m_missingNote->setFont(theme::uiFont(8));
+    m_missingNote->setWordWrap(true);
+    m_missingNote->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    dimLabel(m_missingNote);
+    panel->body()->addWidget(m_missingNote);
 
     // Activation only, not doubleClicked as well: a double click emits both, and
     // opening the project twice would ask twice about anything the first open
@@ -443,66 +589,62 @@ QWidget *StartPage::buildRecentColumn()
     connect(forget, &QAction::triggered, this, &StartPage::removeSelected);
     m_list->addAction(forget);
 
-    return column;
+    return panel;
 }
 
-QWidget *StartPage::buildStartColumn()
+QWidget *StartPage::buildStartPanel()
 {
-    auto *column = new QWidget(this);
-    auto *layout = new QVBoxLayout(column);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    layout->addWidget(columnHeading(QStringLiteral("Start"), column));
+    auto *panel = new StartPanel(QStringLiteral("Start"), this);
+    QVBoxLayout *body = panel->body();
 
     auto *newProject = new StartCard(
         QStringLiteral("New project"),
         QStringLiteral("A bare graph with nothing on disk behind it. Save it "
                        "wherever you want it."),
-        column);
+        panel);
     connect(newProject, &QAbstractButton::clicked,
             this, &StartPage::newProjectRequested);
-    layout->addWidget(newProject);
+    body->addWidget(newProject);
     m_firstAction = newProject;
 
     auto *newMod = new StartCard(
         QStringLiteral("New mod"),
         QStringLiteral("Writes the whole mod folder from the bundled template, "
                        "config and all, then opens a project inside it."),
-        column);
+        panel);
     connect(newMod, &QAbstractButton::clicked, this, &StartPage::newModRequested);
-    layout->addWidget(newMod);
+    body->addWidget(newMod);
 
     auto *open = new StartCard(
         QStringLiteral("Open project"),
         QStringLiteral("Any .sdzn on this machine. The dialog starts in the folder "
                        "you used last."),
-        column);
+        panel);
     connect(open, &QAbstractButton::clicked, this, &StartPage::browseRequested);
-    layout->addWidget(open);
+    body->addWidget(open);
 
-    layout->addStretch(1);
-    return column;
+    return panel;
 }
 
-QWidget *StartPage::buildTemplatesColumn()
+QWidget *StartPage::buildTemplatesPanel()
 {
-    auto *column = new QWidget(this);
-    auto *layout = new QVBoxLayout(column);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    layout->addWidget(columnHeading(QStringLiteral("Templates"), column));
+    auto *panel = new StartPanel(QStringLiteral("Templates"), this);
 
-    auto *scroll = new QScrollArea(column);
+    auto *scroll = new TileScroll(panel);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->viewport()->setAutoFillBackground(false);
+    // The app sheet gives a scroll area the panel colour, which is the colour
+    // already behind it here.
+    scroll->setStyleSheet(
+        QStringLiteral("QScrollArea { background: transparent; border: none; }"));
 
     m_gallery = new QWidget(scroll);
-    // Painted rather than left to show the page through, so grabbing the
-    // column on its own gives a picture with a background on it.
+    // Painted rather than left to show the panel through, so grabbing the
+    // gallery on its own gives a picture with a background on it.
     QPalette ground = m_gallery->palette();
-    ground.setColor(QPalette::Window, theme::windowBg());
+    ground.setColor(QPalette::Window, theme::panelBg());
     m_gallery->setPalette(ground);
     m_gallery->setAutoFillBackground(true);
     auto *tiles = new QVBoxLayout(m_gallery);
@@ -525,8 +667,8 @@ QWidget *StartPage::buildTemplatesColumn()
     tiles->addStretch(1);
 
     scroll->setWidget(m_gallery);
-    layout->addWidget(scroll, 1);
-    return column;
+    panel->body()->addWidget(scroll, 1);
+    return panel;
 }
 
 void StartPage::refresh()
@@ -576,21 +718,33 @@ void StartPage::rebuildRecent()
     // Removing the last row takes the list off the page, and with it the widget
     // the keyboard was on.
     const bool hadFocus = m_list->hasFocus();
-    m_list->setVisible(m_list->count() > 0);
-    if (m_list->count() == 0 && hadFocus && m_firstAction)
+    const bool any = m_list->count() > 0;
+    m_list->setVisible(any);
+    m_empty->setVisible(!any);
+    if (!any && hadFocus && m_firstAction)
         m_firstAction->setFocus(Qt::OtherFocusReason);
 
-    if (m_list->count() == 0) {
-        m_listNote->setText(QStringLiteral("Nothing opened yet. Start a project on "
-                                           "the right, or open one you already have."));
-    } else if (missing > 0) {
-        m_listNote->setText(QStringLiteral("%1 of these is not where it was. Right "
-                                           "click it to drop it from the list.")
-                                .arg(missing));
-    } else {
-        m_listNote->clear();
-    }
-    m_listNote->setVisible(!m_listNote->text().isEmpty());
+    // An empty panel does not need the wider half of the page, and giving the
+    // width back is what keeps a first run from reading as a page of nothing
+    // with the working half squeezed into a third of it.
+    if (m_columns) m_columns->setStretch(0, any ? 5 : 3);
+
+    // Nor does it need the height. The two columns are laid out side by side, so
+    // left to itself this panel is stretched to whatever Start and Templates add
+    // up to, and two recent projects then sit at the top of a box with three
+    // hundred empty pixels under them. Capped at the list's own rows and aligned
+    // to the top, the panel is the size of what is in it, and it grows with the
+    // list up to about the height the other column has anyway.
+    const int rowHeight = qMax(1, m_list->sizeHintForRow(0));
+    m_list->setMaximumHeight(qBound(rowHeight, m_list->count() * rowHeight + 4, 520));
+    if (m_columns && m_recentPanel)
+        m_columns->setAlignment(m_recentPanel, Qt::AlignTop);
+
+    m_missingNote->setText(
+        missing > 0 ? QStringLiteral("%1 of these is not where it was. Right click it "
+                                     "to drop it from the list.").arg(missing)
+                    : QString());
+    m_missingNote->setVisible(missing > 0);
 }
 
 QString StartPage::selectedPath() const

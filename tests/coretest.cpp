@@ -505,6 +505,55 @@ int main(int argc, char *argv[])
         out << "       (Showcase.sdzn not present, skipped)" << Qt::endl;
     }
 
+    // A file is more than one class. The generator answers for a class, so the
+    // preamble and the line between two classes are assembleScriptFile's own
+    // and it is the only thing that can put the file's ending on them. Before
+    // this existed, a CRLF file holding two classes came back holding both
+    // endings, and so did any CRLF file with an enum above its class. 759 and
+    // 451 real files respectively.
+    out << "one file out of several classes" << Qt::endl;
+    {
+        const QString a = QStringLiteral("class A\n{\n\tint x;\n};\n");
+        const QString b = QStringLiteral("class B\n{\n\tint y;\n};\n");
+        const QString enumAbove = QStringLiteral("enum EMode\n{\n\tOff,\n\tOn\n}\n");
+
+        const QString lf = assembleScriptFile({a, b}, QString(), QStringLiteral("\n"));
+        check(!lf.contains(QLatin1Char('\r')), QStringLiteral("an LF file stays LF"));
+        check(lf.contains(QStringLiteral("};\n\nclass B")),
+              QStringLiteral("one blank line between two classes"));
+
+        const QString crlf =
+            assembleScriptFile({nodefmt::withEol(a, QStringLiteral("\r\n")),
+                                nodefmt::withEol(b, QStringLiteral("\r\n"))},
+                               QString(), QStringLiteral("\r\n"));
+        check(crlf.count(QLatin1Char('\n')) == crlf.count(QStringLiteral("\r\n")),
+              QStringLiteral("a CRLF file holding two classes has no bare newline"));
+        check(crlf == nodefmt::withEol(lf, QStringLiteral("\r\n")),
+              QStringLiteral("the two spellings differ only in their endings"));
+
+        const QString withPre =
+            assembleScriptFile({nodefmt::withEol(a, QStringLiteral("\r\n"))}, enumAbove,
+                               QStringLiteral("\r\n"));
+        check(withPre.count(QLatin1Char('\n')) == withPre.count(QStringLiteral("\r\n")),
+              QStringLiteral("a preamble above the class carries the ending too"));
+        check(withPre.startsWith(QStringLiteral("enum EMode\r\n")),
+              QStringLiteral("the preamble is still what the author wrote"));
+        check(withPre.contains(QStringLiteral("}\r\n\r\nclass A")),
+              QStringLiteral("one blank line between the preamble and the class"));
+
+        // Whatever endings the preamble arrives with, the answer is the file's.
+        check(assembleScriptFile({a}, enumAbove + QStringLiteral("\n\n\n"),
+                                 QStringLiteral("\n"))
+                  == assembleScriptFile({a}, enumAbove, QStringLiteral("\n")),
+              QStringLiteral("trailing blank lines on a preamble do not stack up"));
+
+        // A source that mixed them has no answer that reproduces it, so nothing
+        // is invented: it comes back on bare newlines.
+        check(!assembleScriptFile({a, b}, enumAbove, QString())
+                   .contains(QLatin1Char('\r')),
+              QStringLiteral("a file that mixed endings is left on bare newlines"));
+    }
+
     out << "analysis" << Qt::endl;
     if (opened) {
         int totalErrors = 0, totalWarnings = 0;
