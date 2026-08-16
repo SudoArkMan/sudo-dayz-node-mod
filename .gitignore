@@ -10,3 +10,6 @@ livecode*.png
 vars.png
 code1.png
 FINDINGS.json
+
+# Screenshots written by the test targets and by --screenshot
+/*.png

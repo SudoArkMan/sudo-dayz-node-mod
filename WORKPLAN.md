@@ -65,10 +65,17 @@ The template supplies both halves already: `Missions/<Mod>.ChernarusPlus` for th
 `Workbench/server.cfg` for the server, with `allowFilePatching = 1` set.
 
 The UI must say what offline cannot show, because finding out by chasing a bug that only exists
-offline is the expensive way to learn it: a server-only mod chain (`-serverMod=`) is not applied,
-anything that depends on a second client cannot happen, and COT's permissions need the per-player
-files a server writes on first boot. Verify that list against the tooling before printing it as
-fact rather than repeating it from here.
+offline is the expensive way to learn it. The list in `offlineLimits()` is the checked one and the
+citations sit in `testrun.h`. Two corrections to what was guessed here first:
+
+- **COT permissions do not fail closed offline, they fail open.** The guess was that the per-player
+  files a server writes on first boot are missing. The real behaviour, read out of COT's own
+  `scripts.pbo`: `JMPermissionManager::HasPermission` opens with `if ( IsMissionOffline() ) return
+  true;`, and roles load only under `IsServer() && IsMultiplayer()`. So a permission-gated feature
+  *always opens* offline, which is the more dangerous direction: it works on your machine and locks
+  players out on the server.
+- **`-serverMod=` was dropped, not confirmed.** It is not an offline-versus-dev-server difference the
+  way this app is built, because neither mode passes a server-only chain.
 
 ## PBO notes
 
