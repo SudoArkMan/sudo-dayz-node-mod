@@ -84,6 +84,12 @@ public slots:
     // Puts what the mod library has found on the start page's Read a mod card.
     void updateModLibraryLine();
     void exportScripts();
+    // Closes the tab in front. A script lives only inside the project, so this
+    // takes it out of the project; the .c it was imported from is left alone.
+    void closeActiveScript();
+    // Puts the last closed script back where it was, newest first. The stack is
+    // this session's, so it empties when a project is opened or started.
+    void reopenClosedScript();
     // Writes the active script back to the .c it was imported from, asking for
     // a file only when it never came from one.
     void saveScriptFile();
@@ -151,6 +157,9 @@ private:
     QTimer *m_autosaveTimer = nullptr;
     QTabBar *m_tabs;
     QToolButton *m_tabList;
+    // Lives in the File menu and is re-labelled every time the project changes,
+    // so it names the script it would bring back.
+    QAction *m_reopenAction = nullptr;
     PalettePanel *m_palette;
     EventsPanel *m_events;
     OutlinerPanel *m_outliner;
@@ -253,8 +262,26 @@ private:
     // The same search opened by letting a wire go over empty canvas, narrowed
     // to nodes that pin could connect to, with promoting it to a member first.
     void showConnectSearch(const PinRef &from, const QPointF &scenePos);
-    // Every script in the project, for when the tab bar cannot show them all.
+    // Every script in the project, filtered as you type, for when the tab bar
+    // cannot show them all. The bar scrolls past about eight tabs and a bar you
+    // have to scroll is not a way to find anything.
     void showTabList();
+    // The right-click menu on one tab: what to close, and the list above.
+    void showTabMenu(const QPoint &pos);
+    // The same menu without showing it, so the screenshot hook can open it the
+    // way the right-click does. Heap allocated and deletes itself on close.
+    QMenu *buildTabMenu(int index);
+    // Closes a run of tabs as one gesture, named by script id.
+    //
+    // A script read out of another author's mod costs nothing to close: the Mod
+    // Browser has it whenever it is wanted again. Everything else is the user's
+    // and is asked about, once for the gesture rather than once per tab. Ids
+    // that no longer resolve are skipped, so a stale menu closes nothing by
+    // surprise.
+    void closeScripts(const QStringList &ids);
+    // Enables Reopen closed script and puts the name of what it would bring back
+    // on it, so the entry is never an offer with nothing behind it.
+    void updateReopenAction();
     // Save, Discard, Cancel over unsaved work, where `action` names what is
     // about to happen. False means the user cancelled and the caller must stop:
     // a Cancel that is treated as a yes destroys exactly the work the prompt

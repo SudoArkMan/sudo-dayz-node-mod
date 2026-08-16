@@ -1,0 +1,44 @@
+// The one place the version comes from.
+//
+// CMake configures this file out of the project() version at the top of
+// CMakeLists.txt. Nothing else in the tree may spell a version number: the
+// window title, the About box, the start page, the update check and the .exe
+// file properties all read it from here, and a release bumps one line.
+//
+// Deliberately free of Qt. nodemod_core is a Qt Core tier and several console
+// tests stop there, so a QString in this header would put Qt Gui in front of
+// targets that get by without it. Callers wrap it themselves; main.cpp hands it
+// to QCoreApplication::setApplicationVersion and every other reader takes it
+// from there.
+#pragma once
+
+// The same string as a macro, for the places that want one: the Windows
+// resource script reads its own copy, and a QStringLiteral wants a literal
+// rather than a constexpr pointer. Including this header is the only way to get
+// it. It used to arrive as a compile definition on every target, which meant a
+// file could use it without saying where it came from.
+#define NODEMOD_VERSION "@NODEMOD_VERSION@"
+
+namespace nodemod {
+
+// "0.1.0", or "0.2.0-rc.1" when the project version carries a suffix. Ordered
+// by parseVersion in update.h, which is semver ordering rather than string
+// ordering, so 0.10.0 outranks 0.9.0 the way it should.
+inline constexpr const char *kVersion = "@NODEMOD_VERSION@";
+
+// The three numbers on their own, for a comparison that wants no parse.
+inline constexpr int kVersionMajor = @PROJECT_VERSION_MAJOR@;
+inline constexpr int kVersionMinor = @PROJECT_VERSION_MINOR@;
+inline constexpr int kVersionPatch = @PROJECT_VERSION_PATCH@;
+
+// The tag a release of this version is published under. The update check
+// parses a leading 'v' off a tag, so this is the spelling and not the version.
+inline constexpr const char *kReleaseTag = "v@NODEMOD_VERSION@";
+
+// Where the update check looks when nothing has been configured. Settings
+// override both, which is why update.h exposes them as functions rather than
+// baking them into a URL.
+inline constexpr const char *kUpdateOwner = "@NODEMOD_UPDATE_OWNER@";
+inline constexpr const char *kUpdateRepository = "@NODEMOD_UPDATE_REPO@";
+
+} // namespace nodemod

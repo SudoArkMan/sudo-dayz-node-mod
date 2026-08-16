@@ -1,12 +1,10 @@
 # DayZ Expansion, read against the files
 
-DayZ Expansion (experimental branch) is the largest DayZ mod there is: **1,963 `.c` files, 337,448 lines of Enforce Script, 349 `config.cpp` files, 233 `.layout` files, 25 preload addons.** Every claim below was checked against the unpacked tree at
+Research behind several decisions in this project, kept because the measurements are the reason those decisions are what they are. The palette's group ordering in `src/nodeindex.cpp` comes from the counts below, and so do a number of the cautions written on individual nodes.
 
-```
-.../scratchpad/expansion/DayZ-Expansion-Scripts-experimental
-```
+DayZ Expansion (experimental branch) is the largest DayZ mod there is: **1,963 `.c` files, 337,448 lines of Enforce Script, 349 `config.cpp` files, 233 `.layout` files, 25 preload addons.** Every claim below was checked against a working copy of the `DayZ-Expansion-Scripts` experimental branch, unpacked locally, and every path is relative to the root of that tree. Vanilla cross-checks are against `P:/scripts` and `P:/gui`. Where a count is given, it was recounted here rather than inherited.
 
-and every path is relative to that root. Vanilla cross-checks are against `P:/scripts` and `P:/gui`. Where a count is given, it was recounted here rather than inherited.
+None of Expansion's own source is reproduced here. What is quoted is a path, a line number and a count.
 
 ---
 
@@ -480,9 +478,9 @@ The most human artefact in the corpus, at `DayZExpansion/BaseBuilding/Scripts/4_
 
 ---
 
-## For the node tool
+## What this means for the node tool
 
-Ranked by the count behind each. Everything here targets `C:/Users/dilla/Documents/DAYZSUDONodeMod`.
+The rest of this file is a work list for SUDO DayZ Node Mod, ranked by the count behind each item. Some of it is built and some is not; the paths are into this repository, and where one names a line number it was true when the item was written rather than being kept current.
 
 **1. A `fmt.braces` option on branch nodes. 10,654 sites.**
 45.0 percent of Expansion's control-flow headers that stand on their own line are written without braces (10,654 of 23,688). `src/codegen.cpp:765-781` emits `{` and `}` for `bi.branch` unconditionally and there is no opt-out. `nodefmt` already carries `fmt.base`, `fmt.unit`, `trivia.before`, `trivia.trailing`, `trivia.end` and `trivia.endElse` on the node; a `fmt.braces` key beside them is the cheapest large win available, and by the tool-fit harness it is worth roughly twelve points on the method import rate on its own.

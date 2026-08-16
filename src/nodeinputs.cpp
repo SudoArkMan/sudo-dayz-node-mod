@@ -1,5 +1,6 @@
 #include "nodeinputs.h"
 
+#include "builtins.h"
 #include "document.h"
 
 QString pinTypeName(const PinType &type)
@@ -107,6 +108,58 @@ void setNodeInput(Document *doc, const QString &nodeId, const QString &pinId,
     graph = doc->activeGraph();
     if (GraphNode *live = graph ? graph->node(nodeId) : nullptr)
         live->inputs.insert(pinId, value);
+    doc->commitEdit();
+}
+
+int nodeListCount(const Document &doc, const QString &nodeId)
+{
+    const Graph *graph = doc.activeGraph();
+    const GraphNode *node = graph ? graph->node(nodeId) : nullptr;
+    if (!node) return 0;
+    const NodeDef def = doc.defForNode(*node);
+    if (!def.list.valid()) return 0;
+    return bi::listCount(*node, def.list);
+}
+
+void setNodeListCount(Document *doc, const QString &nodeId, int count)
+{
+    Graph *graph = doc ? doc->activeGraph() : nullptr;
+    const GraphNode *node = graph ? graph->node(nodeId) : nullptr;
+    if (!node) return;
+    const NodeDef def = doc->defForNode(*node);
+    if (!def.list.valid()) return;
+    const int now = bi::listCount(*node, def.list);
+    const int wanted = qBound(def.list.min, count, def.list.max);
+    if (wanted == now) return;
+
+    doc->beginEdit(QStringLiteral("Change element count"));
+    // Re-resolved after the snapshot: taking a copy of the graph can reallocate
+    // the node vector, and the pointer above would then be into freed memory.
+    graph = doc->activeGraph();
+    if (graph) {
+        for (int i = wanted; i < now; ++i)
+            removePin(*graph, nodeId, bi::listPinId(def.list, i));
+        if (GraphNode *live = graph->node(nodeId))
+            live->opts.insert(def.list.countOpt, QString::number(wanted));
+    }
+    doc->commitEdit();
+}
+
+void setNodeOption(Document *doc, const QString &nodeId, const QString &key,
+                   const QString &value)
+{
+    Graph *graph = doc ? doc->activeGraph() : nullptr;
+    const GraphNode *node = graph ? graph->node(nodeId) : nullptr;
+    if (!node) return;
+    const bool had = node->opts.contains(key);
+    if (value.isEmpty() ? !had : node->opts.value(key) == value) return;
+
+    doc->beginEdit(QStringLiteral("Edit option"));
+    graph = doc->activeGraph();
+    if (GraphNode *live = graph ? graph->node(nodeId) : nullptr) {
+        if (value.isEmpty()) live->opts.remove(key);
+        else live->opts.insert(key, value);
+    }
     doc->commitEdit();
 }
 

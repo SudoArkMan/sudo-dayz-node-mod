@@ -14,6 +14,22 @@
 // no tag, because 29,000 nodes carrying a "DayZ" badge is noise rather than
 // information, and what a reader needs to know is which of them is the one
 // that will not compile on a server missing a mod.
+//
+// What a node says about itself, and where each piece of it goes:
+//
+//   header      the name, and the class that declares it
+//   exec band   the declaration's own first sentence, when it has one, in the
+//               row that otherwise holds two triangles and nothing else
+//   pin rows    the name of each pin and the type it carries, spelled the way
+//               the declaration spelled it
+//   tooltip     the whole signature, the source location, and the cautions
+//
+// Nothing in that list makes a node taller or wider than it was: every word is
+// written into room the node already spends. Height is the scarce thing on this
+// canvas, because a graph is read at 75 percent zoom with several hundred nodes
+// on it, and a node that grows to explain itself makes its neighbours harder to
+// find than the explanation is worth. The long form lives in the Inspector and
+// in the tooltip, both of which are asked for rather than glanced at.
 #pragma once
 
 #include "analysis.h"
@@ -54,6 +70,11 @@ public:
     // being fixed in scene units.
     QString editorAt(const QPointF &scenePos, double reach = 0.0) const;
 
+    // Which of the two element controls is under a scene position: -1 for
+    // minus, +1 for plus, 0 for neither. Only a node whose definition declares
+    // a pin list draws them at all.
+    int listButtonAt(const QPointF &scenePos, double reach = 0.0) const;
+
     // Every data input of this node, for a panel that wants a row per pin
     // without reading the private pin layout. Writes go back through
     // setNodeInput, the same helper the canvas uses.
@@ -83,6 +104,7 @@ protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
     void mousePressEvent(QGraphicsSceneMouseEvent *e) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e) override;
+    void hoverEnterEvent(QGraphicsSceneHoverEvent *e) override;
     void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override;
     void hoverLeaveEvent(QGraphicsSceneHoverEvent *e) override;
 
@@ -95,12 +117,22 @@ private:
         // than the drawn box: the label belongs to the same value, and the four
         // units of gap above and below the box were pure miss.
         QRectF hit;
+        // Room this pin's label may take. Decided here rather than at paint
+        // time, because an output label and an input's value field share a row
+        // and only the layout knows where the field ended up.
+        double labelRoom = 0.0;
+        // The type this pin carries, in the declaration's own spelling, or
+        // empty when the row says it another way. Resolved at layout time
+        // because it costs a signature lookup and a repaint must not.
+        QString typeText;
         bool connected = false;
     };
 
     QString m_hoverPin;
     PinDir m_hoverDir = PinDir::In;
     QString m_hoverEditor;
+    // -1, 0 or +1, the same reading listButtonAt returns.
+    int m_hoverListButton = 0;
     bool m_dropCandidate = false;
 
     // One coloured stretch of a code line. Measured once at layout time so a
@@ -136,6 +168,27 @@ private:
     double m_codeLineHeight = 0.0;
     bool m_pinsOnHeader = false; // pins share the header row, so it needs clearance
 
+    // The one sentence the declaration says about itself, and the strip of the
+    // exec row it is written across. Both empty on the three nodes in four that
+    // Bohemia never documented, and on every node with no exec row to spare.
+    QString m_summary;
+    QRectF m_summaryRect;
+    // Where the rule between the flow rows and the data rows goes, or zero when
+    // the node has only one of the two and there is nothing to separate.
+    double m_bandRule = 0.0;
+
+    // The tooltip is the long answer, so it is built on the first hover rather
+    // than for all 496 nodes of a project at load. Cleared by anything that
+    // changes what it would say.
+    bool m_tipReady = false;
+
+    // The footer a variable-arity node draws: "3 elements" on the left, minus
+    // and plus on the right. Empty rects on every node with a fixed shape.
+    QRectF m_listRow;
+    QRectF m_listMinus;
+    QRectF m_listPlus;
+    int m_listCount = 0;
+
     // The dependency tag, empty on a vanilla node, and the colour it draws in.
     QString m_sourceTag;
     QColor m_sourceColor;
@@ -148,15 +201,29 @@ private:
     // rather than at each use so the width the layout reserves and the pill the
     // painter draws cannot disagree.
     double sourceTagWidth() const;
-    // Width the node's own text needs, before the clamp.
-    double contentWidth(const QVector<Pin> &dataIn,
-                        const QVector<Pin> &dataOut) const;
+    // Width the node's own text needs, before the clamp. `node` is what the
+    // author typed into the value fields, which is measured rather than the
+    // declaration's defaults.
+    double contentWidth(const QVector<Pin> &dataIn, const QVector<Pin> &dataOut,
+                        const GraphNode *node) const;
     const PinLayout *layoutForPin(const QString &pinId) const;
+    // True when `type` is a word the header is already carrying, which is the
+    // case for every `target` pin: its class IS the subtitle. Writing it twice
+    // on a node 168 units wide spends a word and buys nothing.
+    bool alreadyOnHeader(const QString &type) const;
     // Acts on one value field the way its type asks: a bool flips, an enum
     // offers its members, everything else prompts for text. `host` parents any
     // popup and `at` is where it opens, both in screen coordinates.
     void activateEditor(const QString &pinId, QWidget *host, const QPoint &at);
     void paintValueField(QPainter *p, const PinLayout &pl, const QString &value) const;
+    // The pin's name and the type it carries, sharing one row's worth of room.
+    void paintPinText(QPainter *p, const PinLayout &pl) const;
+    void paintListRow(QPainter *p) const;
+    // The declaration's own sentence, across the exec row, and the rule under
+    // the flow rows. Both are no-ops on a node that has neither.
+    void paintSummary(QPainter *p) const;
+    // Everything the catalogue knows, for a reader who stopped to ask.
+    QString buildTooltip() const;
     // Height of the code block including its own padding; 0 when there is none.
     double codeBlockHeight() const;
     // `bodyPath` is the node's rounded outline; the well is clipped to it so the

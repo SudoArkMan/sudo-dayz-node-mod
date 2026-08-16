@@ -62,6 +62,28 @@ public:
     // Marks the graph dirty and re-runs analysis; emits graphChanged.
     void touchGraph();
 
+    // Closing a script tab.
+    //
+    // A script has no life outside the project holding it: the tab bar is a view
+    // of `project().scripts` and nothing else, so closing a tab takes the script
+    // out of the project rather than hiding a window onto a file that carries on
+    // existing. That is a removal, and it is not allowed to be a silent one. The
+    // entry and the position it sat at go on a session stack that
+    // reopenClosedScript pops, so every close has a way back inside the session,
+    // and the window asks first for the scripts this project is the only copy of.
+    //
+    // The .c a script was imported from is never touched. What closing costs is
+    // the graph, its layout and anything edited since the import.
+    //
+    // False when the id names no script, or when it names the last one: the
+    // canvas and every dock read the active graph, and a project with no scripts
+    // has none for them to read.
+    bool closeScript(const QString &id);
+    bool canReopenScript() const { return !m_closed.isEmpty(); }
+    // The script the next reopen brings back, so the menu entry can name it.
+    QString lastClosedName() const;
+    bool reopenClosedScript();
+
 public slots:
     void setActiveScript(const QString &id);
 
@@ -74,6 +96,9 @@ signals:
 
 private:
     struct Snapshot { QString scriptId; Graph graph; QString label; };
+    // A closed script and where in the tab order it was, so reopening puts it
+    // back where the user left it rather than at the end of the bar.
+    struct ClosedScript { ScriptEntry entry; int index = 0; };
 
     Catalog m_catalog;
     Builtins m_builtins;
@@ -81,6 +106,9 @@ private:
     QStringList m_selection;
     QVector<Snapshot> m_undo;
     QVector<Snapshot> m_redo;
+    // Session only, and never written to the .sdzn: a reopen is a way back out
+    // of a mistake made a moment ago, not a second copy of the project.
+    QVector<ClosedScript> m_closed;
     Snapshot m_pending;
     int m_editDepth = 0;
     bool m_pendingValid = false;

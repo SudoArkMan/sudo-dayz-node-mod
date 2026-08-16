@@ -22,11 +22,13 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPen>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QStyle>
+#include <QTimer>
 #include <QStyleOptionViewItem>
 #include <QStyledItemDelegate>
 #include <QUrl>
@@ -298,6 +300,63 @@ private:
     QString m_kicker;
 };
 
+// A short list of lines that never wraps and never grows.
+//
+// Release notes are a document and this is a panel on a page whose other
+// regions have to stay where they are, so each line is elided to whatever width
+// the label ends up with and the height is exactly the number of lines. A
+// wrapping label would have made the panel's height depend on the length of
+// somebody else's release notes, which is the one thing it must not depend on.
+// The whole set is in the tooltip, so nothing is lost, only deferred.
+class LineList : public QLabel {
+public:
+    explicit LineList(QWidget *parent = nullptr) : QLabel(parent)
+    {
+        setWordWrap(false);
+        setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        setTextInteractionFlags(Qt::NoTextInteraction);
+    }
+
+    void setLines(const QStringList &lines, const QStringList &full = QStringList())
+    {
+        m_lines = lines;
+        const QStringList tip = full.isEmpty() ? lines : full;
+        setToolTip(tip.join(QStringLiteral("\n")));
+        applyElision();
+        updateGeometry();
+    }
+
+    QSize sizeHint() const override { return QSize(200, lineBlockHeight()); }
+    QSize minimumSizeHint() const override { return QSize(80, lineBlockHeight()); }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QLabel::resizeEvent(event);
+        if (event->oldSize().width() != event->size().width()) applyElision();
+    }
+
+private:
+    int lineBlockHeight() const
+    {
+        if (m_lines.isEmpty()) return 0;
+        return QFontMetrics(font()).lineSpacing() * m_lines.size();
+    }
+
+    void applyElision()
+    {
+        const QFontMetrics metrics(font());
+        const int room = qMax(60, width());
+        QStringList shown;
+        shown.reserve(m_lines.size());
+        for (const QString &line : m_lines)
+            shown.append(metrics.elidedText(line, Qt::ElideRight, room));
+        QLabel::setText(shown.join(QStringLiteral("\n")));
+    }
+
+    QStringList m_lines;
+};
+
 // Three lines per row: the project, where it is, and what is in it.
 //
 // The background is left to the style so hover and selection match every other
@@ -405,6 +464,24 @@ QString countLine(const RecentProject &entry)
     return parts.join(QStringLiteral(", "));
 }
 
+// A download's size in the unit somebody deciding whether to fetch it thinks
+// in. Below a megabyte the exact figure is noise, so it rounds up to one.
+QString downloadSize(qint64 bytes)
+{
+    if (bytes <= 0) return {};
+    const double mb = double(bytes) / (1024.0 * 1024.0);
+    if (mb < 1.0) return QStringLiteral("1 MB");
+    if (mb < 10.0) return QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+    return QStringLiteral("%1 MB").arg(qRound(mb));
+}
+
+// "checked 12 minutes ago", off the stamp the last answer was recorded at.
+QString checkedLine(const QDateTime &when)
+{
+    if (!when.isValid()) return QStringLiteral("not checked yet");
+    return QStringLiteral("checked %1").arg(relativeTime(when.toLocalTime()));
+}
+
 } // namespace
 
 QVector<StartTemplate> startTemplates(const QString &resourceDir)
@@ -467,12 +544,25 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     return templates;
 }
 
-StartPage::StartPage(RecentProjects *recent, QWidget *parent)
+StartPage::StartPage(RecentProjects *recent, QWidget *parent,
+                     const QString &updateSettingsPath)
     : QWidget(parent), m_recent(recent), m_lockup(nullptr), m_columns(nullptr),
       m_recentPanel(nullptr), m_list(nullptr), m_empty(nullptr),
       m_missingNote(nullptr), m_gallery(nullptr),
-      m_firstAction(nullptr), m_readModCard(nullptr), m_templates(startTemplates())
+      m_firstAction(nullptr), m_readModCard(nullptr), m_templates(startTemplates()),
+      m_whatsNewPanel(nullptr), m_versionLine(nullptr), m_checkStatus(nullptr),
+      m_currentNotes(nullptr), m_updateHeadline(nullptr), m_updateNotes(nullptr),
+      m_updateBlock(nullptr), m_primary(nullptr), m_secondary(nullptr),
+      m_tertiary(nullptr), m_prefs(new UpdatePreferences(updateSettingsPath)),
+      m_check(nullptr), m_version(QCoreApplication::applicationVersion()),
+      m_autoCheck(true), m_updatedSinceLastRun(false)
 {
+    // A version last seen that is neither empty nor this one means the app has
+    // been replaced since the page was last looked at. Empty is a first run,
+    // which is not an update and should not be dressed as one.
+    const QString seen = m_prefs->lastSeenVersion();
+    m_updatedSinceLastRun = !seen.isEmpty() && seen != m_version;
+
     setObjectName(QStringLiteral("startPage"));
     // The lockup is drawn on the pack's own ground, so the page has to be that
     // colour or the art sits in a visible box of its own.
@@ -508,8 +598,20 @@ StartPage::StartPage(RecentProjects *recent, QWidget *parent)
     m_columns = new QHBoxLayout;
     m_columns->setContentsMargins(0, 0, 0, 0);
     m_columns->setSpacing(16);
+
+    // The left column is now two panels rather than one, so the trailing
+    // stretch is what holds both to the top. It replaces the alignment the
+    // recent panel used to be given directly, which cannot be set on a widget
+    // that is no longer a child item of this layout.
+    auto *left = new QVBoxLayout;
+    left->setContentsMargins(0, 0, 0, 0);
+    left->setSpacing(14);
     m_recentPanel = buildRecentPanel();
-    m_columns->addWidget(m_recentPanel, 5);
+    left->addWidget(m_recentPanel, 0);
+    m_whatsNewPanel = buildWhatsNewPanel();
+    left->addWidget(m_whatsNewPanel, 0);
+    left->addStretch(1);
+    m_columns->addLayout(left, 5);
 
     auto *right = new QVBoxLayout;
     right->setContentsMargins(0, 0, 0, 0);
@@ -528,7 +630,19 @@ StartPage::StartPage(RecentProjects *recent, QWidget *parent)
     outer->addLayout(m_columns, 0);
     outer->addStretch(3);
 
+    m_check = new UpdateCheck(this);
+    connect(m_check, &UpdateCheck::finished, this, &StartPage::applyUpdateOutcome);
+
+    setChangelogPath(findChangelog());
     rebuildRecent();
+}
+
+StartPage::~StartPage()
+{
+    // The check holds a socket and a reply. Cancelling first means a page torn
+    // down mid-check cannot land a result on a panel that has gone.
+    if (m_check) m_check->cancel();
+    delete m_prefs;
 }
 
 QWidget *StartPage::buildRecentPanel()
@@ -542,6 +656,12 @@ QWidget *StartPage::buildRecentPanel()
     m_list->setContextMenuPolicy(Qt::CustomContextMenu);
     m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setFrameShape(QFrame::NoFrame);
+    // Ask for the height the rows actually need. A scroll area's default hint
+    // is 256 by 192 whatever is in it, which is three rows of this list to the
+    // pixel: with three entries it looked right and with four the fourth was
+    // behind a scroll bar in a panel with room for it. The cap in
+    // rebuildRecent is what stops this growing without limit.
+    m_list->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
     // The panel is the container. Left at the app sheet's framed ground the
     // list would be a second box drawn inside the first one.
     m_list->setStyleSheet(
@@ -701,6 +821,292 @@ QWidget *StartPage::buildTemplatesPanel()
     return panel;
 }
 
+QWidget *StartPage::buildWhatsNewPanel()
+{
+    auto *panel = new StartPanel(QStringLiteral("What is new"), this);
+    QVBoxLayout *body = panel->body();
+    body->setSpacing(6);
+
+    auto *head = new QHBoxLayout;
+    head->setContentsMargins(0, 0, 0, 0);
+    head->setSpacing(10);
+    m_versionLine = new QLabel(panel);
+    m_versionLine->setFont(theme::uiFont(9, true));
+    head->addWidget(m_versionLine, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    head->addStretch(1);
+    // The one place a check ever reports itself, and it never carries a reason.
+    // A failed check the user did not ask for is not news, so it reads the same
+    // as a check that found nothing and keeps the reason in the tooltip.
+    m_checkStatus = new QLabel(panel);
+    m_checkStatus->setFont(theme::uiFont(8));
+    dimLabel(m_checkStatus);
+    head->addWidget(m_checkStatus, 0, Qt::AlignRight | Qt::AlignVCenter);
+    body->addLayout(head);
+
+    m_currentNotes = new LineList(panel);
+    m_currentNotes->setFont(theme::uiFont(8));
+    dimLabel(m_currentNotes);
+    body->addWidget(m_currentNotes);
+
+    m_updateBlock = new QWidget(panel);
+    auto *block = new QVBoxLayout(m_updateBlock);
+    block->setContentsMargins(0, 4, 0, 0);
+    block->setSpacing(5);
+    block->addWidget(ruleLine(m_updateBlock));
+    m_updateHeadline = new QLabel(m_updateBlock);
+    m_updateHeadline->setFont(theme::uiFont(9, true));
+    m_updateHeadline->setWordWrap(true);
+    block->addWidget(m_updateHeadline);
+    m_updateNotes = new LineList(m_updateBlock);
+    m_updateNotes->setFont(theme::uiFont(8));
+    dimLabel(m_updateNotes);
+    block->addWidget(m_updateNotes);
+    body->addWidget(m_updateBlock);
+
+    auto *buttons = new QHBoxLayout;
+    buttons->setContentsMargins(0, 2, 0, 0);
+    buttons->setSpacing(6);
+    const auto makeButton = [panel, buttons]() {
+        auto *button = new QPushButton(panel);
+        button->setFont(theme::uiFont(8));
+        button->setCursor(Qt::PointingHandCursor);
+        button->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        buttons->addWidget(button);
+        return button;
+    };
+    m_primary = makeButton();
+    m_secondary = makeButton();
+    m_tertiary = makeButton();
+    buttons->addStretch(1);
+    body->addLayout(buttons);
+
+    // One connection each, reading the state rather than being rewired every
+    // time the panel is rebuilt. A button whose slot is replaced on every
+    // redraw is a button that eventually has two of them.
+    connect(m_primary, &QPushButton::clicked, this, [this]() {
+        if (m_prefs->consent() != UpdateConsent::Allowed) {
+            m_prefs->setConsent(UpdateConsent::Allowed);
+            emit statusMessage(QStringLiteral("Update checks are on. The app asks "
+                                              "GitHub once a day and nothing else."));
+            rebuildWhatsNew();
+            startUpdateCheck();
+            return;
+        }
+        if (m_outcome.hasUpdate()) {
+            const QString url = m_outcome.release.pageUrl;
+            if (url.isEmpty()) return;
+            QDesktopServices::openUrl(QUrl(url));
+            emit statusMessage(QStringLiteral("Opened the release page for version "
+                                              "%1 in your browser.")
+                                   .arg(m_outcome.release.version.toString()));
+            return;
+        }
+        startUpdateCheck();
+    });
+
+    connect(m_secondary, &QPushButton::clicked, this, [this]() {
+        if (m_prefs->consent() == UpdateConsent::NotAsked) {
+            m_prefs->setConsent(UpdateConsent::Declined);
+            emit statusMessage(QStringLiteral("Update checks are off. Nothing is "
+                                              "sent anywhere."));
+            rebuildWhatsNew();
+            return;
+        }
+        if (!m_outcome.hasUpdate()) return;
+        const QString version = m_outcome.release.version.toString();
+        m_prefs->setSkippedVersion(version);
+        m_outcome = UpdateOutcome();
+        m_outcome.status = UpdateOutcome::UpToDate;
+        m_outcome.checkedAt = m_prefs->lastChecked();
+        rebuildWhatsNew();
+        emit statusMessage(QStringLiteral("Version %1 skipped. Anything published "
+                                          "after it will still be reported.")
+                               .arg(version));
+    });
+
+    connect(m_tertiary, &QPushButton::clicked, this, [this]() {
+        if (m_check) m_check->cancel();
+        m_prefs->setConsent(UpdateConsent::Declined);
+        m_outcome = UpdateOutcome();
+        rebuildWhatsNew();
+        emit statusMessage(QStringLiteral("Update checks are off. Turn them back on "
+                                          "here whenever you want them."));
+    });
+
+    return panel;
+}
+
+void StartPage::setChangelogPath(const QString &path)
+{
+    m_changelogPath = path;
+    reloadChangelog();
+    rebuildWhatsNew();
+}
+
+void StartPage::reloadChangelog()
+{
+    m_changelog.clear();
+    if (m_changelogPath.isEmpty()) return;
+    const QString text = readChangelog(m_changelogPath);
+    if (text.isEmpty()) return;
+    m_changelog = parseChangelog(text);
+}
+
+void StartPage::setAutomaticUpdateCheck(bool on)
+{
+    m_autoCheck = on;
+    if (!on && m_check) m_check->cancel();
+}
+
+void StartPage::applyUpdateOutcome(const UpdateOutcome &outcome)
+{
+    m_outcome = outcome;
+    if (outcome.status != UpdateOutcome::NotChecked
+        && outcome.status != UpdateOutcome::Checking) {
+        m_prefs->setLastChecked(outcome.checkedAt.isValid()
+                                    ? outcome.checkedAt
+                                    : QDateTime::currentDateTimeUtc());
+    }
+    rebuildWhatsNew();
+}
+
+void StartPage::maybeStartUpdateCheck()
+{
+    if (!m_prefs->dueForCheck()) return;
+    startUpdateCheck();
+}
+
+void StartPage::startUpdateCheck()
+{
+    // Gated on the harness switch as well as on consent, so a test that grants
+    // consent to draw a panel still cannot open a socket.
+    if (!m_autoCheck || !m_check || m_check->running()) return;
+    if (m_prefs->consent() != UpdateConsent::Allowed) return;
+
+    m_check->setRepository(m_prefs->owner(), m_prefs->repository());
+    m_check->setCurrentVersion(m_version);
+    m_check->setIncludePrereleases(m_prefs->includePrereleases());
+    m_check->setSkippedVersion(m_prefs->skippedVersion());
+
+    m_outcome = UpdateOutcome();
+    m_outcome.status = UpdateOutcome::Checking;
+    rebuildWhatsNew();
+    m_check->start();
+}
+
+void StartPage::rebuildWhatsNew()
+{
+    if (!m_whatsNewPanel || !m_versionLine) return;
+
+    // ---- the running version and its notes ---------------------------------
+    const ChangelogEntry entry = changelogEntryFor(m_changelog, m_version);
+    QString heading = m_updatedSinceLastRun
+                          ? QStringLiteral("Updated to version %1").arg(m_version)
+                          : QStringLiteral("Version %1").arg(m_version);
+    if (entry.date.isValid())
+        heading += QStringLiteral(", %1")
+                       .arg(entry.date.toString(QStringLiteral("d MMM yyyy")));
+    m_versionLine->setText(heading);
+
+    auto *notes = static_cast<LineList *>(m_currentNotes);
+    if (entry.isValid()) {
+        // Four lines is what the panel can hold without the recent list moving.
+        // The rest is a tooltip away, and the file itself is on disk.
+        notes->setLines(changelogLines(entry.body, 4), changelogLines(entry.body));
+    } else if (m_changelog.isEmpty()) {
+        notes->setLines({QStringLiteral("No changelog is installed beside the app, "
+                                        "so there are no notes for this build.")});
+    } else {
+        notes->setLines({QStringLiteral("The changelog has no section for this "
+                                        "version yet.")});
+    }
+
+    // ---- what the check has to say -----------------------------------------
+    const UpdateConsent consent = m_prefs->consent();
+    auto *updateNotes = static_cast<LineList *>(m_updateNotes);
+    m_primary->setEnabled(true);
+    m_secondary->setVisible(false);
+    m_tertiary->setVisible(false);
+    m_primary->setToolTip(QString());
+    m_checkStatus->setToolTip(QString());
+
+    if (consent == UpdateConsent::NotAsked) {
+        m_checkStatus->setText(QString());
+        m_updateBlock->setVisible(true);
+        m_updateHeadline->setText(QStringLiteral("Check GitHub for new versions?"));
+        updateNotes->setLines(
+            {QStringLiteral("The app would ask github.com for this project's list of "
+                            "releases, once a day, and send nothing about you or "
+                            "your projects."),
+             QStringLiteral("It does not check until you say yes, and you can change "
+                            "this here at any time.")});
+        m_primary->setText(QStringLiteral("Yes, check GitHub"));
+        m_secondary->setText(QStringLiteral("No thanks"));
+        m_secondary->setVisible(true);
+        m_whatsNewPanel->updateGeometry();
+        return;
+    }
+
+    if (consent == UpdateConsent::Declined) {
+        m_checkStatus->setText(QStringLiteral("update checks are off"));
+        m_updateBlock->setVisible(false);
+        m_primary->setText(QStringLiteral("Turn checks on"));
+        m_whatsNewPanel->updateGeometry();
+        return;
+    }
+
+    m_tertiary->setText(QStringLiteral("Turn checks off"));
+    m_tertiary->setVisible(true);
+
+    if (m_outcome.status == UpdateOutcome::Checking) {
+        m_checkStatus->setText(QStringLiteral("checking github.com"));
+        m_updateBlock->setVisible(false);
+        m_primary->setText(QStringLiteral("Check now"));
+        m_primary->setEnabled(false);
+        m_whatsNewPanel->updateGeometry();
+        return;
+    }
+
+    m_checkStatus->setText(checkedLine(m_prefs->lastChecked()));
+    // The reason a check came to nothing lives here and nowhere else. Somebody
+    // who wants to know can hover; somebody who does not gets a page with no
+    // error on it, which is the whole point.
+    if (!m_outcome.detail.isEmpty()) m_checkStatus->setToolTip(m_outcome.detail);
+
+    if (!m_outcome.hasUpdate()) {
+        m_updateBlock->setVisible(false);
+        m_primary->setText(QStringLiteral("Check now"));
+        m_whatsNewPanel->updateGeometry();
+        return;
+    }
+
+    const Release &release = m_outcome.release;
+    m_updateBlock->setVisible(true);
+    m_updateHeadline->setText(
+        QStringLiteral("Version %1 is available").arg(release.version.toString()));
+
+    QStringList lines = changelogLines(release.notes, 3);
+    if (lines.isEmpty())
+        lines.append(QStringLiteral("No notes were published with this release."));
+    if (!release.assetName.isEmpty()) {
+        const QString size = downloadSize(release.assetSize);
+        lines.append(size.isEmpty()
+                         ? QStringLiteral("Download: %1").arg(release.assetName)
+                         : QStringLiteral("Download: %1, %2")
+                               .arg(release.assetName, size));
+    }
+    QStringList full = changelogLines(release.notes);
+    if (full.isEmpty()) full = lines;
+    updateNotes->setLines(lines, full);
+
+    m_primary->setText(QStringLiteral("Open the release page"));
+    m_primary->setToolTip(release.pageUrl);
+    m_primary->setEnabled(!release.pageUrl.isEmpty());
+    m_secondary->setText(QStringLiteral("Skip this version"));
+    m_secondary->setVisible(true);
+    m_whatsNewPanel->updateGeometry();
+}
+
 void StartPage::refresh()
 {
     if (m_recent) m_recent->refresh();
@@ -765,10 +1171,14 @@ void StartPage::rebuildRecent()
     // hundred empty pixels under them. Capped at the list's own rows and aligned
     // to the top, the panel is the size of what is in it, and it grows with the
     // list up to about the height the other column has anyway.
+    // Capped tighter than before, because the left column now carries a second
+    // panel under this one and the pair of them has to fit a laptop screen. Ten
+    // rows is past the point where anyone scrolls rather than using Open.
     const int rowHeight = qMax(1, m_list->sizeHintForRow(0));
-    m_list->setMaximumHeight(qBound(rowHeight, m_list->count() * rowHeight + 4, 520));
-    if (m_columns && m_recentPanel)
-        m_columns->setAlignment(m_recentPanel, Qt::AlignTop);
+    m_list->setMaximumHeight(
+        qBound(rowHeight, m_list->count() * rowHeight + 4, rowHeight * 10 + 4));
+    // The left column's trailing stretch is what holds the panels to the top
+    // now, so there is no per-widget alignment left to set here.
 
     m_missingNote->setText(
         missing > 0 ? QStringLiteral("%1 of these is not where it was. Right click it "
@@ -871,4 +1281,16 @@ void StartPage::showEvent(QShowEvent *event)
     } else if (m_firstAction) {
         m_firstAction->setFocus(Qt::OtherFocusReason);
     }
+
+    if (!m_prefs) return;
+    // Recorded on the first show rather than in the constructor, so the "updated
+    // to" heading survives until somebody has actually been shown it.
+    if (!m_version.isEmpty() && m_prefs->lastSeenVersion() != m_version)
+        m_prefs->setLastSeenVersion(m_version);
+
+    // Off the show, and late. Startup has a catalogue to parse and a window to
+    // build, and a socket opening in the middle of that buys nothing: the
+    // answer changes at most once a day.
+    if (!m_autoCheck || !m_prefs->dueForCheck()) return;
+    QTimer::singleShot(2000, this, [this]() { maybeStartUpdateCheck(); });
 }

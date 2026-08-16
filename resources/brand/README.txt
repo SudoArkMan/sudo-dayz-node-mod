@@ -1,11 +1,11 @@
-SUDO Servers — Visual Scripting Tools
+SUDO Servers, Visual Scripting Tools
 Brand pack
 
 icons/            Node glyph, transparent background
-  sudo-icon-16/24/32/48/64/128/256/512.png   light glyph — for dark UI
-  sudo-icon-dark-64/256.png                  dark glyph — for light backgrounds
+  sudo-icon-16/24/32/48/64/128/256/512.png   light glyph, for dark UI
+  sudo-icon-dark-64/256.png                  dark glyph, for light backgrounds
 
-app-icon/         Square tile on the app ground (#161C24) — .ico / installer source
+app-icon/         Square tile on the app ground (#161C24), .ico / installer source
   sudo-appicon-256.png
   sudo-appicon-512.png
 
@@ -33,6 +33,6 @@ Type
   Monospace for build strings and status lines.
 
 Notes
-  The DayZ artwork in the splash is your supplied asset; it is Bohemia
+  The DayZ artwork in the splash is a supplied asset and is Bohemia
   Interactive's mark, not part of this identity. Keep it out of the icon
-  and corner mark — it goes muddy below ~40px.
+  and corner mark: it goes muddy below ~40px.

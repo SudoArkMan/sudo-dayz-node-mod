@@ -140,7 +140,27 @@ add_executable(recenttest
   ../resources/brand.qrc
 )
 target_link_libraries(recenttest PRIVATE
-  nodemod_core nodemod_model nodemod_themed nodemod_panels)
+  nodemod_core nodemod_model nodemod_themed nodemod_panels nodemod_update)
+
+# Version ordering, the changelog, and every way a check of GitHub can go wrong.
+# Not one test here opens a socket: the transport is a value handed to
+# evaluateFetch, so offline, rate limited, a 404, an empty list and a reply full
+# of rubbish are all just arguments. `--shots <dir>` writes pictures of the
+# start page at both window sizes, with a newer release and without one:
+#   ./tests/updatetest ../resources [--shots .]
+#
+# The start page and branding are named here for the same reason recenttest
+# names them: they are the pair that stays out of nodemod_panels so branding.cpp
+# reaches no target that does without it, and the shots have to be of the page
+# the app really ships.
+add_executable(updatetest
+  updatetest.cpp
+  ../src/widgets/startpage.cpp
+  ../src/branding.cpp
+  ../resources/brand.qrc
+)
+target_link_libraries(updatetest PRIVATE
+  nodemod_core nodemod_model nodemod_themed nodemod_panels nodemod_update)
 
 # Running the mod: prerequisite detection against the real machine, a junction
 # made and removed under a temporary name, the project.cfg rewrite line by line,

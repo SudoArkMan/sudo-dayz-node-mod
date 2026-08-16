@@ -92,6 +92,9 @@ bool Document::openProject(const QString &path, QString *error)
     abandonPendingEdit();
     m_undo.clear();
     m_redo.clear();
+    // Those scripts belong to the project being left. Reopening one here would
+    // graft another project's class into this one.
+    m_closed.clear();
     setModified(false);
     emit projectChanged();
     emit activeScriptChanged();
@@ -115,6 +118,7 @@ void Document::resetToNew()
     abandonPendingEdit();
     m_undo.clear();
     m_redo.clear();
+    m_closed.clear();
     setModified(false);
     emit projectChanged();
     emit activeScriptChanged();
@@ -137,6 +141,105 @@ void Document::setActiveScript(const QString &id)
     emit activeScriptChanged();
     emit graphChanged();
     emit selectionChanged();
+}
+
+bool Document::closeScript(const QString &id)
+{
+    int index = -1;
+    for (int i = 0; i < m_project.scripts.size(); ++i) {
+        if (m_project.scripts.at(i).id != id) continue;
+        index = i;
+        break;
+    }
+    if (index < 0) return false;
+    // The window has no empty state and does not need one: the canvas, the
+    // outliner, the variables panel and the generator all read the active graph,
+    // and there is nowhere for the user to go from a project with no scripts
+    // except File > New project, which they can reach anyway.
+    if (m_project.scripts.size() < 2) return false;
+
+    m_closed.append({m_project.scripts.at(index), index});
+    // Deep enough to walk back a bulk close, shallow enough that a session
+    // browsing a big mod is not holding every graph it ever looked at.
+    if (m_closed.size() > 16) m_closed.removeFirst();
+    m_project.scripts.removeAt(index);
+
+    // Asked of the project after the removal, so it covers an activeId that was
+    // already dangling as well as the tab that has just gone. Either way the
+    // editor is pointing at nothing and has to be pointed somewhere.
+    const bool activeGone = !m_project.script(m_project.activeId);
+    if (activeGone) {
+        // The tab that took its place, which is the one now under the cursor,
+        // and the last tab when the closed one was last.
+        const int next = qMin(index, m_project.scripts.size() - 1);
+        m_project.activeId = m_project.scripts.at(next).id;
+    }
+
+    // Snapshots of the script that has gone. Undo already skips entries whose
+    // script no lookup can find, but a reopen makes them applicable again, and
+    // the first Ctrl+Z after that would put the graph back to a state the user
+    // stepped away from before they ever closed it.
+    const auto dropSnapshots = [&id](QVector<Snapshot> &stack) {
+        for (int i = stack.size() - 1; i >= 0; --i)
+            if (stack.at(i).scriptId == id) stack.removeAt(i);
+    };
+    dropSnapshots(m_undo);
+    dropSnapshots(m_redo);
+    if (m_pendingValid && m_pending.scriptId == id) abandonPendingEdit();
+
+    // The rest of the history belongs to scripts that are still here, and
+    // closing a tab in the background is not a reason to take a user's undo off
+    // the graph they are looking at. Moving the editor to another script is,
+    // and it carries exactly the rule setActiveScript carries.
+    if (activeGone) {
+        m_selection.clear();
+        abandonPendingEdit();
+        m_undo.clear();
+        m_redo.clear();
+    }
+
+    // The project now holds one script fewer than the .sdzn on disk does, so it
+    // is behind again and Save is what makes the close permanent.
+    setModified(true);
+    emit projectChanged();
+    if (activeGone) emit activeScriptChanged();
+    emit graphChanged();
+    emit selectionChanged();
+    return true;
+}
+
+QString Document::lastClosedName() const
+{
+    return m_closed.isEmpty() ? QString() : m_closed.last().entry.name;
+}
+
+bool Document::reopenClosedScript()
+{
+    if (m_closed.isEmpty()) return false;
+    ClosedScript closed = m_closed.takeLast();
+    // An id the project has grown since, from an import or another reopen. Two
+    // entries under one id is worse than a renumbered one: every lookup in the
+    // app takes the first match, so the tab, the undo stack and the exporter
+    // would each be free to pick a different script.
+    if (m_project.script(closed.entry.id)) {
+        do {
+            closed.entry.id = nextId(QStringLiteral("s"));
+        } while (m_project.script(closed.entry.id));
+    }
+    const int at = qBound(0, closed.index, m_project.scripts.size());
+    m_project.scripts.insert(at, closed.entry);
+    m_project.activeId = closed.entry.id;
+
+    m_selection.clear();
+    abandonPendingEdit();
+    m_undo.clear();
+    m_redo.clear();
+    setModified(true);
+    emit projectChanged();
+    emit activeScriptChanged();
+    emit graphChanged();
+    emit selectionChanged();
+    return true;
 }
 
 void Document::setSelection(const QStringList &nodeIds)

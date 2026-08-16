@@ -15,6 +15,7 @@
 //   ./tests/recenttest ../resources [--shot start.png] [--gallery templates.png]
 #include "recentprojects.h"
 #include "theme.h"
+#include "version.h"
 #include "widgets/newscriptdialog.h"
 #include "widgets/startpage.h"
 
@@ -113,7 +114,10 @@ int main(int argc, char *argv[])
         qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("SUDO DayZ Node Mod"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    // The generated one, not a literal. A start page shot taken by this test
+    // should show the version the build carries, and a second copy of the
+    // number here is a second thing to remember to bump.
+    QCoreApplication::setApplicationVersion(QStringLiteral(NODEMOD_VERSION));
     QTextStream stream(stdout);
     out = &stream;
 

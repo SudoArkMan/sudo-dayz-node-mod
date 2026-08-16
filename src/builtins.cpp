@@ -26,6 +26,40 @@ const QString StopTimer       = QStringLiteral("bi.stopTimer");
 const QString CallLater       = QStringLiteral("bi.callLater");
 const QString CancelCallLater = QStringLiteral("bi.cancelCallLater");
 
+const QString MakeArray     = QStringLiteral("bi.makeArray");
+const QString ArrayCount    = QStringLiteral("bi.arrayCount");
+const QString ArrayGet      = QStringLiteral("bi.arrayGet");
+const QString ArrayInsert   = QStringLiteral("bi.arrayInsert");
+const QString ArrayInsertAt = QStringLiteral("bi.arrayInsertAt");
+const QString ArrayRemove   = QStringLiteral("bi.arrayRemove");
+const QString ArrayClear    = QStringLiteral("bi.arrayClear");
+const QString ArrayFind     = QStringLiteral("bi.arrayFind");
+const QString ArraySort     = QStringLiteral("bi.arraySort");
+const QString ArrayForIndex = QStringLiteral("bi.arrayForIndex");
+const QString SetElement    = QStringLiteral("bi.setElement");
+
+int listCount(const GraphNode &node, const PinList &list)
+{
+    if (!list.valid()) return 0;
+    bool ok = false;
+    const int stored = node.opts.value(list.countOpt).toInt(&ok);
+    // A .sdzn is a file anyone can hand you, so the clamp is not a nicety: a
+    // count of 100000 would build a hundred thousand pins before anything else
+    // in the app got a look at the node.
+    if (!ok) return qBound(list.min, 2, list.max);
+    return qBound(list.min, stored, list.max);
+}
+
+QString listPinId(const PinList &list, int index)
+{
+    return list.pinPrefix + QString::number(index);
+}
+
+QString declaredElementType(const GraphNode &node)
+{
+    return node.opts.value(QStringLiteral("type")).trimmed();
+}
+
 QString castClass(const GraphNode &node)
 {
     const QString cls = node.opts.value(QStringLiteral("cls"));
@@ -104,7 +138,6 @@ const QString IdNew        = QStringLiteral("bi.new");
 const QString IdSpawn      = QStringLiteral("bi.spawn");
 const QString IdServerOnly = QStringLiteral("bi.serverOnly");
 const QString IdRawExpr    = QStringLiteral("bi.rawExpr");
-const QString IdSetElement = QStringLiteral("bi.setElement");
 const QString IdSetMember  = QStringLiteral("bi.setMember");
 
 // Palette groups. Builtins are the only nodes that choose their own category;
@@ -116,6 +149,7 @@ const QString CatOperators = QStringLiteral("Operators");
 const QString CatLiterals  = QStringLiteral("Literals");
 const QString CatCasting   = QStringLiteral("Casting");
 const QString CatTiming    = QStringLiteral("Timing");
+const QString CatArrays    = QStringLiteral("Arrays");
 const QString CatUtility   = QStringLiteral("Utility");
 
 // The escape-hatch nodes get their own accent rather than one of the roles in
@@ -527,9 +561,11 @@ Builtins::Builtins()
     // that belongs to the base class or to an object of a type nothing here
     // describes. Without them an assignment to either kept its text and took
     // the statement around it down as well.
-    NodeDef setElement = makeDef(IdSetElement, QStringLiteral("Set Element"),
+    // Filed with the arrays rather than with the variables: it is the one that
+    // writes a slot, and the palette group it browses under is the array one.
+    NodeDef setElement = makeDef(bi::SetElement, QStringLiteral("Set Element"),
                                  QStringLiteral("array[index] = value"),
-                                 CatVariables, accents::variable(),
+                                 CatArrays, accents::variable(),
                                  {execPin(QStringLiteral("exec"), QString(), PinDir::In),
                                   execPin(QStringLiteral("exec"), QString(), PinDir::Out),
                                   dataPin(QStringLiteral("arr"), QStringLiteral("array"),
@@ -860,6 +896,198 @@ Builtins::Builtins()
                         "does not cancel something scheduled on Gameplay.")});
     add(cancelLater);
 
+    // ---------------------------------------------------------------- arrays
+    //
+    // Every one of these exists in the catalogue already, on `array` in
+    // 1_core/proto/enscript.c. They are repeated here for one reason: a
+    // catalogue node targets its owner through a `target` pin typed as the
+    // owning CLASS, so `array.Insert` offers an `array` object pin, and
+    // `array<ref ExpansionLootContainer>` is an ARRAY pin. canConnect refuses
+    // the two on the isArray flag alone, which is why nothing could be done
+    // with the array coming out of Get Containers. These take an array pin.
+    NodeDef makeArray = makeDef(bi::MakeArray, QStringLiteral("Make Array"),
+                                QStringLiteral("a new array"),
+                                CatArrays, accents::literal(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                 dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                         PinDir::Out, anyArray())});
+    makeArray.list = {QStringLiteral("count"), QStringLiteral("el"),
+                      QStringLiteral("elements"), 0, 32};
+    makeArray.doc = help(
+        QStringLiteral("Builds an array and fills it in. Use the plus and minus on the "
+                       "node to add and remove elements."),
+        {QStringLiteral("Set the element type in Details. Until it is set the element "
+                        "pins take anything, and the type is worked out from what the "
+                        "array is wired into, then from what is wired into the elements, "
+                        "then from what is typed on them."),
+         QStringLiteral("Writes `array<string> arr0 = {\"a\", \"b\"};` when it declares "
+                        "the array, which is the form vanilla uses."),
+         QStringLiteral("Writes `m_Junk = new array<string>();` and one `Insert` per "
+                        "element when the array goes into a member that already exists. "
+                        "Enforce takes a brace list only after a type in a declaration, "
+                        "so there is no choice about which form goes where."),
+         QStringLiteral("The element count is stored on the node, so it survives a save "
+                        "and comes back with an undo.")},
+        {QStringLiteral("It has exec pins because it writes a statement. Put it on the "
+                        "chain ahead of whatever reads the array.")});
+    add(makeArray);
+
+    NodeDef arrCount = makeDef(bi::ArrayCount, QStringLiteral("Array Count"),
+                               QStringLiteral("Count()"), CatArrays, accents::pure(),
+                               {dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                        PinDir::In, anyArray()),
+                                dataPin(QStringLiteral("ret"), QString(), PinDir::Out,
+                                        prim(PinKind::Int))},
+                               true);
+    arrCount.doc = help(
+        QStringLiteral("How many elements an array holds."),
+        {QStringLiteral("Emits `array.Count()`."),
+         QStringLiteral("This is the number a For Loop counts up to, and it is exclusive: "
+                        "the last valid index is one less.")},
+        {QStringLiteral("Calling it on a null array throws. Arrays that come back from "
+                        "the engine can be null.")});
+    add(arrCount);
+
+    NodeDef arrGet = makeDef(bi::ArrayGet, QStringLiteral("Array Get"),
+                             QStringLiteral("Get(index)"), CatArrays, accents::pure(),
+                             {dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                      PinDir::In, anyArray()),
+                              dataPin(QStringLiteral("index"), QStringLiteral("index"),
+                                      PinDir::In, prim(PinKind::Int)),
+                              dataPin(QStringLiteral("ret"), QString(), PinDir::Out,
+                                      prim(PinKind::Any))},
+                             true);
+    arrGet.doc = help(
+        QStringLiteral("Reads one element by its index."),
+        {QStringLiteral("Emits `array.Get(index)`."),
+         QStringLiteral("Set the element type in Details to type the output pin, so a "
+                        "wire out of it is checked against the real class.")},
+        {QStringLiteral("Indexes start at 0 and reading past the end throws. Check "
+                        "against Array Count first.")});
+    add(arrGet);
+
+    NodeDef arrInsert = makeDef(bi::ArrayInsert, QStringLiteral("Array Insert"),
+                                QStringLiteral("Insert(value)"), CatArrays, accents::call(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                 dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                         PinDir::In, anyArray()),
+                                 dataPin(QStringLiteral("v"), QStringLiteral("value"),
+                                         PinDir::In, prim(PinKind::Any))});
+    arrInsert.doc = help(
+        QStringLiteral("Adds one element to the end of an array."),
+        {QStringLiteral("Emits `array.Insert(value);`."),
+         QStringLiteral("This is how an array grows. Set Element writes a slot that "
+                        "already exists and throws past the end.")});
+    add(arrInsert);
+
+    NodeDef arrInsertAt = makeDef(bi::ArrayInsertAt, QStringLiteral("Array Insert At"),
+                                  QStringLiteral("InsertAt(value, index)"),
+                                  CatArrays, accents::call(),
+                                  {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                   execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                   dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                           PinDir::In, anyArray()),
+                                   dataPin(QStringLiteral("v"), QStringLiteral("value"),
+                                           PinDir::In, prim(PinKind::Any)),
+                                   dataPin(QStringLiteral("index"), QStringLiteral("index"),
+                                           PinDir::In, prim(PinKind::Int))});
+    arrInsertAt.doc = help(
+        QStringLiteral("Adds one element at a position, moving the rest along."),
+        {QStringLiteral("Emits `array.InsertAt(value, index);`. The value comes first, "
+                        "which is the opposite way round from Set Element.")});
+    add(arrInsertAt);
+
+    NodeDef arrRemove = makeDef(bi::ArrayRemove, QStringLiteral("Array Remove"),
+                                QStringLiteral("Remove(index)"), CatArrays, accents::call(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                 dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                         PinDir::In, anyArray()),
+                                 dataPin(QStringLiteral("index"), QStringLiteral("index"),
+                                         PinDir::In, prim(PinKind::Int))});
+    arrRemove.doc = help(
+        QStringLiteral("Takes one element out by its index."),
+        {QStringLiteral("Emits `array.Remove(index);`.")},
+        {QStringLiteral("`Remove` moves the last element into the gap rather than "
+                        "shifting everything down, so the order changes. "
+                        "`RemoveOrdered` is the one that keeps it."),
+         QStringLiteral("Removing while a For Each is walking the same array is the "
+                        "classic way to skip an element. Count downwards with a For Loop "
+                        "instead.")});
+    add(arrRemove);
+
+    NodeDef arrClear = makeDef(bi::ArrayClear, QStringLiteral("Array Clear"),
+                               QStringLiteral("Clear()"), CatArrays, accents::call(),
+                               {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                        PinDir::In, anyArray())});
+    arrClear.doc = help(
+        QStringLiteral("Empties an array without replacing it."),
+        {QStringLiteral("Emits `array.Clear();`."),
+         QStringLiteral("Anything else holding the same array sees it emptied too, which "
+                        "is the difference between this and building a new one.")});
+    add(arrClear);
+
+    NodeDef arrFind = makeDef(bi::ArrayFind, QStringLiteral("Array Find"),
+                              QStringLiteral("Find(value)"), CatArrays, accents::pure(),
+                              {dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                       PinDir::In, anyArray()),
+                               dataPin(QStringLiteral("v"), QStringLiteral("value"),
+                                       PinDir::In, prim(PinKind::Any)),
+                               dataPin(QStringLiteral("ret"), QString(), PinDir::Out,
+                                       prim(PinKind::Int))},
+                              true);
+    arrFind.doc = help(
+        QStringLiteral("The index of the first matching element."),
+        {QStringLiteral("Emits `array.Find(value)`."),
+         QStringLiteral("Answers -1 when nothing matches, so test for that rather than "
+                        "for 0, which is a real index.")});
+    add(arrFind);
+
+    NodeDef arrSort = makeDef(bi::ArraySort, QStringLiteral("Array Sort"),
+                              QStringLiteral("Sort(reverse)"), CatArrays, accents::call(),
+                              {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                               execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                               dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                       PinDir::In, anyArray()),
+                               dataPin(QStringLiteral("reverse"), QStringLiteral("reverse"),
+                                       PinDir::In, prim(PinKind::Bool))});
+    arrSort.doc = help(
+        QStringLiteral("Sorts an array in place."),
+        {QStringLiteral("Emits `array.Sort(reverse);`. The array itself changes; nothing "
+                        "comes back out.")},
+        {QStringLiteral("It sorts what the engine can compare: numbers and strings. An "
+                        "array of script objects has no order the engine knows about.")});
+    add(arrSort);
+
+    NodeDef arrFor = makeDef(bi::ArrayForIndex, QStringLiteral("For Each Index"),
+                             QStringLiteral("count and loop"), CatArrays, accents::flow(),
+                             {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                              dataPin(QStringLiteral("arr"), QStringLiteral("array"),
+                                      PinDir::In, anyArray()),
+                              execPin(QStringLiteral("body"), QStringLiteral("body"),
+                                      PinDir::Out),
+                              dataPin(QStringLiteral("index"), QStringLiteral("index"),
+                                      PinDir::Out, prim(PinKind::Int)),
+                              dataPin(QStringLiteral("item"), QStringLiteral("item"),
+                                      PinDir::Out, prim(PinKind::Any)),
+                              execPin(QStringLiteral("done"), QStringLiteral("done"),
+                                      PinDir::Out)});
+    arrFor.doc = help(
+        QStringLiteral("Walks an array by index rather than by element."),
+        {QStringLiteral("Emits `for (int i = 0; i < arr.Count(); i++)`, with the array "
+                        "held in a local first so it is not fetched every time round."),
+         QStringLiteral("The `item` pin reads `arr.Get(i)`, so both the position and the "
+                        "element are available inside the body."),
+         QStringLiteral("For Each is the one to reach for when only the element matters. "
+                        "This is the one that gives you the index as well.")},
+        {QStringLiteral("Removing elements inside the body changes what Count answers "
+                        "part way through. Count downwards when the body removes.")});
+    add(arrFor);
+
     // --------------------------------------------------------------- utility
     NodeDef print = makeDef(bi::Print, QStringLiteral("Print"),
                             QStringLiteral("Print(value)"), CatUtility, accents::call(),
@@ -959,7 +1187,7 @@ NodeDef Builtins::def(const QString &id) const
 QStringList Builtins::categories() const
 {
     return {CatLifecycle, CatFlow, CatVariables, CatOperators,
-            CatLiterals, CatCasting, CatTiming, CatUtility};
+            CatLiterals, CatCasting, CatTiming, CatArrays, CatUtility};
 }
 
 LifecycleSig Builtins::beginMode(const QString &key) const
@@ -1032,6 +1260,59 @@ NodeDef Builtins::defForNode(const GraphNode &node, const Catalog &cat) const
             d.subtitle = QStringLiteral("%1(), %2").arg(name, queue);
         else
             d.subtitle = QStringLiteral("Remove(%1), %2").arg(name, queue);
+        return d;
+    }
+
+    // Make Array is shaped by the user, so it never takes the empty-opts
+    // shortcut below: a node with no opts at all still carries the default
+    // number of element pins, and drawing it without them would leave nowhere
+    // to put the first value.
+    if (base.key == bi::MakeArray) {
+        const QString elem = bi::declaredElementType(node);
+        const PinType t = elem.isEmpty() ? PinType{PinKind::Any, {}, false}
+                                         : pinTypeOf(elem, isEnumFn);
+        PinType arr = t;
+        arr.isArray = true;
+        NodeDef d = base;
+        if (!elem.isEmpty()) d.subtitle = QStringLiteral("a new array<%1>").arg(elem);
+        d.pins = {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                  execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                  dataPin(QStringLiteral("arr"), QStringLiteral("array"), PinDir::Out, arr)};
+        const int count = bi::listCount(node, base.list);
+        for (int i = 0; i < count; ++i) {
+            d.pins.append(dataPin(bi::listPinId(base.list, i),
+                                  QStringLiteral("%1").arg(i), PinDir::In, t));
+        }
+        return d;
+    }
+
+    // The rest of the array group takes its element type the same way, so one
+    // setting in Details types the whole run of them. Nothing else about the
+    // node moves, which is why this can run off a shared list of pin ids.
+    if (base.key == bi::ArrayGet || base.key == bi::ArrayInsert
+        || base.key == bi::ArrayInsertAt || base.key == bi::ArrayFind
+        || base.key == bi::ArrayForIndex || base.key == bi::ArrayCount
+        || base.key == bi::ArrayRemove || base.key == bi::ArrayClear
+        || base.key == bi::ArraySort) {
+        const QString elem = bi::declaredElementType(node);
+        if (elem.isEmpty()) return base;
+        const PinType t = pinTypeOf(elem, isEnumFn);
+        PinType arr = t;
+        arr.isArray = true;
+        NodeDef d = base;
+        d.subtitle = QStringLiteral("%1 on array<%2>").arg(base.subtitle, elem);
+        for (Pin &p : d.pins) {
+            if (p.id == QLatin1String("arr")) p.type = arr;
+            // The element travels on `v` going in and on `ret` or `item` coming
+            // out. Count and Find answer an int whatever the array holds, so
+            // their `ret` is left alone.
+            const bool carriesElement =
+                p.id == QLatin1String("v")
+                || (p.id == QLatin1String("item") && p.dir == PinDir::Out)
+                || (p.id == QLatin1String("ret") && p.dir == PinDir::Out
+                    && base.key == bi::ArrayGet);
+            if (carriesElement) p.type = t;
+        }
         return d;
     }
 

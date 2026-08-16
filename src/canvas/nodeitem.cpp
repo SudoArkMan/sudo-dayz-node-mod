@@ -1,5 +1,6 @@
 #include "nodeitem.h"
 
+#include "builtins.h"
 #include "catalog.h"
 #include "document.h"
 #include "enforce/lexer.h"
@@ -14,6 +15,7 @@
 #include <QGraphicsView>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QMarginsF>
 #include <QMenu>
 #include <QPainter>
 #include <QPainterPath>
@@ -87,6 +89,25 @@ constexpr double kMinTitleWidth = 42.0;
 constexpr double kMaxWidth = 340.0;
 // A value field narrower than this is not worth clicking.
 constexpr double kMinFieldWidth = 44.0;
+// Between a pin's name and the type it carries.
+constexpr double kTypeGap = 5.0;
+// A type cut down to two letters and a cut mark names nothing, so below this
+// the type gives up its half of the row and the name keeps the whole of it.
+constexpr double kMinTypeWidth = 18.0;
+// A sentence with less room than this is a fragment, and a fragment on a node
+// is worse than the empty row it replaced.
+constexpr double kMinSummaryWidth = 46.0;
+// How much of the type's colour survives. The dot on the edge of the row is the
+// loud copy of this information; the word is the quiet one that says which
+// class, and it must not compete with the pin's own name.
+constexpr int kTypeAlpha = 165;
+
+// The element controls on a node whose pin list the user decides. Square, so
+// the two read as a pair of buttons rather than as two more value fields, and
+// the same height as an inline field so the footer sits on the same rhythm as
+// the rows above it.
+constexpr double kListButton = 9.0;
+constexpr double kListGap = 3.0;
 
 // Code body. The maximum width is a readability limit rather than a technical
 // one: past roughly seventy monospace columns a node stops being a node and
@@ -239,6 +260,74 @@ QString noteOf(const GraphNode &n)
     return comments.first() + QStringLiteral("   +%1 more").arg(comments.size() - 1);
 }
 
+// The type a pin carries, spelled the way the declaration spelled it.
+//
+// A pin kept only a kind and, for an object, a class name, so `ref array<ref
+// ItemBase>` comes back off the pin as `array<ItemBase>`: the same
+// instantiation to the connection rules, a different string to anyone reading
+// it, and not the string they will search P:\scripts for. The signature still
+// holds the original, so it answers first and the pin answers for what the
+// signature has no entry for.
+//
+// `sig` is resolved once per node rather than once per pin: it allocates a
+// vector of parameters, and a node with twelve pins would build twelve of them.
+QString declaredPinType(const MethodSig &sig, const Pin &pin)
+{
+    if (sig.valid) {
+        if (pin.id == QLatin1String("ret")) return sig.ret;
+        // Catalog::paramPins numbers both the input and the output of a
+        // parameter after the parameter itself, so the digits are a direct
+        // index rather than a count of the pins before it.
+        const QChar family = pin.id.isEmpty() ? QChar() : pin.id.at(0);
+        if (pin.id.size() > 1
+            && (family == QLatin1Char('p') || family == QLatin1Char('o'))) {
+            bool ok = false;
+            const int index = pin.id.mid(1).toInt(&ok);
+            if (ok && index >= 0 && index < sig.params.size())
+                return sig.params.at(index).type;
+        }
+    }
+    return pinTypeName(pin.type);
+}
+
+// Labels the catalogue writes when it has nothing to say. Which side of the
+// node a pin sits on already means "this comes out", so `return` is a word
+// spent restating the geometry, and the type is what the row could have said
+// instead. Nothing else is treated this way: `object`, `value` and `self` all
+// name something the type does not.
+bool isPlaceholderLabel(const QString &label)
+{
+    return label == QLatin1String("return");
+}
+
+// The first sentence of a vanilla doc comment, ready to draw on one row.
+//
+// The index flattens the whole comment into one string, so the prose, the
+// `[note]` and `[warning]` blocks and the parameter list arrive run together
+// and the sentence has to stop at whichever of them comes first rather than at
+// the full stop. Backticks go too: the canvas has no second font to switch to.
+QString firstSentence(const QString &doc)
+{
+    QString text = doc.simplified();
+    text.remove(QLatin1Char('`'));
+    if (text.isEmpty()) return text;
+
+    static const QStringList blocks = {
+        QStringLiteral("[note]"),   QStringLiteral("[warning]"),
+        QStringLiteral("\\see"),    QStringLiteral("\\param"),
+        QStringLiteral("\\return"), QStringLiteral("\\note"),
+        QStringLiteral(" param "),  QStringLiteral(" return "),
+    };
+    int cut = text.size();
+    for (const QString &block : blocks) {
+        const int at = text.indexOf(block, 0, Qt::CaseInsensitive);
+        if (at >= 0) cut = qMin(cut, at);
+    }
+    const int stop = text.indexOf(QLatin1String(". "));
+    if (stop >= 0) cut = qMin(cut, stop + 1);
+    return text.left(cut).trimmed();
+}
+
 Severity worstOf(const QVector<Diagnostic> &diags, bool *any)
 {
     Severity worst = Severity::Info;
@@ -311,6 +400,9 @@ void NodeItem::refresh()
     const GraphNode *n = g ? g->node(m_nodeId) : nullptr;
 
     prepareGeometryChange();
+    // Whatever it said before, it is about to say something else.
+    m_tipReady = false;
+    setToolTip(QString());
     if (!n) {
         // The node went away under us; keep the item inert until the scene
         // rebuilds rather than reading a dangling def.
@@ -322,14 +414,26 @@ void NodeItem::refresh()
         m_headerHeight = headerHeight;
         m_pinsOnHeader = false;
         m_height = headerHeight + padding * 2;
+        m_listRow = QRectF();
+        m_listMinus = QRectF();
+        m_listPlus = QRectF();
+        m_listCount = 0;
         m_sourceTag.clear();
         m_sourceColor = QColor();
         m_note.clear();
+        m_summary.clear();
+        m_summaryRect = QRectF();
+        m_bandRule = 0.0;
         update();
         return;
     }
 
     m_note = noteOf(*n);
+    // Only what Bohemia wrote about this declaration. A builtin already spends
+    // its subtitle on a description of itself ("if / else", "runs once on
+    // init"), so a second sentence saying the same thing in more words would be
+    // the node arguing with its own header.
+    m_summary = m_doc ? firstSentence(m_doc->catalog().doc(n->ref)) : QString();
     resolveSource(*n);
     m_def = m_doc->defForNode(*n);
     if (m_def.valid) {
@@ -390,6 +494,11 @@ double NodeItem::sourceTagWidth() const
 void NodeItem::setDiagnostics(const QVector<Diagnostic> &diags)
 {
     m_diags = diags;
+    // The tooltip ends with the findings, so it is now out of date. The badge in
+    // the header says a node has one; the tooltip is the only place on the
+    // canvas that says which.
+    m_tipReady = false;
+    setToolTip(QString());
     update();
 }
 
@@ -495,7 +604,8 @@ double NodeItem::codeBlockHeight() const
 // so the row needs both labels, the gap between them, and the value field when
 // the input carries one.
 double NodeItem::contentWidth(const QVector<Pin> &dataIn,
-                              const QVector<Pin> &dataOut) const
+                              const QVector<Pin> &dataOut,
+                              const GraphNode *node) const
 {
     const QFontMetricsF tm(titleFont());
     const QFontMetricsF sm(smallFont());
@@ -511,22 +621,64 @@ double NodeItem::contentWidth(const QVector<Pin> &dataIn,
                     + sm.horizontalAdvance(m_subtitle) + kBadgeRadius * 2.0
                     + (tag > 0.0 ? tag + kTagGap : 0.0);
 
+    // The footer, when there is one: the count on the left and the two buttons
+    // on the right, which must not overlap at the default width.
+    if (m_def.list.valid()) {
+        widest = qMax(widest, kLabelInset * 2.0
+                                  + sm.horizontalAdvance(QStringLiteral("00 elements"))
+                                  + padding + kListButton * 2.0 + kListGap);
+    }
+
+    // Every value field on the node shares one right edge, taken from the row
+    // that can spare the least, so the width has to be solved against that one
+    // rather than against each row's own output label.
+    double outRoom = 0.0;
+    for (int i = 0; i < dataOut.size() && i < dataIn.size(); ++i) {
+        if (dataOut.at(i).label.isEmpty()) continue;
+        if (fieldEditorFor(dataIn.at(i).type) == InlineEditor::None) continue;
+        outRoom = qMax(outRoom, sm.horizontalAdvance(dataOut.at(i).label)
+                                    + kLabelInset + padding);
+    }
+
     for (int i = 0; i < qMax(dataIn.size(), dataOut.size()); ++i) {
         double row = kLabelInset * 2.0;
         if (i < dataIn.size()) {
             const Pin &p = dataIn.at(i);
             row += sm.horizontalAdvance(p.label);
             // An unconnected literal gets a field on the same row, and the
-            // field has to hold its own text rather than eliding it too.
+            // field has to hold its own text rather than eliding it too. What
+            // the author typed is measured, not the declaration's default: the
+            // value on the node is the thing they came to read, and a node
+            // sized to "unset" shows them the first eight characters of it.
             if (fieldEditorFor(p.type) != InlineEditor::None) {
-                const QString value = p.def.isEmpty() ? QStringLiteral("unset") : p.def;
-                row += padding + qMax(kMinFieldWidth, vm.horizontalAdvance(value) + padding * 2.0);
+                QString value = node ? node->inputs.value(p.id) : QString();
+                if (value.isEmpty()) value = p.def;
+                if (value.isEmpty()) value = QStringLiteral("unset");
+                // An enum draws a chevron inside the box, so its text stops
+                // short of the edge by that much again.
+                const double chevron =
+                    p.type.kind == PinKind::Enum && !p.type.isArray ? 7.0 : 0.0;
+                const double text = vm.horizontalAdvance(value) + padding + chevron;
+                row += padding + qMax(kMinFieldWidth, text);
+                // The field is PLACED as a fraction of the finished width
+                // rather than packed after the label, so summing the row is
+                // not enough: the width has to be solved for, or a value wide
+                // enough to have widened the node still elides inside a box
+                // that grew by less than the node did.
+                widest = qMax(widest, (qMax(kMinFieldWidth, text) + outRoom) / 0.48);
+                widest = qMax(widest, (kLabelInset + sm.horizontalAdvance(p.label) + 3.0)
+                                          / 0.46);
             }
         }
         if (i < dataOut.size()) row += padding * 2.0 + sm.horizontalAdvance(dataOut.at(i).label);
         widest = qMax(widest, row);
     }
     return std::ceil(widest);
+}
+
+bool NodeItem::alreadyOnHeader(const QString &type) const
+{
+    return !type.isEmpty() && (type == m_title || type == m_subtitle);
 }
 
 void NodeItem::layoutPins()
@@ -545,11 +697,20 @@ void NodeItem::layoutPins()
     const int dataRows = qMax(dataIn.size(), dataOut.size());
     const int rows = execRows + dataRows;
 
+    m_listRow = QRectF();
+    m_listMinus = QRectF();
+    m_listPlus = QRectF();
+    m_listCount = 0;
+    const GraphNode *node = g ? g->node(m_nodeId) : nullptr;
+    const bool hasList = m_def.list.valid() && node;
+    if (hasList) m_listCount = bi::listCount(*node, m_def.list);
+
     // Widen to whatever the node has to say. A catalogue call carries its
     // optional parameters as `name = DEFAULT`, and at the fixed width those
     // came out as `plugin = LOG_D...`, which names neither the parameter nor
     // the default. A code node has already sized itself, so leave it alone.
-    if (m_code.isEmpty()) m_width = qBound(width, contentWidth(dataIn, dataOut), kMaxWidth);
+    if (m_code.isEmpty())
+        m_width = qBound(width, contentWidth(dataIn, dataOut, node), kMaxWidth);
 
     // A raw node's pins ride on the header itself: one exec in, one exec out,
     // and nothing to fill a row of their own with. Given a row below the header
@@ -563,7 +724,49 @@ void NodeItem::layoutPins()
     m_height = m_codeTop + (codeH > 0.0 ? codeH : padding);
     m_height = qMax(m_height, m_headerHeight + padding * 2);
 
-    const auto place = [&](const QVector<Pin> &list, int firstRow, bool left) {
+    // The footer goes under everything else, so growing the list pushes the
+    // controls down with the pins they belong to rather than the other way
+    // round. A code node never has one; the two shapes do not combine.
+    if (hasList && m_code.isEmpty()) {
+        m_listRow = QRectF(0.0, m_codeTop, m_width, pinRow);
+        const double top = m_listRow.center().y() - kListButton / 2.0;
+        m_listPlus = QRectF(m_width - padding - kListButton, top, kListButton, kListButton);
+        m_listMinus = QRectF(m_listPlus.left() - kListGap - kListButton, top, kListButton,
+                             kListButton);
+        m_height = m_listRow.bottom() + padding;
+    }
+
+    // What the output on a data row wants for its own label. The value field
+    // has to stop short of it: the field is placed as a fraction of the width
+    // and an output label is right-aligned, so on a row carrying both they ran
+    // over each other. Make Array is the first node with a labelled output
+    // beside a field, but nothing stopped an existing one from having one.
+    // One right edge for every value field on the node, taken from the row that
+    // can spare the least. A per-row edge would leave a ragged column, and the
+    // column is the thing a reader scans down.
+    const QFontMetricsF labelMetrics(smallFont());
+    const double fieldLeft = m_width * 0.46;
+    double fieldRight = m_width * 0.94;
+    for (int i = 0; i < dataOut.size() && i < dataIn.size(); ++i) {
+        if (dataOut.at(i).label.isEmpty()) continue;
+        const Pin &in = dataIn.at(i);
+        if (fieldEditorFor(in.type) == InlineEditor::None) continue;
+        fieldRight = qMin(fieldRight,
+                          m_width * 0.94
+                              - labelMetrics.horizontalAdvance(dataOut.at(i).label)
+                              - kLabelInset - padding);
+    }
+    fieldRight = qMax(fieldRight, fieldLeft + kMinFieldWidth);
+
+    // One signature for the whole node. Every pin's declared type comes out of
+    // it, and building it per pin would allocate a parameter vector per row.
+    MethodSig sig;
+    if (m_doc && node) {
+        sig = m_doc->catalog().method(node->ref);
+        if (!sig.valid) sig = m_doc->catalog().globalFn(node->ref);
+    }
+
+    const auto place = [&](const QVector<Pin> &list, int firstRow, bool left, bool data) {
         for (int i = 0; i < list.size(); ++i) {
             PinLayout pl;
             pl.pin = list.at(i);
@@ -579,7 +782,7 @@ void NodeItem::layoutPins()
                                   && fieldEditorFor(pl.pin.type) != InlineEditor::None;
             if (editable) {
                 const double h = pinRow - 4.0;
-                pl.editor = QRectF(m_width * 0.46, y - h / 2.0, m_width * 0.48, h);
+                pl.editor = QRectF(fieldLeft, y - h / 2.0, fieldRight - fieldLeft, h);
                 // The row band the box sits in, reaching a little past it on
                 // both sides. The box is four units shorter than its row, and
                 // every one of those units used to be a press that selected the
@@ -590,16 +793,77 @@ void NodeItem::layoutPins()
                 pl.hit = QRectF(left, y - pinRow / 2.0,
                                 pl.editor.right() + 2.0 - left, pinRow);
             }
+            // An input with a field owns the space up to it; one without gets
+            // the same share it always had. An output stops where the field on
+            // its row ends, and takes the old share when there is none.
+            const bool sharesWithField =
+                data && !left && i < dataIn.size()
+                && fieldEditorFor(dataIn.at(i).type) != InlineEditor::None
+                && (g ? edgeInto(*g, m_nodeId, dataIn.at(i).id) == nullptr : true);
+            if (left) {
+                pl.labelRoom = pl.editor.isEmpty() ? m_width * 0.62
+                                                   : pl.editor.left() - kLabelInset - 3.0;
+            } else {
+                pl.labelRoom = sharesWithField
+                                   ? m_width - kLabelInset - fieldRight - padding
+                                   : m_width * 0.62;
+            }
+
+            // What the row says about the type it carries. Three rows say it
+            // another way and do not repeat themselves: an exec pin has no
+            // type, a row with a value field spends its width on the literal
+            // the author typed, which answers the question harder than the type
+            // name does, and a pin whose type is already a word on the header
+            // (every `target`, whose class IS the subtitle) has been answered
+            // once already.
+            if (pl.pin.type.kind != PinKind::Exec && pl.editor.isEmpty()) {
+                const QString declared = declaredPinType(sig, pl.pin);
+                if (!alreadyOnHeader(declared)) pl.typeText = declared;
+            }
             m_pins.append(pl);
         }
     };
 
     // Exec pins own the first rows on both sides, so a flow reads top to
-    // bottom no matter how many parameters a call has.
-    place(execIn, 0, true);
-    place(execOut, 0, false);
-    place(dataIn, execRows, true);
-    place(dataOut, execRows, false);
+    // bottom no matter how many parameters a call has. Data inputs are placed
+    // before data outputs so an output on a shared row already knows where the
+    // field beside it stopped.
+    place(execIn, 0, true, false);
+    place(execOut, 0, false, false);
+    place(dataIn, execRows, true, true);
+    place(dataOut, execRows, false, true);
+
+    // The rule between the flow rows and the data rows. It is the only division
+    // a node gets, because it is the only one that is real: above it the node
+    // says when it runs, below it what it works on. A second rule between the
+    // receiver and the arguments would put two lines on a three-row node.
+    m_bandRule = (execRows > 0 && dataRows > 0 && m_code.isEmpty())
+                     ? rowsTop + execRows * pinRow
+                     : 0.0;
+
+    // The declaration's sentence goes in the exec row, which on a call node
+    // holds a triangle at each edge and a hundred and fifty units of nothing in
+    // between. That is the "mostly empty body": not padding, a whole row the
+    // node was already paying for. Whatever labels the exec pins carry are
+    // measured out of the way first, so Branch's `true` keeps its corner.
+    m_summaryRect = QRectF();
+    if (!m_summary.isEmpty() && execRows > 0 && m_code.isEmpty()) {
+        const QFontMetricsF sm(smallFont());
+        double from = kLabelInset;
+        double to = m_width - kLabelInset;
+        for (const PinLayout &pl : m_pins) {
+            if (pl.pin.type.kind != PinKind::Exec) continue;
+            if (pl.pos.y() > rowsTop + pinRow) continue;
+            const double label = pl.pin.label.isEmpty()
+                                     ? 0.0
+                                     : sm.horizontalAdvance(pl.pin.label) + kTypeGap;
+            const double clear = kExecHalfWidth + 4.0 + label;
+            if (pl.pin.dir == PinDir::In) from = qMax(from, clear);
+            else to = qMin(to, m_width - clear);
+        }
+        if (to - from >= kMinSummaryWidth)
+            m_summaryRect = QRectF(from, rowsTop, to - from, pinRow);
+    }
 }
 
 QPointF NodeItem::pinScenePos(const QString &pinId, PinDir dir) const
@@ -649,6 +913,22 @@ QString NodeItem::editorAt(const QPointF &scenePos, double reach) const
         best = pl.pin.id;
     }
     return best;
+}
+
+int NodeItem::listButtonAt(const QPointF &scenePos, double reach) const
+{
+    if (m_listMinus.isEmpty()) return 0;
+    const QPointF local = mapFromScene(scenePos);
+    // Grown the same way a value field is, and for the same reason: nine scene
+    // units is a seven pixel target once a long graph is zoomed to fit. The
+    // two grown boxes overlap in the gap between them, so the winner is the
+    // nearer centre rather than whichever is tested first. Testing in order
+    // would make every press in that gap a removal.
+    const double grow = qBound(0.0, reach, kListButton);
+    const QMarginsF pad(grow, grow, grow, grow);
+    const QRectF pair = m_listMinus.united(m_listPlus).marginsAdded(pad);
+    if (!pair.contains(local)) return 0;
+    return local.x() < (m_listMinus.right() + m_listPlus.left()) / 2.0 ? -1 : 1;
 }
 
 const NodeItem::PinLayout *NodeItem::layoutForPin(const QString &pinId) const
@@ -908,6 +1188,143 @@ void NodeItem::paintValueField(QPainter *p, const PinLayout &pl,
                 sm.elidedText(value, Qt::ElideRight, tr.width()));
 }
 
+// A pin's name and the type it carries, sharing the row's room.
+//
+// The name is what a reader is hunting for and the type is what they can get
+// back by hovering, so when the two do not both fit the type gives up its half,
+// and gives it up whole rather than shrinking to two letters and a cut mark.
+// The one exception is `return`, which is not a name at all: it restates which
+// side of the node the pin is on, and on that row the type is the only thing
+// worth the width.
+void NodeItem::paintPinText(QPainter *p, const PinLayout &pl) const
+{
+    const bool left = pl.pin.dir == PinDir::In;
+    const double room = pl.labelRoom;
+    if (room <= 10.0) return;
+
+    QString label = pl.pin.label;
+    QString type = pl.typeText;
+    if (isPlaceholderLabel(label) && !type.isEmpty()) label.clear();
+    if (label.isEmpty() && type.isEmpty()) return;
+
+    const QFont sf = smallFont();
+    const QFontMetricsF sm(sf);
+    p->setFont(sf);
+
+    double labelW = label.isEmpty() ? 0.0 : sm.horizontalAdvance(label);
+    const double gap = (label.isEmpty() || type.isEmpty()) ? 0.0 : kTypeGap;
+    double typeW = type.isEmpty() ? 0.0 : sm.horizontalAdvance(type);
+    if (labelW + gap + typeW > room) {
+        typeW = qMax(0.0, room - labelW - gap);
+        if (typeW < kMinTypeWidth) {
+            type.clear();
+            typeW = 0.0;
+        }
+    }
+    labelW = qMin(labelW, room - typeW - (type.isEmpty() ? 0.0 : kTypeGap));
+
+    // The whole row is used for the vertical extent so a descender is not cut
+    // off, the same reason paintValueField measures its text against the row.
+    const double top = pl.pos.y() - pinRow / 2.0;
+    // Names run outward from the pin, so an input reads name then type left to
+    // right and an output reads type then name into the right edge. Both put
+    // the name against the node's own edge, which is the column a reader scans.
+    const double outerX = left ? kLabelInset : m_width - kLabelInset - labelW;
+    const double typeX = left ? outerX + labelW + kTypeGap
+                              : m_width - kLabelInset - labelW - kTypeGap - typeW;
+
+    if (!label.isEmpty()) {
+        p->setPen(theme::textDim());
+        p->drawText(QRectF(outerX, top, labelW, pinRow),
+                    (left ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignVCenter,
+                    sm.elidedText(label, Qt::ElideRight, labelW));
+    }
+    if (type.isEmpty()) return;
+
+    // The type takes the pin's own colour, pulled back. The dot on the edge is
+    // already saying this in the loudest form it has; the word is here to say
+    // which class, not to say it twice as brightly.
+    QColor c = pinColor(pl.pin.type.kind);
+    c.setAlpha(kTypeAlpha);
+    p->setPen(c);
+    const double x = label.isEmpty() ? (left ? kLabelInset : m_width - kLabelInset - typeW)
+                                     : typeX;
+    p->drawText(QRectF(x, top, typeW, pinRow),
+                (left ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignVCenter,
+                sm.elidedText(type, Qt::ElideRight, typeW));
+}
+
+// The sentence Bohemia wrote about this declaration, and the rule under the
+// flow rows. Both draw into space the node already had.
+void NodeItem::paintSummary(QPainter *p) const
+{
+    if (m_bandRule > 0.0) {
+        QColor rule = theme::border();
+        rule.setAlpha(120);
+        p->setPen(QPen(rule, 0.6));
+        p->drawLine(QLineF(padding, m_bandRule, m_width - padding, m_bandRule));
+    }
+    if (m_summaryRect.isEmpty()) return;
+
+    const QFont sf = smallFont();
+    const QFontMetricsF sm(sf);
+    p->setFont(sf);
+    // The same colour the author's own note above the header takes. Both are
+    // somebody's prose about this node rather than part of it, and reading as
+    // one thing is right: one was written in the mod, one in P:\scripts.
+    p->setPen(theme::syntax::comment());
+    p->drawText(m_summaryRect, Qt::AlignLeft | Qt::AlignVCenter,
+                sm.elidedText(m_summary, Qt::ElideRight, m_summaryRect.width()));
+}
+
+// "3 elements" and the two controls that change it. The buttons are drawn
+// hollow and take the accent only under the cursor, so a node full of value
+// fields does not gain two more things competing for attention.
+void NodeItem::paintListRow(QPainter *p) const
+{
+    if (m_listRow.isEmpty()) return;
+
+    p->setPen(QPen(theme::border(), 0.6));
+    p->drawLine(QLineF(padding, m_listRow.top(), m_width - padding, m_listRow.top()));
+
+    const QFont sf = smallFont();
+    p->setFont(sf);
+    p->setPen(theme::textDim());
+    const QString label = m_listCount == 1
+                              ? QStringLiteral("1 %1").arg(m_def.list.label).left(64)
+                              : QStringLiteral("%1 %2").arg(m_listCount).arg(m_def.list.label);
+    p->drawText(QRectF(kLabelInset, m_listRow.top(), m_listMinus.left() - kLabelInset - 3.0,
+                       m_listRow.height()),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QFontMetricsF(sf).elidedText(label, Qt::ElideRight,
+                                             m_listMinus.left() - kLabelInset - 3.0));
+
+    const auto button = [&](const QRectF &box, bool plus, bool hovered, bool enabled) {
+        QPainterPath path;
+        path.addRoundedRect(box, 2.0, 2.0);
+        p->fillPath(path, theme::windowBg());
+        QColor edge = enabled ? theme::border() : theme::border().darker(130);
+        if (hovered && enabled) {
+            edge = theme::accent();
+            edge.setAlpha(200);
+        }
+        p->setPen(QPen(edge, hovered && enabled ? 0.9 : 0.6));
+        p->setBrush(Qt::NoBrush);
+        p->drawPath(path);
+
+        const QPointF c = box.center();
+        const double arm = box.width() / 2.0 - 2.6;
+        p->setPen(QPen(enabled ? (hovered ? theme::text() : theme::textDim())
+                               : theme::textDim().darker(140),
+                       1.1));
+        p->drawLine(QLineF(c.x() - arm, c.y(), c.x() + arm, c.y()));
+        if (plus) p->drawLine(QLineF(c.x(), c.y() - arm, c.x(), c.y() + arm));
+    };
+
+    button(m_listMinus, false, m_hoverListButton < 0, m_listCount > m_def.list.min);
+    button(m_listPlus, true, m_hoverListButton > 0, m_listCount < m_def.list.max);
+}
+
 void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *w)
 {
     Q_UNUSED(opt);
@@ -1029,7 +1446,6 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
     }
 
     for (const PinLayout &pl : m_pins) {
-        const bool left = pl.pin.dir == PinDir::In;
         const QColor c = pinColor(pl.pin.type.kind);
 
         // The halo says "a press here grabs this pin" before the press happens.
@@ -1060,26 +1476,15 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
             p->drawEllipse(pl.pos, r, r);
         }
 
-        if (!pl.pin.label.isEmpty()) {
-            const double avail = pl.editor.isEmpty()
-                                     ? m_width * 0.62
-                                     : pl.editor.left() - kLabelInset - 3.0;
-            if (avail > 10.0) {
-                const QRectF lr = left
-                    ? QRectF(kLabelInset, pl.pos.y() - pinRow / 2.0, avail, pinRow)
-                    : QRectF(m_width - kLabelInset - avail, pl.pos.y() - pinRow / 2.0,
-                             avail, pinRow);
-                p->setFont(sf);
-                p->setPen(theme::textDim());
-                p->drawText(lr, (left ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignVCenter,
-                            sm.elidedText(pl.pin.label, Qt::ElideRight, avail));
-            }
-        }
+        paintPinText(p, pl);
 
         if (pl.editor.isEmpty()) continue;
         paintValueField(p, pl, node ? node->inputs.value(pl.pin.id, pl.pin.def)
                                     : pl.pin.def);
     }
+
+    paintSummary(p);
+    paintListRow(p);
 
     QColor outline = theme::nodeOutline();
     double outlineWidth = 1.0;
@@ -1122,8 +1527,10 @@ void NodeItem::mousePressEvent(QGraphicsSceneMouseEvent *e)
         return;
     }
 
-    const QString pinId = editorAt(e->scenePos(), editorReach(e->widget()));
-    if (pinId.isEmpty()) {
+    const double reach = editorReach(e->widget());
+    const int listButton = listButtonAt(e->scenePos(), reach);
+    const QString pinId = listButton == 0 ? editorAt(e->scenePos(), reach) : QString();
+    if (listButton == 0 && pinId.isEmpty()) {
         QGraphicsObject::mousePressEvent(e);
         return;
     }
@@ -1144,6 +1551,12 @@ void NodeItem::mousePressEvent(QGraphicsSceneMouseEvent *e)
         setSelected(true);
     }
     e->accept();
+    if (listButton != 0) {
+        // The commit rebuilds the scene, so nothing may touch this item after
+        // it. Same rule the checkbox in activateEditor works to.
+        setNodeListCount(m_doc, m_nodeId, m_listCount + listButton);
+        return;
+    }
     activateEditor(pinId, e->widget(), e->screenPos());
 }
 
@@ -1151,8 +1564,14 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e)
 {
     // The press already acted on the field. Letting the second click through
     // would flip a bool straight back, which reads as the click doing nothing.
+    // A second press on plus is a second element, so that one is left alone.
     if (!editorAt(e->scenePos(), editorReach(e->widget())).isEmpty()) {
         e->accept();
+        return;
+    }
+    if (listButtonAt(e->scenePos(), editorReach(e->widget())) != 0) {
+        e->accept();
+        mousePressEvent(e);
         return;
     }
 
@@ -1160,14 +1579,119 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e)
     QGraphicsObject::mouseDoubleClickEvent(e);
 }
 
+// Everything the catalogue holds and the node has no room for: the whole
+// signature with every parameter and its default, where the declaration lives
+// in P:\scripts, what it does at length, what it will do to you, and which
+// findings the badge in the corner is standing for.
+//
+// The canvas is glanced at and this is asked for, which is the whole reason it
+// can be this long. Plain text, not rich: a stylesheet here would be a second
+// theme nobody maintains, and a tooltip is read once and dismissed.
+QString NodeItem::buildTooltip() const
+{
+    const Graph *g = m_doc ? m_doc->activeGraph() : nullptr;
+    const GraphNode *node = g ? g->node(m_nodeId) : nullptr;
+    if (!node || !m_doc) return QString();
+
+    QStringList out;
+    const Catalog &cat = m_doc->catalog();
+
+    MethodSig sig = cat.method(node->ref);
+    const bool isMethod = sig.valid;
+    if (!sig.valid) sig = cat.globalFn(node->ref);
+    if (sig.valid) {
+        QStringList args;
+        for (const MethodSig::Param &p : sig.params) {
+            const QString dir = p.dir == 1 ? QStringLiteral("out ")
+                                : p.dir == 2 ? QStringLiteral("inout ")
+                                             : QString();
+            QString one = QStringLiteral("%1%2 %3").arg(dir, p.type, p.name);
+            // The default is why an optional parameter has no value field on
+            // the node: leave it unwired and the call is written without it.
+            if (!p.def.isEmpty()) one += QStringLiteral(" = ") + p.def;
+            args << one;
+        }
+        QStringList lead;
+        if (sig.flags & flag::Static) lead << QStringLiteral("static");
+        if (sig.flags & flag::Protected) lead << QStringLiteral("protected");
+        if (sig.flags & flag::Native) lead << QStringLiteral("proto native");
+        if (sig.flags & flag::Override) lead << QStringLiteral("override");
+        const QString name = isMethod && !sig.owner.isEmpty()
+                                 ? sig.owner + QStringLiteral("::") + sig.name
+                                 : sig.name;
+        out << (lead.isEmpty() ? QString() : lead.join(QLatin1Char(' ')) + QLatin1Char(' '))
+                   + QStringLiteral("%1 %2(%3)")
+                         .arg(sig.ret, name, args.join(QStringLiteral(", ")));
+    } else {
+        out << (m_def.valid ? m_def.title : node->ref);
+        if (!m_def.subtitle.isEmpty()) out.last() += QStringLiteral("  ") + m_def.subtitle;
+    }
+
+    const NodeHelp help = cat.explain(node->ref);
+    const QString summary = help.valid && !help.summary.isEmpty() ? help.summary : m_def.doc;
+    if (!summary.isEmpty()) {
+        QString prose = summary;
+        prose.remove(QLatin1Char('`'));
+        out << QString() << prose;
+    }
+    if (help.valid && !help.cautions.isEmpty()) {
+        out << QString();
+        for (const QString &c : help.cautions) {
+            QString one = c;
+            one.remove(QLatin1Char('`'));
+            out << QStringLiteral("Caution: ") + one;
+        }
+    }
+
+    const QString where = help.valid && !help.source.isEmpty() ? help.source : m_def.loc;
+    if (!where.isEmpty()) out << QString() << where;
+
+    if (!m_diags.isEmpty()) {
+        out << QString();
+        for (const Diagnostic &d : m_diags) {
+            QString one = d.message;
+            one.remove(QLatin1Char('`'));
+            if (!d.hint.isEmpty()) {
+                QString hint = d.hint;
+                hint.remove(QLatin1Char('`'));
+                one += QLatin1Char(' ') + hint;
+            }
+            out << one;
+        }
+    }
+    return out.join(QLatin1Char('\n')).trimmed();
+}
+
+void NodeItem::hoverEnterEvent(QGraphicsSceneHoverEvent *e)
+{
+    // Built here rather than in refresh: explain() walks the whole search index
+    // for the guard a declaration sits behind, and doing that for every node of
+    // a 496-node project at load would buy a string nobody has asked to read.
+    if (!m_tipReady) {
+        m_tipReady = true;
+        setToolTip(buildTooltip());
+    }
+    QGraphicsObject::hoverEnterEvent(e);
+}
+
 void NodeItem::hoverMoveEvent(QGraphicsSceneHoverEvent *e)
 {
-    setHoverEditor(editorAt(e->scenePos(), editorReach(e->widget())));
+    const double reach = editorReach(e->widget());
+    const int button = listButtonAt(e->scenePos(), reach);
+    if (button != m_hoverListButton) {
+        m_hoverListButton = button;
+        update();
+    }
+    setHoverEditor(button == 0 ? editorAt(e->scenePos(), reach) : QString());
     QGraphicsObject::hoverMoveEvent(e);
 }
 
 void NodeItem::hoverLeaveEvent(QGraphicsSceneHoverEvent *e)
 {
     setHoverEditor(QString());
+    if (m_hoverListButton != 0) {
+        m_hoverListButton = 0;
+        update();
+    }
     QGraphicsObject::hoverLeaveEvent(e);
 }

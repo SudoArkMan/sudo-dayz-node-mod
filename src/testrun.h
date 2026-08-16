@@ -15,7 +15,13 @@
 //      Workbench/dayz.gproj, plus everything under Dependencies.
 //   2. The mod chain. Workbench/project.cfg carries the Mods line the test
 //      session launches with, so declaring a dependency in the app is what
-//      makes it load in a test.
+//      makes it load in a test. A project's declared dependencies are not the
+//      whole answer: a mod written against another mod has to be tested with
+//      that mod loaded, whether or not it was declared, so the chain also
+//      carries whatever the user picked for this run. Order is the part that
+//      bites. The engine loads -mod= left to right and a mod must come after
+//      everything it needs, so the chain is sorted from what each entry
+//      declares rather than from the order anybody clicked.
 //   3. The PBO. AddonBuilder packs the folder holding config.cpp into
 //      P:\Mods\@<Prefix>\Addons, which is the only place the engine looks for a
 //      mod that is not from the Workshop.
@@ -94,6 +100,16 @@ struct PrereqCheck {
     QString fix;     // the next thing to do about it
 };
 
+// Where a chain entry came from. The distinction is not cosmetic: a declared
+// dependency is a property of the mod and belongs in the .sdzn's dependency
+// list, while an extra is a property of this test run and belongs to the run.
+// The panel draws them apart for the same reason.
+enum class ModOrigin {
+    Dependency,  // declared by the project
+    Extra,       // picked by the user for this run
+    Self,        // the mod being tested
+};
+
 // One entry in the mod chain. The name is what project.cfg's Mods line holds;
 // the path is what -mod= gets, because a bare @Name only resolves if the engine
 // happens to look in the right folder and an absolute path always resolves.
@@ -104,6 +120,24 @@ struct ModRef {
     // True when nothing on this machine confirmed the spelling. Only a guess
     // gets overruled by what project.cfg already says.
     bool guessed = false;
+    ModOrigin origin = ModOrigin::Dependency;
+    // Loaded by the server and not by the client, so it goes in -serverMod=.
+    // The evidence for that parameter is on withServerModChain below.
+    bool serverOnly = false;
+    // A folder was recorded for this entry and it is not there now. Different
+    // from a guess, which never had a folder: a guess may still resolve against
+    // the game install, while this one is a mod that was uninstalled or a Steam
+    // library that moved, and launching with it in the chain would hand the
+    // engine a path to nothing.
+    bool missing = false;
+    // What the entry ships and what it needs, in addon names, which is the only
+    // vocabulary the ordering has. Either may be empty: an installed mod keeps
+    // its config rapified inside config.bin, so for most of the library there is
+    // nothing on disk to read and the ordering has to say so rather than invent
+    // an edge.
+    QStringList addons;
+    QStringList requires;
+    QString factsFrom;  // where those two came from, for the row's tooltip
 };
 
 // Where everything lives for one project, resolved once per refresh. Any field
@@ -115,7 +149,7 @@ struct TestRunPaths {
     QString sourceDir;      // the folder holding config.cpp, which is what packs
     QString pboPrefix;      // that folder's path inside the PBO
     QString workbenchDir;   // <modFolder>/Workbench
-    QString projectCfg;     // its project.cfg, carrying the Mods line
+    QString projectCfg;     // its project.cfg, carrying Mods and ServerMods
     QString serverCfg;      // its server.cfg, with allowFilePatching already on
     QString workDrive;      // "P:/"
     QString link;           // <workDrive>/<prefix>
@@ -136,10 +170,49 @@ struct TestRunPaths {
     QString clientProfiles; // where the client writes its RPT
     QString tempDir;        // AddonBuilder's scratch folder
     QVector<ModRef> modChain;
+    // What the ordering could not decide, one line each. Printed rather than
+    // hidden: a chain in the wrong order is a mod that silently does nothing,
+    // and the only warning anybody gets is this list.
+    QStringList chainNotes;
 
-    QStringList modNames() const;  // for project.cfg
+    QStringList modNames() const;        // for project.cfg's Mods line
+    QStringList serverModNames() const;  // for its ServerMods line
     QString modArgument() const;   // for -mod=, absolute where a folder was found
+    // For -serverMod=. Empty unless something in the chain was marked server
+    // only, and empty is the normal state.
+    QString serverModArgument() const;
+    // Entries whose folder was recorded and is not there now. Anything in here
+    // blocks a launch instead of being quietly dropped from the command.
+    QStringList missingMods() const;
 };
+
+// ------------------------------------------------------- mods added by hand
+//
+// A mod the user picked to load beside their own for this run. It is not a
+// dependency: nothing about the project changes, no addon is declared, and
+// nothing is imported. It exists because a mod that reopens a class from
+// another mod cannot be tested without that mod loaded.
+//
+// Persisted in the project, under Project::extra["testRun"]["extraMods"], which
+// the .sdzn reader and writer carry through untouched. That is deliberate: the
+// picks belong to the project rather than to the machine, so opening the same
+// project tomorrow launches the same chain. The folder is stored absolute
+// because an installed mod is machine-wide rather than project-relative, so a
+// project carried to another machine finds the folder gone, and a folder that
+// is gone is reported rather than launched.
+struct ExtraMod {
+    QString name;    // the @folder name, which is what -mod= carries
+    QString folder;  // absolute, where it was when it was picked
+    QString label;   // the mod's own name, for the list
+    bool serverOnly = false;
+
+    bool isValid() const { return !name.isEmpty(); }
+};
+
+QVector<ExtraMod> extraModsOf(const Project &project);
+// Replaces the list. The caller owns marking the project modified, because this
+// module has no Document and no business knowing about one.
+void setExtraMods(Project &project, const QVector<ExtraMod> &mods);
 
 // -------------------------------------------------------------- free functions
 //
@@ -156,10 +229,47 @@ struct TestRunPaths {
 ModRef modFolderFor(const ModDependency &dep, const QString &workDrive,
                     const QString &gamePath);
 
-// The whole chain for a project: every dependency, then the mod itself last,
-// because a mod loads after what it is written against.
+// What one mod folder ships and what it needs, in addon names.
+//
+// Three sources, in the order they are trusted. A loose config.cpp beside the
+// mod's scripts is the mod itself talking, so it wins. resources/known-mods.json
+// is next: it records the requiredAddons of CF, COT and Dabs, read from their
+// own configs rather than remembered. Anything else comes back empty, and the
+// reason is on disk rather than a shortcoming here: an installed Workshop mod
+// ships mod.cpp, meta.cpp and pbos, and its config lives inside a pbo as a
+// rapified config.bin. Nothing here reads that format, so no edge is invented
+// for those and the ordering says which entries it could not place.
+struct ModFacts {
+    QStringList addons;
+    QStringList requires;
+    QString from;  // in words, for the tooltip and the notes
+};
+
+// `name` is the @folder name, used to match a preset when the folder itself
+// says nothing.
+ModFacts modFactsFor(const QString &folder, const QString &name);
+
+// Sorts the chain so every entry comes after the entries shipping the addons it
+// requires, and returns what it could not decide.
+//
+// DayZ loads -mod= left to right and a mod whose dependency has not compiled
+// yet does not fail, it silently does nothing, so getting this wrong is the
+// expensive kind of wrong. Where an edge exists it is obeyed. Where none does,
+// the entry keeps the place it came in at, so the result is stable and the user
+// can still decide by ordering the list. Anything marked Self is pinned last
+// whatever the edges say: it is the mod being tested and everything else in the
+// chain is something it is written against.
+//
+// A cycle cannot be honoured by any order, so the entries in it are left in the
+// order they arrived and named in the returned notes.
+QStringList orderModChain(QVector<ModRef> &chain);
+
+// The whole chain for a project: every declared dependency, every mod the user
+// added for this run, then the mod itself last, because a mod loads after what
+// it is written against. Ordered by orderModChain before it comes back, and
+// `notes` collects everything the caller should print about how that went.
 QVector<ModRef> modChainFor(const Project &project, const QString &workDrive,
-                            const QString &gamePath);
+                            const QString &gamePath, QStringList *notes = nullptr);
 
 // A guessed name that project.cfg already spells another way takes the file's
 // spelling. "@Dabs Framework" and "@DabsFramework" name one mod, and the line
@@ -170,9 +280,35 @@ void applyExistingSpelling(QVector<ModRef> &chain, const QByteArray &projectCfg)
 
 // project.cfg with its Mods line replaced and every other byte, including line
 // endings and a missing newline at the end, exactly as it came in. Appends the
-// line when the file has none. ServerMods is left alone: a script mod is loaded
-// by both sides and the server-only chain is the user's to decide.
+// line when the file has none.
 QByteArray withModChain(const QByteArray &projectCfg, const QStringList &modNames);
+
+// The same for the ServerMods line, which Workbench keeps beside Mods and which
+// nothing here used to write.
+//
+// -serverMod= is real and it is server side only. Two things on this machine say
+// so, neither of them a recollection:
+//
+//   - DayZServer\server_manager\Server_manager.ps1, Bohemia's own server script,
+//     line 1014, launches DayZServer_x64.exe with -config, -mod=, -serverMod=,
+//     -bepath, -profiles and -port. The parameter is passed to the server
+//     executable and to nothing else in that file.
+//   - The same folder ships example_launch_params.txt, which is a server command
+//     line carrying both "-mod=" and "-serverMod=" empty and ready to fill, plus
+//     two separate lists: example_mod_list.txt holds content mods a client needs
+//     and example_server_mod_list.txt holds BaseBuildingLogs and PlayerCounter,
+//     which have no client half at all.
+//
+// So the two chains are disjoint by design, and the template's own project.cfg
+// already carries an empty ServerMods line for the second one. What this app
+// passes it to is DayZDiag_x64.exe -server rather than DayZServer_x64.exe: the
+// same parameter on the diag build, which is the exe this app already runs with
+// -server because retail refuses -filePatching.
+//
+// Nothing writes an empty ServerMods line over an empty one, so a project with
+// no server-only mod comes back byte for byte unchanged.
+QByteArray withServerModChain(const QByteArray &projectCfg,
+                              const QStringList &modNames);
 
 // mklink /J, with the two ways it can already be satisfied separated from the
 // two ways it can fail. An existing junction pointing at the same target is a
@@ -275,8 +411,14 @@ public:
     // which half.
     QVector<RunStep> linkWorkDrive();
 
-    // The Mods line in Workbench/project.cfg.
+    // The Mods line in Workbench/project.cfg, and its ServerMods line when
+    // something in the chain is marked server only.
     RunStep writeModChain();
+
+    // Why a launch will not assemble while the chain names a folder that is not
+    // there, or empty when it does not. Public because the panel says it before
+    // the button is pressed and every launch command says it again on refusal.
+    QString missingChainReason() const;
 
     // Assembled, not run. `error` says which path was missing when the command
     // comes back invalid.

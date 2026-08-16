@@ -135,6 +135,17 @@ struct Ctx {
     // Diagnostics that must be reported once rather than once per traversal.
     QSet<QString> noted;
 
+    // Lines one node owes to a later one in the same chain.
+    //
+    // Make Array filling a member that already exists writes `m_Junk = new
+    // array<string>();` through the Set node that follows it, then one Insert
+    // per element AFTER that assignment. The Inserts cannot be emitted where
+    // the Make Array sits, because at that point the member has not been
+    // assigned yet. `afterNode` names the node they wait for, so nothing else
+    // in the chain can pick them up by accident.
+    Emitted pendingAfter;
+    QString afterNode;
+
     // Set for the length of one method, from the node that owns it.
     BodyStyle style;
 };
@@ -400,6 +411,11 @@ bool lifecycleSig(const Ctx &ctx, const GraphNode &n, LifecycleSig *out)
 NodeDef defOf(Ctx &ctx, const GraphNode &node);
 Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth);
 QString expr(Ctx &ctx, const GraphNode &node, const QString &pinId);
+// A typed literal, written the way Enforce spells that type. Defined with the
+// rest of the expression side; the array nodes need it a page earlier, because
+// an element has to be written against the type the array turned out to hold
+// rather than against the Any its pin carried before anything was decided.
+QString literal(const QString &raw, PinKind kind);
 
 // `expr`, bracketed when the value is built out of an operator loose enough
 // that the brackets matter. `outer` is the binding strength of whatever the
@@ -449,6 +465,166 @@ NodeDef defOf(Ctx &ctx, const GraphNode &node)
     return ctx.cat->defFor(node.ref);
 }
 
+// ------------------------------------------------------------------- arrays
+
+// The element spelling inside a container type, keeping every modifier the
+// declaration wrote. `array<ref ExpansionLootContainer>` answers
+// `ref ExpansionLootContainer`, and dropping that `ref` would be a different
+// template instantiation and a type error at the call it was read from.
+// Anything that is not a container answers empty.
+QString elementTypeOf(const QString &declared)
+{
+    // Only the modifiers in FRONT of the container are dropped. bareType
+    // removes every one it finds, which turns `ref array<ref EntityAI>` into
+    // `array<EntityAI>` and loses the very modifier this exists to keep.
+    static const QRegularExpression leading(
+        QStringLiteral("^\\s*(?:(?:ref|autoptr|notnull|const|owned|local)\\s+)+"));
+    QString t = declared;
+    t.remove(leading);
+    t = t.trimmed();
+    static const QHash<QString, QString> aliases = {
+        {QStringLiteral("TStringArray"), QStringLiteral("string")},
+        {QStringLiteral("TIntArray"), QStringLiteral("int")},
+        {QStringLiteral("TFloatArray"), QStringLiteral("float")},
+        {QStringLiteral("TVectorArray"), QStringLiteral("vector")},
+        {QStringLiteral("TClassArray"), QStringLiteral("Class")},
+        {QStringLiteral("TTypenameArray"), QStringLiteral("typename")},
+        {QStringLiteral("TBoolArray"), QStringLiteral("bool")},
+    };
+    if (aliases.contains(t)) return aliases.value(t);
+    static const QRegularExpression generic(QStringLiteral("^array\\s*<(.+)>$"));
+    const auto m = generic.match(t);
+    return m.hasMatch() ? m.captured(1).trimmed() : QString();
+}
+
+// The type a parameter pin was declared with, as the vanilla signature spells
+// it. The same reading nodeinputs.cpp does for the details panel, repeated here
+// because that file is compiled into the app and not into the model tier this
+// one lives in, and the tiers deliberately do not link each other.
+QString declaredPinType(const Ctx &ctx, const QString &nodeRef, const Pin &pin)
+{
+    if (pin.id.size() < 2 || !pin.id.startsWith(QLatin1Char('p'))) return {};
+    bool ok = false;
+    const int index = pin.id.mid(1).toInt(&ok);
+    if (!ok || index < 0) return {};
+    MethodSig sig = ctx.cat->method(nodeRef);
+    if (!sig.valid) sig = ctx.cat->globalFn(nodeRef);
+    if (!sig.valid || index >= sig.params.size()) return {};
+    return sig.params.at(index).type;
+}
+
+// What a literal typed into an element pin says about the array, when nothing
+// else has said anything. Deliberately narrow: a whole number, a decimal and
+// true or false each have one reading, and everything else is text. Reading
+// further would mean deciding that a bare word is a constant somebody declared,
+// which is a guess this has no way to check.
+QString sniffElementType(const QStringList &typed)
+{
+    if (typed.isEmpty()) return {};
+    bool allInt = true;
+    bool allNumber = true;
+    bool allBool = true;
+    for (const QString &raw : typed) {
+        const QString v = raw.trimmed();
+        bool ok = false;
+        v.toInt(&ok);
+        if (!ok) allInt = false;
+        v.toDouble(&ok);
+        if (!ok) allNumber = false;
+        if (v != QLatin1String("true") && v != QLatin1String("false")) allBool = false;
+    }
+    if (allBool) return QStringLiteral("bool");
+    if (allInt) return QStringLiteral("int");
+    if (allNumber) return QStringLiteral("float");
+    return QStringLiteral("string");
+}
+
+// A pin type written back out as an Enforce type name, without the array
+// wrapper. Object and enum pins carry the class; everything else is spelled by
+// its kind.
+QString spellPin(const PinType &t)
+{
+    if (t.kind == PinKind::Object || t.kind == PinKind::Enum) return t.cls;
+    if (t.kind == PinKind::Any || t.kind == PinKind::Exec) return {};
+    return pinKindName(t.kind);
+}
+
+// The one node reading an array output, when there is exactly one.
+const GraphNode *soleReader(const Ctx &ctx, const GraphNode &node, const QString &pin,
+                            QString *readerPin)
+{
+    const GraphNode *reader = nullptr;
+    int reads = 0;
+    for (const GraphEdge &e : ctx.graph->edges) {
+        if (e.from.node != node.id || e.from.pin != pin) continue;
+        reads++;
+        reader = ctx.graph->node(e.to.node);
+        if (readerPin) *readerPin = e.to.pin;
+    }
+    return reads == 1 ? reader : nullptr;
+}
+
+// What a Make Array holds, decided in this order and no other:
+//
+//   1. the element type set on the node, which is the author saying so
+//   2. the pin the array is wired into, in the spelling that declaration used,
+//      because `array<ref X>` and `array<X>` are different instantiations and
+//      passing one where the other is declared does not compile
+//   3. the type of whatever is wired into an element
+//   4. what is typed into the elements, for the four spellings that can only
+//      be read one way
+//   5. string, which is what a DayZ array holds more often than anything else
+//
+// The canvas makes no claim about the type until step 1 has an answer, so this
+// ladder cannot contradict what the node is drawn saying.
+QString arrayElementFor(Ctx &ctx, const GraphNode &node, const PinList &list, int count,
+                        const GraphNode *reader, const QString &readerPin, bool *guessed)
+{
+    *guessed = false;
+    const QString set = bi::declaredElementType(node);
+    if (!set.isEmpty()) return set;
+
+    if (reader) {
+        const NodeDef rd = defOf(ctx, *reader);
+        if (const Pin *p = rd.valid ? rd.pin(readerPin, PinDir::In) : nullptr) {
+            const QString fromDecl = elementTypeOf(declaredPinType(ctx, reader->ref, *p));
+            if (!fromDecl.isEmpty()) return fromDecl;
+            if (reader->kind == NodeKind::VarSet) {
+                if (const GraphVariable *v = variableForRef(*ctx.graph, reader->ref)) {
+                    const QString fromVar = elementTypeOf(v->type);
+                    if (!fromVar.isEmpty()) return fromVar;
+                }
+            }
+            if (p->type.isArray) {
+                const QString spelt = spellPin(p->type);
+                if (!spelt.isEmpty()) return spelt;
+            }
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const GraphEdge *e = edgeInto(*ctx.graph, node.id, bi::listPinId(list, i));
+        if (!e) continue;
+        const GraphNode *src = ctx.graph->node(e->from.node);
+        const NodeDef sd = src ? defOf(ctx, *src) : NodeDef{};
+        const Pin *sp = sd.valid ? sd.pin(e->from.pin, PinDir::Out) : nullptr;
+        if (!sp || sp->type.isArray) continue;
+        const QString spelt = spellPin(sp->type);
+        if (!spelt.isEmpty()) return spelt;
+    }
+
+    QStringList typed;
+    for (int i = 0; i < count; ++i) {
+        const QString raw = node.inputs.value(bi::listPinId(list, i));
+        if (!raw.trimmed().isEmpty()) typed << raw;
+    }
+    const QString sniffed = sniffElementType(typed);
+    if (!sniffed.isEmpty()) return sniffed;
+
+    *guessed = true;
+    return QStringLiteral("string");
+}
+
 Emitted emitChain(Ctx &ctx, const QVector<const GraphNode *> &chain, int depth)
 {
     Emitted out;
@@ -486,6 +662,13 @@ Emitted emitChain(Ctx &ctx, const QVector<const GraphNode *> &chain, int depth)
         for (const QString &l : triviaFor(ctx, *n, nodefmt::keyBefore(), depth))
             withNotes.add(l);
         withNotes.add(produced);
+        // Whatever an earlier node owes this one goes in behind its statement,
+        // and only behind the node it was left for.
+        if (ctx.afterNode == n->id) {
+            withNotes.add(ctx.pendingAfter);
+            ctx.pendingAfter = Emitted();
+            ctx.afterNode.clear();
+        }
         out.add(withNotes);
         // Counted per level so the cost of copying a sub-chain into each of its
         // parents is what the budget actually measures.
@@ -530,10 +713,12 @@ Emitted subChain(Ctx &ctx, const GraphNode &node, const QString &pin, int depth)
     // Re-using a sub-chain is only safe when emitting it declared nothing: a
     // chain that allocated a temporary would declare it twice in the same
     // scope, and one that read a temporary depends on which loop it sits in.
+    // A chain still owing lines to a node past its own end is the third case,
+    // and it is the one Make Array introduced.
     // That still covers the case this exists for: a Sequence whose outputs all
     // drive the same chain, which used to walk the tail once per output.
     if (!ctx.aborted && ctx.tempN == tempsBefore && ctx.tempReads == readsBefore
-        && ctx.poisoned.size() == poisonedBefore)
+        && ctx.poisoned.size() == poisonedBefore && ctx.afterNode.isEmpty())
         ctx.chainCache.insert(key, out);
     return out;
 }
@@ -1078,6 +1263,153 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                                  + value + QLatin1Char(';')});
     }
 
+    // ---- arrays
+    //
+    // Enforce takes a brace list in one place only: after a type, in a
+    // declaration. `array<string> a = {"x", "y"};` compiles, `a = {"x", "y"};`
+    // does not, and neither does passing one as an argument. So Make Array
+    // writes the brace form when it is declaring the array and the allocate
+    // and insert form when the array it fills already has a name.
+    if (node.ref == bi::MakeArray) {
+        const PinList &list = def.list;
+        const int count = bi::listCount(node, list);
+        QString readerPin;
+        const GraphNode *reader = soleReader(ctx, node, QStringLiteral("arr"), &readerPin);
+        bool guessed = false;
+        const QString elem =
+            arrayElementFor(ctx, node, list, count, reader, readerPin, &guessed);
+        const PinKind kind = pinTypeOf(elem, isEnumOf(ctx)).kind;
+
+        QStringList values;
+        bool anyFilled = false;
+        for (int i = 0; i < count; ++i) {
+            const QString pinId = bi::listPinId(list, i);
+            if (edgeInto(*ctx.graph, node.id, pinId)) {
+                anyFilled = true;
+                values << expr(ctx, node, pinId);
+                continue;
+            }
+            // Written against the type the array turned out to hold, not
+            // against the pin's own type: an untyped element pin is Any, and
+            // Any leaves a class name bare where a string wants quotes.
+            const QString raw = node.inputs.value(pinId);
+            if (!raw.trimmed().isEmpty()) {
+                anyFilled = true;
+                values << literal(raw, kind);
+            } else {
+                values << defaultLiteral(pinTypeOf(elem, isEnumOf(ctx)));
+            }
+        }
+        if (guessed && anyFilled)
+            note(ctx, QStringLiteral("arrtype:") + node.id,
+                 QStringLiteral("A Make Array node has values in it but nothing says what "
+                                "they are, so it is generated as array<string>. Set the "
+                                "element type in Details, or wire the array into the pin "
+                                "it is meant for."));
+
+        // The array is going into something that already has a name, and the
+        // next statement is the one that puts it there. There is no declaration
+        // to hang a brace list off, so the elements arrive one Insert at a time
+        // behind that assignment.
+        const GraphEdge *succ = edgeFrom(*ctx.graph, node.id, QStringLiteral("exec"));
+        const GraphVariable *member =
+            (reader && succ && succ->to.node == reader->id && ctx.afterNode.isEmpty()
+             && reader->kind == NodeKind::VarSet && readerPin == QLatin1String("v"))
+                ? variableForRef(*ctx.graph, reader->ref)
+                : nullptr;
+        if (member) {
+            // Nothing is named here, but the chain cache has to see this chain
+            // as one that declares, or a Sequence driving the same tail twice
+            // would hand back a copy whose Inserts were already spent.
+            ctx.tempN++;
+            ctx.temps.insert(tempKey(node.id, QStringLiteral("arr")),
+                             QStringLiteral("new array<") + elem + QStringLiteral(">()"));
+            Emitted after;
+            for (const QString &v : values)
+                after.add(pad + member->name + QStringLiteral(".Insert(") + v
+                              + QStringLiteral(");"),
+                          node.id);
+            ctx.pendingAfter = after;
+            ctx.afterNode = reader->id;
+            return {};
+        }
+
+        // A local holding an array is written without `ref` in vanilla; the
+        // `ref` goes on the member declaration, which the Variable Manager
+        // writes rather than this node.
+        const QString v = QStringLiteral("arr%1").arg(ctx.tempN++);
+        ctx.temps.insert(tempKey(node.id, QStringLiteral("arr")), v);
+        return ownedBy(node.id, {pad + QStringLiteral("array<") + elem + QStringLiteral("> ")
+                                 + v + QStringLiteral(" = {")
+                                 + values.join(QStringLiteral(", ")) + QStringLiteral("};")});
+    }
+
+    if (node.ref == bi::ArrayInsert || node.ref == bi::ArrayInsertAt
+        || node.ref == bi::ArrayRemove || node.ref == bi::ArrayClear
+        || node.ref == bi::ArraySort) {
+        const QString arr = operandExpr(ctx, node, QStringLiteral("arr"), 11, false);
+        QString args;
+        if (node.ref == bi::ArrayInsert) {
+            args = expr(ctx, node, QStringLiteral("v"));
+        } else if (node.ref == bi::ArrayInsertAt) {
+            // Value first, index second. That is the order the declaration in
+            // enscript.c uses and it is the opposite way round from Set Element,
+            // which is exactly the mistake this node exists to stop.
+            const QString value = expr(ctx, node, QStringLiteral("v"));
+            const QString index = expr(ctx, node, QStringLiteral("index"));
+            args = value + QStringLiteral(", ") + index;
+        } else if (node.ref == bi::ArrayRemove) {
+            args = expr(ctx, node, QStringLiteral("index"));
+        } else if (node.ref == bi::ArraySort) {
+            args = expr(ctx, node, QStringLiteral("reverse"));
+        }
+        static const QHash<QString, QString> names = {
+            {bi::ArrayInsert, QStringLiteral("Insert")},
+            {bi::ArrayInsertAt, QStringLiteral("InsertAt")},
+            {bi::ArrayRemove, QStringLiteral("Remove")},
+            {bi::ArrayClear, QStringLiteral("Clear")},
+            {bi::ArraySort, QStringLiteral("Sort")},
+        };
+        return ownedBy(node.id, {pad + arr + QLatin1Char('.') + names.value(node.ref)
+                                 + QLatin1Char('(') + args + QStringLiteral(");")});
+    }
+
+    if (node.ref == bi::ArrayForIndex) {
+        // The array is held in a local first. Without that, an array coming
+        // from a call is fetched again on every pass of the loop, and Count()
+        // is called on a different instance than Get().
+        const QString arrExpr = operandExpr(ctx, node, QStringLiteral("arr"), 11, false);
+        static const QRegularExpression plainName(
+            QStringLiteral("^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)*$"));
+        Emitted lines;
+        QString holder = arrExpr;
+        if (!plainName.match(arrExpr).hasMatch()) {
+            holder = QStringLiteral("arr%1").arg(ctx.tempN++);
+            // `auto` rather than a spelled type: the element type is often only
+            // known to the call this came out of, and getting it wrong here is
+            // a compile error where `auto` cannot be.
+            lines.add(pad + QStringLiteral("auto ") + holder + QStringLiteral(" = ") + arrExpr
+                          + QLatin1Char(';'),
+                      node.id);
+        }
+        QString idx = carriedName(node, QStringLiteral("var"));
+        if (idx.isEmpty()) idx = QStringLiteral("i%1").arg(ctx.tempN++);
+        ctx.temps.insert(tempKey(node.id, QStringLiteral("index")), idx);
+        ctx.temps.insert(tempKey(node.id, QStringLiteral("item")),
+                         holder + QStringLiteral(".Get(") + idx + QLatin1Char(')'));
+        const Emitted body = subChain(ctx, node, QStringLiteral("body"), depth + 1);
+        lines.add(pad + QStringLiteral("for (int ") + idx + QStringLiteral(" = 0; ") + idx
+                      + QStringLiteral(" < ") + holder + QStringLiteral(".Count(); ") + idx
+                      + QStringLiteral("++)"),
+                  node.id);
+        lines.add(pad + QLatin1Char('{'), node.id);
+        lines.add(body);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
+        lines.add(pad + QLatin1Char('}'), node.id);
+        lines.add(subChain(ctx, node, QStringLiteral("done"), depth));
+        return lines;
+    }
+
     if (node.ref == QLatin1String("bi.setMember")) {
         const QString name = node.opts.value(QStringLiteral("name")).trimmed();
         if (name.isEmpty()) {
@@ -1414,6 +1746,19 @@ QString pureExpr(Ctx &ctx, const GraphNode &node, const NodeDef &def, const QStr
         return a + QLatin1Char(' ') + operatorOf(node) + QLatin1Char(' ') + b;
     }
 
+    // The three array reads. They bind as tightly as a call does, so the array
+    // itself is the only operand that can need brackets round it.
+    if (node.ref == bi::ArrayCount || node.ref == bi::ArrayGet
+        || node.ref == bi::ArrayFind) {
+        const QString arr = operandExpr(ctx, node, QStringLiteral("arr"), 11, false);
+        if (node.ref == bi::ArrayCount) return arr + QStringLiteral(".Count()");
+        if (node.ref == bi::ArrayGet)
+            return arr + QStringLiteral(".Get(") + expr(ctx, node, QStringLiteral("index"))
+                   + QLatin1Char(')');
+        return arr + QStringLiteral(".Find(") + expr(ctx, node, QStringLiteral("v"))
+               + QLatin1Char(')');
+    }
+
     if (node.kind == NodeKind::VarGet) {
         const GraphVariable *v = ownVariable(ctx, node);
         return v ? v->name : QStringLiteral("null");
@@ -1648,6 +1993,11 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     for (const GraphNode *ev : eventNodes) {
         ctx.temps.clear();
         ctx.chainCache.clear();
+        // A method boundary ends any debt one node left another. A chain that
+        // was cut short before its Inserts were flushed must not have them
+        // reappear at the top of the next method.
+        ctx.pendingAfter = Emitted();
+        ctx.afterNode.clear();
         // The node that puts this method in the file is the one that carries
         // how its body was written.
         ctx.style = styleOf(ctx, ev);
@@ -1821,6 +2171,8 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     for (const GraphFunction &f : graph.functions) {
         ctx.temps.clear();
         ctx.chainCache.clear();
+        ctx.pendingAfter = Emitted();
+        ctx.afterNode.clear();
         // An unnamed function emits ` ( )`, a fragment that takes the whole
         // file down with it, so it is refused rather than written out.
         if (f.name.trimmed().isEmpty()) {
@@ -1949,6 +2301,8 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         // starts with rather than whatever the flow that scheduled it left.
         ctx.temps.clear();
         ctx.chainCache.clear();
+        ctx.pendingAfter = Emitted();
+        ctx.afterNode.clear();
         ctx.retType = QStringLiteral("void");
         // These methods are the generator's, not an author's, so they are
         // written in the generator's own indentation whatever the graph carries.

@@ -289,6 +289,17 @@ void removeNode(Graph &g, const QString &nodeId)
             g.edges.removeAt(i);
 }
 
+void removePin(Graph &g, const QString &nodeId, const QString &pinId)
+{
+    for (int i = g.edges.size() - 1; i >= 0; --i) {
+        const GraphEdge &e = g.edges.at(i);
+        if ((e.from.node == nodeId && e.from.pin == pinId)
+            || (e.to.node == nodeId && e.to.pin == pinId))
+            g.edges.removeAt(i);
+    }
+    if (GraphNode *n = g.node(nodeId)) n->inputs.remove(pinId);
+}
+
 const GraphEdge *edgeInto(const Graph &g, const QString &nodeId, const QString &pin)
 {
     for (const GraphEdge &e : g.edges)

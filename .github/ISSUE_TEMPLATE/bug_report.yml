@@ -1,0 +1,127 @@
+name: Bug report
+description: Something the application does that it should not.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems do not go here. Use the Security tab and choose
+        "Report a vulnerability", so a fix can be prepared before it is public.
+        See `SECURITY.md`.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >-
+        Run `DAYZSUDONodeMod.exe --version` from a terminal, or read it off the
+        splash screen. If you built it yourself, give the commit instead.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you got it
+      options:
+        - A published release archive
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >-
+        What you did, what you expected, and what you got instead. If the
+        application generated the wrong script, paste the script it generated
+        and say what it should have been.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Numbered, starting from a fresh start of the application. "Open the
+        sample project at resources/SUDO_Link.sdzn" is a good first step if it
+        reproduces there.
+      placeholder: |
+        1. Open resources/SUDO_Link.sdzn
+        2. Place a Set Timer node
+        3. View Code
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: The file that provokes it
+      description: >-
+        Attach the `.sdzn` project, the `.c` script, the `config.cpp` or the
+        `.pbo` if you can share it. This is the single most useful thing in a
+        report, because a file that reproduces the bug turns into a test.
+        Drag it onto this box.
+
+  - type: textarea
+    id: crash
+    attributes:
+      label: Crash dump
+      description: >-
+        Only if the application closed on its own. Windows writes a dump to
+        `%LOCALAPPDATA%\CrashDumps\DAYZSUDONodeMod.exe.<pid>.dmp` once local
+        dump collection is switched on, which it is not by default. To switch
+        it on, run an elevated Command Prompt and paste:
+
+
+        ```
+
+        reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\DAYZSUDONodeMod.exe" /v DumpType /t REG_DWORD /d 2 /f
+
+        ```
+
+
+        Then reproduce the crash and attach the `.dmp` file from that folder.
+        Full dumps are large, so zip it first. If you would rather not enable
+        that, say so and describe exactly what you were doing when it went; a
+        reliable set of steps is worth as much as a dump.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        Fill in what applies. Several parts of the application only work with a
+        real DayZ installation present, so this is not filler.
+      value: |
+        - Windows version:
+        - DayZ installed:            yes / no
+        - DayZ Tools installed:      yes / no
+        - `P:` work drive mounted:   yes / no
+        - Installed Workshop mods:   roughly how many
+        - Graphics driver, if the window drew wrong:
+    validations:
+      required: true
+
+  - type: textarea
+    id: state
+    attributes:
+      label: Anything from the application's own files
+      description: >-
+        Optional, and only if it is relevant. Recent projects and the mod
+        library cache live under `%APPDATA%\SUDO\SUDO DayZ Node Mod`. If the
+        application was open on a project when it went, there may be an
+        autosave sidecar at `<your project>.sdzn.autosave` worth attaching.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: This is not a security problem. Those go through the Security tab.
+          required: true

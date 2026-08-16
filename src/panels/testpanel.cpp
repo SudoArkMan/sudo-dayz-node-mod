@@ -1,6 +1,7 @@
 #include "testpanel.h"
 
 #include "document.h"
+#include "modlibrary.h"
 #include "testrun.h"
 #include "theme.h"
 
@@ -8,6 +9,8 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -16,6 +19,7 @@
 #include <QHeaderView>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -24,11 +28,32 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <functional>
+
 namespace {
 
 // Enough log for a full binarize pass and the server's start-up spam without
 // letting a session that ran all afternoon eat the process.
 constexpr int kLogLines = 6000;
+
+// What a picker row carries. The folder is what -mod= gets and the name is what
+// project.cfg's Mods line gets, so both ride the row rather than being worked
+// out again when the dialog is accepted.
+constexpr int kNameRole = Qt::UserRole;
+constexpr int kFolderRole = Qt::UserRole + 1;
+constexpr int kLabelRole = Qt::UserRole + 2;
+
+// One line naming what an entry is, for the chain line under the buttons.
+QString chainMark(const ModRef &mod)
+{
+    if (mod.missing) return QStringLiteral(" (not installed)");
+    if (mod.origin == ModOrigin::Extra)
+        return mod.serverOnly ? QStringLiteral(" (added, server only)")
+                              : QStringLiteral(" (added for this run)");
+    if (mod.serverOnly) return QStringLiteral(" (server only)");
+    return {};
+}
 
 QString stateWord(PrereqState state)
 {
@@ -115,6 +140,12 @@ void TestPanel::buildUi()
     m_toolsAction = new QAction(QStringLiteral("Set DayZ Tools folder..."), this);
     connect(m_toolsAction, &QAction::triggered, this, &TestPanel::chooseToolsFolder);
 
+    m_modsAction = new QAction(QStringLiteral("Choose mods..."), this);
+    m_modsAction->setToolTip(
+        QStringLiteral("Load other installed mods beside this one, for a mod "
+                       "written against another mod."));
+    connect(m_modsAction, &QAction::triggered, this, &TestPanel::chooseMods);
+
     // Four control rows, two wrapped paragraphs and a splitter add up to 224px
     // of demanded height, and this panel is tabbed behind the generated file, so
     // that number was the floor under the whole bottom dock and the canvas paid
@@ -169,6 +200,17 @@ void TestPanel::buildUi()
     modeRow->addWidget(m_mission);
     modeRow->addStretch(1);
     layout->addLayout(modeRow);
+
+    // The chain, next to the button that changes it. Both launches load it and
+    // both write it into Workbench, so it is worth reading before a run rather
+    // than after one that came up without the mod it hooks.
+    auto *chainRow = new QHBoxLayout;
+    chainRow->setSpacing(4);
+    chainRow->addWidget(buttonFor(m_modsAction, this));
+    m_chainLine = new QLabel(this);
+    m_chainLine->setWordWrap(true);
+    chainRow->addWidget(m_chainLine, 1);
+    layout->addLayout(chainRow);
 
     // Under the selector and across the dock, which is the widest line
     // available. This dock is wide and short, so it is height that is scarce:
@@ -278,6 +320,303 @@ void TestPanel::chooseMission()
     refresh();
 }
 
+void TestPanel::ensureLibrary()
+{
+    if (m_library) return;
+    m_library = new ModLibrary(this);
+    // Whatever the mod browser has already scanned. This instance only ever
+    // reads: it does not import, it does not open a pbo's data, and it never
+    // writes inside a mod folder.
+    m_library->loadCache();
+}
+
+void TestPanel::chooseMods()
+{
+    ensureLibrary();
+
+    // The order matters and it is the user's last word where no dependency edge
+    // decides, so the picks are a list rather than a set.
+    QVector<ExtraMod> picked = extraModsOf(m_doc->project());
+
+    QString selfName;
+    QStringList declared;
+    for (const ModRef &mod : m_run->paths().modChain) {
+        if (mod.origin == ModOrigin::Self) selfName = mod.name;
+        if (mod.origin == ModOrigin::Dependency) declared << mod.name;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Mods to load alongside"));
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *intro = new QLabel(
+        QStringLiteral("Pick the mods this one has to be tested with. A class "
+                       "reopened from another mod does not exist unless that mod "
+                       "is loaded, so a session without it proves nothing. The "
+                       "chain is ordered from what each mod requires, and where "
+                       "nothing on disk says, from the order in this list."),
+        &dialog);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    const QString dim =
+        QStringLiteral("color: %1;").arg(theme::textDim().name());
+    auto *declaredLine = new QLabel(
+        declared.isEmpty()
+            ? QStringLiteral("This project declares no dependencies of its own.")
+            : QStringLiteral("Declared by this project and always loaded: %1. "
+                             "Those are a property of the mod and are changed "
+                             "with its dependencies, not here.")
+                  .arg(declared.join(QStringLiteral(", "))),
+        &dialog);
+    declaredLine->setWordWrap(true);
+    declaredLine->setStyleSheet(dim);
+    layout->addWidget(declaredLine);
+
+    auto *filterBox = new QLineEdit(&dialog);
+    filterBox->setPlaceholderText(QStringLiteral("Filter by name or folder"));
+    filterBox->setClearButtonEnabled(true);
+    layout->addWidget(filterBox);
+
+    auto *tree = new QTreeWidget(&dialog);
+    // Two columns, not three. A column of folders would be 254 rows of the same
+    // Workshop path, and a column of folder names would repeat the mod's name
+    // for all but a handful of them. The folder name only earns its place where
+    // it differs, which is where it goes: "Community Framework (@CF)". The whole
+    // path is on the row's tooltip.
+    tree->setColumnCount(2);
+    tree->setHeaderLabels({ QStringLiteral("Mod"),
+                            QStringLiteral("Server only") });
+    tree->setRootIsDecorated(false);
+    tree->setUniformRowHeights(true);
+    tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    tree->header()->setStretchLastSection(true);
+    layout->addWidget(tree, 1);
+
+    auto *moveRow = new QHBoxLayout;
+    moveRow->setSpacing(4);
+    auto *up = new QToolButton(&dialog);
+    up->setText(QStringLiteral("Move up"));
+    auto *down = new QToolButton(&dialog);
+    down->setText(QStringLiteral("Move down"));
+    const QString moveTip =
+        QStringLiteral("Only matters for a mod whose config is packed, where "
+                       "there is nothing on disk to order it by. Anything that "
+                       "declares what it needs is sorted from that instead.");
+    up->setToolTip(moveTip);
+    down->setToolTip(moveTip);
+    moveRow->addWidget(up);
+    moveRow->addWidget(down);
+    moveRow->addStretch(1);
+    auto *status = new QLabel(&dialog);
+    status->setStyleSheet(dim);
+    moveRow->addWidget(status);
+    layout->addLayout(moveRow);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    const auto indexOfPick = [&picked](const QString &name) {
+        for (int i = 0; i < picked.size(); ++i)
+            if (picked.at(i).name.compare(name, Qt::CaseInsensitive) == 0) return i;
+        return -1;
+    };
+
+    const auto applyFilter = [tree, filterBox]() {
+        const QString want = filterBox->text().trimmed();
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = tree->topLevelItem(i);
+            const bool hit =
+                want.isEmpty()
+                || item->text(0).contains(want, Qt::CaseInsensitive)
+                || item->data(0, kNameRole).toString().contains(want, Qt::CaseInsensitive)
+                || item->data(0, kFolderRole).toString().contains(want,
+                                                                 Qt::CaseInsensitive);
+            item->setHidden(!hit);
+        }
+    };
+
+    const auto updateStatus = [&]() {
+        if (m_library->isScanning()) {
+            status->setText(QStringLiteral("Scanning the installed mods..."));
+            return;
+        }
+        if (tree->topLevelItemCount() == 0) {
+            status->setText(QStringLiteral("No installed mods found. Add a folder "
+                                           "in the mod browser and they turn up "
+                                           "here."));
+            return;
+        }
+        status->setText(QStringLiteral("%1 installed, %2 chosen.")
+                            .arg(tree->topLevelItemCount())
+                            .arg(picked.size()));
+    };
+
+    // Chosen first, in chain order, then everything else by name. 254 rows in
+    // one alphabetical run is not a list anybody scrolls to find the three they
+    // ticked, and the top group is also the order the picks are stored in.
+    std::function<void()> fill = [&]() {
+        const QSignalBlocker block(tree);
+        tree->clear();
+
+        QVector<ExtraMod> rows = picked;
+        QSet<QString> seen;
+        for (const ExtraMod &mod : picked) seen.insert(mod.name.toLower());
+        for (const ModEntry &mod : m_library->mods()) {
+            if (mod.folderName.isEmpty()) continue;
+            // The project's own mod is already pinned to the end of the chain,
+            // and picking it here would be asking for it twice.
+            if (!selfName.isEmpty()
+                && mod.folderName.compare(selfName, Qt::CaseInsensitive) == 0)
+                continue;
+            if (seen.contains(mod.folderName.toLower())) continue;
+            seen.insert(mod.folderName.toLower());
+            ExtraMod row;
+            row.name = mod.folderName;
+            row.folder = mod.folder;
+            row.label = mod.name.isEmpty() ? mod.folderName : mod.name;
+            rows << row;
+        }
+        std::sort(rows.begin() + picked.size(), rows.end(),
+                  [](const ExtraMod &a, const ExtraMod &b) {
+                      return a.label.compare(b.label, Qt::CaseInsensitive) < 0;
+                  });
+
+        for (const ExtraMod &row : rows) {
+            const int at = indexOfPick(row.name);
+            auto *item = new QTreeWidgetItem(tree);
+            // A folder that is not there is the state that blocks a launch, so
+            // it is said here, where it can be taken out again.
+            const bool installed = !row.folder.isEmpty()
+                                   && QFileInfo(row.folder).isDir();
+            QString text = row.label;
+            if (QStringLiteral("@") + row.label != row.name)
+                text += QStringLiteral(" (%1)").arg(row.name);
+            if (!installed) text += QStringLiteral(", not installed here");
+            item->setText(0, text);
+            item->setData(0, kNameRole, row.name);
+            item->setData(0, kFolderRole, row.folder);
+            item->setData(0, kLabelRole, row.label);
+            item->setCheckState(0, at >= 0 ? Qt::Checked : Qt::Unchecked);
+            item->setCheckState(1, at >= 0 && picked.at(at).serverOnly
+                                       ? Qt::Checked
+                                       : Qt::Unchecked);
+            if (!installed)
+                for (int col = 0; col < 2; ++col)
+                    item->setForeground(col, theme::errorColor());
+            item->setToolTip(0, QStringLiteral("%1\n%2")
+                                    .arg(row.name,
+                                         installed
+                                             ? QDir::toNativeSeparators(row.folder)
+                                             : QStringLiteral("not installed here")));
+            item->setToolTip(1, QStringLiteral("Loaded by the server and not by "
+                                               "the client, through -serverMod=. "
+                                               "An offline run is given none of "
+                                               "that chain."));
+        }
+        // Capped. One mod out of 254 with a very long name would otherwise push
+        // its own tick box half a screen away from the name it belongs to.
+        tree->resizeColumnToContents(0);
+        tree->setColumnWidth(0, qMin(tree->columnWidth(0), 380));
+        applyFilter();
+        updateStatus();
+    };
+
+    connect(tree, &QTreeWidget::itemChanged, &dialog,
+            [&](QTreeWidgetItem *item, int column) {
+                if (!item) return;
+                const QSignalBlocker block(tree);
+                // Marking something server only is a way of choosing it, so it
+                // does not have to be chosen twice.
+                if (column == 1 && item->checkState(1) == Qt::Checked)
+                    item->setCheckState(0, Qt::Checked);
+                if (column == 0 && item->checkState(0) != Qt::Checked)
+                    item->setCheckState(1, Qt::Unchecked);
+
+                ExtraMod mod;
+                mod.name = item->data(0, kNameRole).toString();
+                mod.folder = item->data(0, kFolderRole).toString();
+                mod.label = item->data(0, kLabelRole).toString();
+                mod.serverOnly = item->checkState(1) == Qt::Checked;
+                const int at = indexOfPick(mod.name);
+                if (item->checkState(0) == Qt::Checked) {
+                    // Kept where it already was. A row that jumped to the top
+                    // under the cursor on every tick would make the order the
+                    // list is for unreadable.
+                    if (at >= 0) picked[at] = mod;
+                    else picked.append(mod);
+                } else if (at >= 0) {
+                    picked.remove(at);
+                }
+                updateStatus();
+            });
+
+    connect(filterBox, &QLineEdit::textChanged, &dialog,
+            [&](const QString &) { applyFilter(); });
+
+    const auto move = [&](int by) {
+        QTreeWidgetItem *item = tree->currentItem();
+        if (!item) return;
+        const int at = indexOfPick(item->data(0, kNameRole).toString());
+        if (at < 0 || at + by < 0 || at + by >= picked.size()) return;
+        picked.swapItemsAt(at, at + by);
+        fill();
+        // The row moved, so the selection follows it rather than staying on
+        // whatever took its place.
+        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            if (tree->topLevelItem(i)->data(0, kNameRole).toString()
+                == picked.at(at + by).name)
+                tree->setCurrentItem(tree->topLevelItem(i));
+    };
+    connect(up, &QToolButton::clicked, &dialog, [&]() { move(-1); });
+    connect(down, &QToolButton::clicked, &dialog, [&]() { move(1); });
+
+    // A scan finishing while the dialog is open fills the list rather than
+    // leaving it empty until it is reopened. The connection dies with the
+    // dialog, so nothing here outlives the modal loop.
+    connect(m_library, &ModLibrary::modsChanged, &dialog, [&]() { fill(); });
+    connect(m_library, &ModLibrary::scanFinished, &dialog,
+            [&](int, bool) { updateStatus(); });
+
+    fill();
+    // Only when there is nothing to show. A cache written by the mod browser is
+    // the normal case and re-reading 254 pbo headers to confirm it would be a
+    // second scan for no answer.
+    if (m_library->mods().isEmpty() && !m_library->isScanning()) {
+        m_library->refresh();
+        updateStatus();
+    }
+
+    dialog.resize(760, 520);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    setExtraMods(m_doc->project(), picked);
+    // The project now holds something the .sdzn does not, which is the same
+    // state as an edited graph, and this is how the rest of the app says so.
+    m_doc->touchGraph();
+    refresh();
+
+    reveal();
+    appendLog(QStringLiteral("--- Mods to load alongside"));
+    for (const ModRef &mod : m_run->paths().modChain)
+        appendLog(QStringLiteral("  %1%2  [%3]")
+                      .arg(mod.name, chainMark(mod), mod.from));
+    for (const QString &note : m_run->paths().chainNotes)
+        appendLog(QStringLiteral("  %1").arg(note));
+    const QString missingWhy = m_run->missingChainReason();
+    if (!missingWhy.isEmpty()) appendLog(QStringLiteral("! %1").arg(missingWhy));
+    emit statusMessage(
+        picked.isEmpty()
+            ? QStringLiteral("Nothing extra is loaded beside this mod.")
+            : QStringLiteral("%1 loading beside this mod.")
+                  .arg(picked.size() == 1
+                           ? QStringLiteral("One mod")
+                           : QStringLiteral("%1 mods").arg(picked.size())));
+}
+
 void TestPanel::reveal()
 {
     auto *dock = qobject_cast<QDockWidget *>(parentWidget());
@@ -311,6 +650,33 @@ void TestPanel::refresh()
                       .arg(QDir::toNativeSeparators(paths.mission),
                            paths.missionFrom));
     }
+
+    // The chain, in the order the engine will load it, because left to right is
+    // the whole of what -mod= means. Each entry says whether it is the project's
+    // own dependency or something added for this run, since one is a property of
+    // the mod and the other of this test.
+    QStringList chainParts;
+    QStringList chainTips;
+    for (const ModRef &mod : paths.modChain) {
+        chainParts << mod.name + chainMark(mod);
+        chainTips << QStringLiteral("%1\n    %2\n    what it needs: %3")
+                         .arg(mod.name, mod.from,
+                              mod.factsFrom.isEmpty() ? QStringLiteral("not read")
+                                                      : mod.factsFrom);
+    }
+    const QString missingWhy = m_run->missingChainReason();
+    m_chainLine->setText(
+        chainParts.isEmpty()
+            ? QStringLiteral("Nothing to load yet.")
+            : QStringLiteral("Loads in this order: %1.")
+                  .arg(chainParts.join(QStringLiteral(", "))));
+    m_chainLine->setStyleSheet(
+        QStringLiteral("color: %1;")
+            .arg((missingWhy.isEmpty() ? theme::textDim() : theme::errorColor())
+                     .name()));
+    QStringList chainTip = chainTips;
+    if (!paths.chainNotes.isEmpty()) chainTip << paths.chainNotes;
+    m_chainLine->setToolTip(chainTip.join(QStringLiteral("\n\n")));
 
     // Rebuilt every time because the last entry depends on the mod chain, and
     // the chain changes when a dependency is added. The short halves go on the
@@ -382,6 +748,9 @@ void TestPanel::updateEnabled()
                                && haveMod);
     m_stopAction->setEnabled(busy);
     m_recheckAction->setEnabled(true);
+    // The chain a running session came up with is already decided, and changing
+    // it while that session is on screen would read as if it had applied to it.
+    m_modsAction->setEnabled(!busy);
     m_clean->setEnabled(!busy);
 }
 

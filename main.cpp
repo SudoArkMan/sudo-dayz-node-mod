@@ -7,6 +7,7 @@
 #include "document.h"
 #include "mainwindow.h"
 #include "theme.h"
+#include "version.h"
 #include "widgets/splashscreen.h"
 
 #include <QApplication>
@@ -84,7 +85,13 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("SUDO DayZ Node Mod"));
     QCoreApplication::setOrganizationName(QStringLiteral("SUDO"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    // version.h is generated from project(VERSION) in CMakeLists.txt. The
+    // number used to be a literal here as well, which meant what the app
+    // reported and what the build carried could drift apart without anything
+    // failing, and an update check that compares the wrong one of those is
+    // worse than no update check. Everything downstream reads it back off
+    // QCoreApplication rather than including this header again.
+    QCoreApplication::setApplicationVersion(QStringLiteral(NODEMOD_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(

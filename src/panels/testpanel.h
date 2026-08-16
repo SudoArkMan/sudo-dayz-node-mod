@@ -9,6 +9,14 @@
 // a server, and the cheapest place to learn which of the two you are looking at
 // is beside the button, before it is pressed.
 //
+// Beside it sits the chain the run will load, and the picker that adds to it.
+// A mod that reopens a class from Community Framework, COT or Expansion has to
+// be tested with that mod loaded or the class it hooks does not exist, and the
+// project's declared dependencies are not always the whole list. The picker
+// reads the installed mods out of ModLibrary rather than walking the folder
+// again, and it is a read: nothing is imported and nothing is written inside
+// anybody's mod folder.
+//
 // The checklist is the important half. Every reason a build or a launch cannot
 // work is a stat call away, so there is no excuse for finding out from a game
 // that closed itself, and each row carries the fix rather than only the fault.
@@ -23,6 +31,7 @@
 #include <QWidget>
 
 class Document;
+class ModLibrary;
 class TestRun;
 struct RunStep;
 
@@ -47,6 +56,10 @@ public:
     QAction *stopAction() const { return m_stopAction; }
     QAction *recheckAction() const { return m_recheckAction; }
     QAction *toolsAction() const { return m_toolsAction; }
+    // Not on the Test menu yet. It is here on the same terms as the rest, so
+    // adding it there is one line in the main window rather than a second copy
+    // of the rules for when it is allowed.
+    QAction *modsAction() const { return m_modsAction; }
 
 public slots:
     // Re-reads the project and the machine and repaints the checklist. Called
@@ -68,9 +81,17 @@ private slots:
     // mission blocks, so the checklist is re-read rather than left stale.
     void chooseMode();
     void chooseMission();
+    // The picker. Modal, because what it changes is the command the next launch
+    // assembles and reading the checklist behind it while it is open would be
+    // reading a chain that is about to change.
+    void chooseMods();
 
 private:
     void buildUi();
+    // The installed mods, built on first use. The scan is the mod browser's
+    // cache when there is one, so opening the picker normally costs a file read
+    // rather than a walk over 254 folders.
+    void ensureLibrary();
     // The launch button's wording follows the mode. One action, two names, so
     // the menu entry and the button can never disagree about what F5 does.
     void applyMode();
@@ -85,6 +106,9 @@ private:
 
     Document *m_doc;
     TestRun *m_run;
+    // Null until the picker is opened for the first time. Building it eagerly
+    // would put a scan of the installed mods behind opening any project.
+    ModLibrary *m_library = nullptr;
     QTreeWidget *m_checks;
     QLabel *m_summary;
     QPlainTextEdit *m_log;
@@ -92,10 +116,12 @@ private:
     QComboBox *m_mode;
     QComboBox *m_mission;
     QLabel *m_offlineNotes;
+    QLabel *m_chainLine;
     QAction *m_linkAction;
     QAction *m_buildAction;
     QAction *m_launchAction;
     QAction *m_stopAction;
     QAction *m_recheckAction;
     QAction *m_toolsAction;
+    QAction *m_modsAction;
 };

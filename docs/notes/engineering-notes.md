@@ -1,51 +1,51 @@
-# Work plan
+# Engineering notes
 
-Standing plan for the current run. Kept in the repo so it survives a restart.
+Working notes kept because the measurements in them are the reason parts of this project are the
+way they are. Not a manual. [../getting-started.md](../getting-started.md) is the manual, and
+[../../CONTRIBUTING.md](../../CONTRIBUTING.md) is the build.
 
-## Environment, verified on this machine
+## The reference machine
+
+What the numbers below were measured on. Nothing in the application depends on these paths; they
+are here so a figure can be read in context.
 
 | | |
 | --- | --- |
 | Qt | 6.11.0 MinGW 13.1, `C:/Qt/6.11.0/mingw_64` |
 | Build | `cmake -S . -B build/cli -G Ninja -DCMAKE_PREFIX_PATH=C:/Qt/6.11.0/mingw_64 -DCMAKE_CXX_COMPILER=C:/Qt/Tools/mingw1310_64/bin/g++.exe` |
-| Work drive | `P:\` mounted, holds `DZ`, `Mods`, `Core` |
-| DayZ Tools | `D:/SteamLibrary/steamapps/common/DayZ Tools/Bin` |
-| PBO extractor | `DayZ Tools/Bin/PboUtils/BankRev.exe`, plus `FileBank.exe` to pack |
-| Diag client and server | `D:/SteamLibrary/steamapps/common/DayZ/DayZDiag_x64.exe`, `.../DayZServer` |
-| Installed mods | 254 under `D:/SteamLibrary/steamapps/common/DayZ/!Workshop` |
-| Frameworks on disk | CF and Dabs in `C:/Users/dilla/Downloads`, addon names in `resources/known-mods.json` |
+| Work drive | `P:\` mounted, holding `DZ`, `Mods` and `Core` |
+| DayZ Tools | under the Steam library, `DayZ Tools/Bin` |
+| PBO extractor | `DayZ Tools/Bin/PboUtils/BankRev.exe`, and `FileBank.exe` to pack |
+| Diag client and server | `DayZDiag_x64.exe` from the DayZ install, and the DayZServer install beside it |
+| Installed mods | 254 under the DayZ install's `!Workshop` |
+| Frameworks on disk | Community Framework and Dabs Framework unpacked locally, addon names recorded in `resources/known-mods.json` |
 
-The DayZ Tools registry key `HKCU\SOFTWARE\Bohemia Interactive\Dayz Tools` is NOT set here, so
-nothing may depend on it alone.
+The DayZ Tools registry key `HKCU\SOFTWARE\Bohemia Interactive\Dayz Tools` is not set on this
+machine, so nothing in the application may depend on it alone. That is why the Test dock carries a
+"Set DayZ Tools folder..." action.
 
-## Rules that keep biting, do not relearn them
+## Traps in this codebase
 
-- A running `DAYZSUDONodeMod.exe` holds its own binary. The link fails, **Ninja aborts before
-  relinking the test targets**, and every measurement after that reads a stale binary. Kill the app
-  before building, and never trust numbers from a build that failed.
-- A pin's `def` is emitted code. Deciding whether a pin gets an inline FIELD through
+Five things that have each cost real time here, written down so they cost it once.
+
+- A running `DAYZSUDONodeMod.exe` holds its own binary. The link fails, **Ninja stops before
+  relinking the test targets**, and every measurement after that reads a stale binary that still
+  passes. Close the application before building, and do not trust numbers from a build that failed.
+- A pin's `def` is emitted code. Deciding whether a pin gets an inline field through
   `inlineEditorFor` therefore changes generated output. The field rule is `fieldEditorFor` in
-  `src/nodeinputs.h`; both the painter and the click handler must use it.
+  `src/nodeinputs.h`, and both the painter and the click handler have to use it.
 - Quoting belongs where the user types, not where code is emitted: the lowering legitimately puts
   real identifiers into pins, so quoting in the generator turns working code into `Print("someVar")`.
-- Test targets must live in the repo. A target pointing at the scratchpad breaks configure for
-  everyone once that folder is cleaned.
+- Test targets must name sources inside the repository. A target pointing at a scratch folder
+  breaks configure for everybody else the moment that folder is cleaned.
 - `QGuiApplication::instance()` resolves to the inherited `QCoreApplication::instance()`, so a
   console test thinks a GUI exists and `QFontMetrics` fail-fasts with 0xC0000602. Guard with
   `qobject_cast<QGuiApplication *>(...)`.
 
-## Order of work
+## Two ways to test a mod, and the application needs both
 
-1. **Start page and project management** — recent projects, new, open, templates, saving.
-2. **Interface polish** — the app grew feature by feature and needs a pass for coherence.
-3. **PBO reading and mod import** — open any installed mod and read its scripts as graphs.
-4. **Mod browser** — the 254 installed mods as a browsable library, each showing its node layout.
-
-## Two ways to test a mod, and the app needs both
-
-The user's point, and it is right: the template can launch **offline** for a quick look, but not
-everything works there, so testing on a **dev server** has to be a first-class choice rather than
-the only one or an afterthought.
+The template can launch **offline** for a quick look, but not everything works there, so testing on
+a **dev server** has to be a first-class choice rather than the only one or an afterthought.
 
 Only `DayZDiag_x64.exe` is usable for either. Retail `DayZ_x64.exe` and `DayZServer_x64.exe` both
 block past the loading screen once `-filePatching` is on.
@@ -74,8 +74,13 @@ citations sit in `testrun.h`. Two corrections to what was guessed here first:
   true;`, and roles load only under `IsServer() && IsMultiplayer()`. So a permission-gated feature
   *always opens* offline, which is the more dangerous direction: it works on your machine and locks
   players out on the server.
-- **`-serverMod=` was dropped, not confirmed.** It is not an offline-versus-dev-server difference the
-  way this app is built, because neither mode passes a server-only chain.
+- **`-serverMod=` is real, and it is a dev-server-only difference.** It was dropped once as
+  unconfirmed. The evidence is on this machine and the citations are on `withServerModChain` in
+  `testrun.h`: `DayZServer\server_manager\Server_manager.ps1:1014` hands it to `DayZServer_x64.exe`
+  beside `-mod=`, and the same folder ships `example_mod_list.txt` and `example_server_mod_list.txt`
+  as two disjoint lists. The app now passes it to the diag server and to nothing else, so a mod
+  marked server only is on the server's command line, off the client's, and off the offline one,
+  which `offlineLimits()` says in as many words.
 
 ## PBO notes
 
@@ -105,9 +110,9 @@ of them, 9,343,981 packed entries decoded and checksum-matched, 0 refused, 575.7
 Against BankRev as an outside oracle: 648 entries byte for byte, 0 differed. `BankRev.exe` is no
 longer a fallback worth keeping, because it is the weaker reader of the two: it turns down all five
 obfuscated archives the native reader opens, and it silently declines to write 373 entries it did
-read. Its remaining use is as a second opinion in the test, not in the app.
+read. Its remaining use is as a second opinion in the test, not in the application.
 
 `modlibrarytest`: 266 mods scanned, 1887 pbos, 0 refused. On a 1-in-6 sample of the 216 mods that
 ship script, **23% of methods become node graphs** and the rest keep their text, well below the 64%
-seen on the user's own code. Third-party mod code is the harder corpus and that number is the one to
-move; it is per-method, so a mod at 0% is a mod whose graphs are all raw-body nodes.
+seen on this project's own graphs. Third-party mod code is the harder corpus and that number is the
+one to move; it is per-method, so a mod at 0% is a mod whose graphs are all raw-body nodes.

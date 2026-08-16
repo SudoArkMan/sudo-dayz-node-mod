@@ -243,6 +243,16 @@ bool isValidModPrefix(const QString &prefix, QString *reason)
         if (reason) *reason = QStringLiteral("Pick a name of your own.");
         return false;
     }
+    // The prefix is also the name of the junction on the work drive, so a
+    // prefix that collides with the game's unpacked data would shadow it.
+    // Refused here rather than at link time, because a mod that can never be
+    // linked is a mod that can never be built.
+    if (isReservedWorkDriveName(prefix)) {
+        if (reason)
+            *reason = QStringLiteral("The work drive already uses %1 for the game's "
+                                     "own data. Pick another name.").arg(prefix);
+        return false;
+    }
     return true;
 }
 
@@ -496,8 +506,22 @@ ModTemplateResult scaffoldMod(const QString &parentDir, const ModTemplateOptions
     created.sort();
     result.ok = true;
     result.modRoot = modRoot;
+    result.modFolder = QStringLiteral("%1/%2").arg(modRoot, prefix);
     result.scriptsRoot = QStringLiteral("%1/%2/Scripts").arg(modRoot, prefix);
     result.created = created;
     result.skipped = skipped;
+
+    // The junction goes on the folder holding Workbench\dayz.gproj, which is
+    // the same folder SetupWorkdrive.bat keys on and the same one the test
+    // dock's checklist compares against.
+    //
+    // Deliberately after result.ok. A drive that is not mounted, or a folder
+    // already sitting at P:\<prefix>, is a warning about the work drive and not
+    // a reason to unwind a mod folder that came out complete.
+    if (options.linkWorkDrive) {
+        result.workDrive =
+            linkModFolder(workDriveLinkFor(result.modFolder, options.workDrive),
+                          result.modFolder, modRoot);
+    }
     return result;
 }

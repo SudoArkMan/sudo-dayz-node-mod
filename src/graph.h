@@ -18,6 +18,29 @@
 #include <QString>
 #include <QVector>
 
+// A node whose pin list grows and shrinks while the graph is being built.
+//
+// The count lives in the node's own opts rather than in a side table, for the
+// same reason the author's layout does: opts already survive a save and a load,
+// and removeNode already takes them with the node. A side table would orphan.
+//
+// `countOpt` names the opts key. `pinPrefix` plus the index is the pin id, so
+// element 2 of a Make Array is "el2" and nothing has to store the pin list.
+// Empty countOpt means the node has a fixed shape, which is every other node.
+struct PinList {
+    QString countOpt;
+    QString pinPrefix;
+    QString label = QStringLiteral("elements");
+    int min = 0;
+    // A ceiling rather than a guess at what anybody needs: past a few dozen the
+    // node is taller than the screen and the graph has stopped being readable,
+    // and an unbounded count is a number a hand-edited .sdzn can put a million
+    // in. Both ends are clamped wherever the count is read.
+    int max = 32;
+
+    bool valid() const { return !countOpt.isEmpty() && !pinPrefix.isEmpty(); }
+};
+
 struct NodeDef {
     QString key;
     QString title;
@@ -30,6 +53,9 @@ struct NodeDef {
     bool pure = false;   // Get/Is/Has style nodes rendered without exec pins
     bool native = false; // engine-implemented; cannot be overridden
     bool valid = false;
+    // Set on the handful of nodes that draw plus and minus controls of their
+    // own. Everything else leaves it invalid and never grows a footer.
+    PinList list;
 
     const Pin *pin(const QString &id, PinDir dir) const;
 };
@@ -239,6 +265,12 @@ bool canConnect(const Pin &a, const Pin &b);
 void connectPins(Graph &g, const EdgeEnd &from, const EdgeEnd &to, bool isExec);
 void disconnectEdge(Graph &g, const QString &edgeId);
 void removeNode(Graph &g, const QString &nodeId);
+// Every edge touching one pin of one node, in both directions, plus the literal
+// that pin was carrying. Shrinking a Make Array is the caller: a pin that is
+// gone must not leave a wire behind pointing at nothing, and it must not leave a
+// value behind either, or growing the node back resurrects a number the author
+// deleted. Silent when the pin has neither.
+void removePin(Graph &g, const QString &nodeId, const QString &pinId);
 
 const GraphEdge *edgeInto(const Graph &g, const QString &nodeId, const QString &pin);
 const GraphEdge *edgeFrom(const Graph &g, const QString &nodeId, const QString &pin);

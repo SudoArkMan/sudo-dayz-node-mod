@@ -1,0 +1,520 @@
+{
+  "name": "Worked examples",
+  "formatVersion": 2,
+  "folders": [
+    "4_World"
+  ],
+  "scripts": [
+    {
+      "id": "s1",
+      "name": "SUDO_TimerItem",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_TimerItem",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "builtin",
+            "ref": "bi.begin",
+            "x": 40,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "when": "init"
+            }
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.setTimer",
+            "x": 320,
+            "y": 200,
+            "inputs": {
+              "seconds": "5.0",
+              "repeat": "true"
+            },
+            "opts": {
+              "name": "Beep"
+            }
+          },
+          {
+            "id": "n3",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 640,
+            "y": 320,
+            "inputs": {
+              "value": "\"\""
+            }
+          },
+          {
+            "id": "n4",
+            "kind": "builtin",
+            "ref": "bi.literal",
+            "x": 380,
+            "y": 400,
+            "inputs": {
+              "v": "still here"
+            },
+            "opts": {
+              "type": "string"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s1_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e2",
+            "from": {
+              "node": "n2",
+              "pin": "elapsed"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e3",
+            "from": {
+              "node": "n4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [],
+        "functions": []
+      }
+    },
+    {
+      "id": "s2",
+      "name": "SUDO_ReactiveItem",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_ReactiveItem",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "event",
+            "ref": "m2792",
+            "x": 40,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.serverOnly",
+            "x": 340,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n3",
+            "kind": "builtin",
+            "ref": "bi.cast",
+            "x": 560,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "cls": "ItemBase"
+            }
+          },
+          {
+            "id": "n4",
+            "kind": "call",
+            "ref": "m3551",
+            "x": 860,
+            "y": 180,
+            "inputs": {
+              "p0": "100.0"
+            }
+          },
+          {
+            "id": "n5",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 1140,
+            "y": 180,
+            "inputs": {
+              "value": "\"\""
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s2_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e2",
+            "from": {
+              "node": "n2",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e3",
+            "from": {
+              "node": "n1",
+              "pin": "o0"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "obj"
+            }
+          },
+          {
+            "id": "s2_e4",
+            "from": {
+              "node": "n3",
+              "pin": "success"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e5",
+            "from": {
+              "node": "n3",
+              "pin": "as"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s2_e6",
+            "from": {
+              "node": "n4",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s2_e7",
+            "from": {
+              "node": "n1",
+              "pin": "o1"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [],
+        "functions": []
+      }
+    },
+    {
+      "id": "s3",
+      "name": "SUDO_GuardedItem",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_GuardedItem",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "builtin",
+            "ref": "bi.begin",
+            "x": 40,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "when": "init"
+            }
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.serverOnly",
+            "x": 320,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n3",
+            "kind": "builtin",
+            "ref": "bi.self",
+            "x": 320,
+            "y": 380,
+            "inputs": {}
+          },
+          {
+            "id": "n4",
+            "kind": "call",
+            "ref": "m3551",
+            "x": 560,
+            "y": 200,
+            "inputs": {
+              "p0": "100.0"
+            }
+          },
+          {
+            "id": "n5",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 840,
+            "y": 200,
+            "inputs": {
+              "value": "\"\""
+            }
+          },
+          {
+            "id": "n6",
+            "kind": "builtin",
+            "ref": "bi.literal",
+            "x": 600,
+            "y": 400,
+            "inputs": {
+              "v": "server set this up"
+            },
+            "opts": {
+              "type": "string"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s3_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s3_e2",
+            "from": {
+              "node": "n2",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s3_e3",
+            "from": {
+              "node": "n3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s3_e4",
+            "from": {
+              "node": "n4",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s3_e5",
+            "from": {
+              "node": "n6",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [],
+        "functions": []
+      }
+    },
+    {
+      "id": "s4",
+      "name": "SUDO_ConfigReader",
+      "folder": "4_World",
+      "graph": {
+        "className": "SUDO_ConfigReader",
+        "baseClass": "ItemBase",
+        "modded": false,
+        "module": "4_World",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "builtin",
+            "ref": "bi.begin",
+            "x": 40,
+            "y": 200,
+            "inputs": {},
+            "opts": {
+              "when": "init"
+            }
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.self",
+            "x": 40,
+            "y": 400,
+            "inputs": {}
+          },
+          {
+            "id": "n3",
+            "kind": "call",
+            "ref": "m3525",
+            "x": 320,
+            "y": 200,
+            "inputs": {
+              "p0": "weight"
+            }
+          },
+          {
+            "id": "n4",
+            "kind": "varSet",
+            "ref": "maxCharge",
+            "x": 620,
+            "y": 200,
+            "inputs": {}
+          },
+          {
+            "id": "n5",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 900,
+            "y": 200,
+            "inputs": {
+              "value": "\"\""
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s4_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s4_e2",
+            "from": {
+              "node": "n2",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n3",
+              "pin": "target"
+            }
+          },
+          {
+            "id": "s4_e3",
+            "from": {
+              "node": "n3",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s4_e4",
+            "from": {
+              "node": "n3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n4",
+              "pin": "v"
+            }
+          },
+          {
+            "id": "s4_e5",
+            "from": {
+              "node": "n4",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s4_e6",
+            "from": {
+              "node": "n4",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n5",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [
+          {
+            "id": "maxCharge",
+            "name": "m_Weight",
+            "type": "float",
+            "default": "0",
+            "sync": false,
+            "persist": false
+          }
+        ],
+        "functions": []
+      }
+    }
+  ],
+  "activeId": "s1"
+}

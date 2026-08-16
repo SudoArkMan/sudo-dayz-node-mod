@@ -1,0 +1,59 @@
+# Line endings.
+#
+# This matters more here than in most repositories, because line endings are
+# not incidental to this tool: they are part of what it is measured on. The
+# application detects the ending a script was written with, carries it on the
+# graph, and puts it back when it writes the file, because opening a CRLF
+# script and saving it must not change every line in the file. 3,776 of the
+# 4,765 files in the vanilla and installed-mod corpus are CRLF. importtest
+# holds that down with two checks that have no room under them: every class
+# comes back byte for byte, and endingLost == 0.
+#
+# Git for Windows sets core.autocrlf=true in its system config, in
+# C:/Program Files/Git/etc/gitconfig, so every Windows contributor has it
+# switched on whether they chose it or not. Left alone, a fresh clone would
+# rewrite every text file in the working tree to CRLF, including the fixtures
+# the byte-comparison tests read. The rules below take that decision away from
+# whatever each machine happens to be configured with.
+
+# Normalise to LF in the repository and check out LF everywhere. The index is
+# already LF for all 261 tracked text files, so this changes no stored bytes;
+# it stops the working tree drifting to CRLF on Windows.
+* text=auto eol=lf
+
+# Everything under resources/ is frozen. These are not sources, they are test
+# inputs, and several tests compare their bytes:
+#
+#   templatetest    copies the mod template and proves the copy is exact
+#   configtest      parses config.cpp and writes it back byte for byte
+#   coretest        round trips SUDO_Link.sdzn with every node and edge intact
+#   importtest      generates .c files and compares them to the originals
+#
+# The bundled mod template is also third party content under its own MIT
+# licence, and the right thing to do with somebody else's files is to keep the
+# bytes they shipped. tools/build-catalog.mjs reproduces catalog.json byte for
+# byte, which stops being a checkable claim if checkout can rewrite it.
+#
+# -text, not binary: these files should still produce readable diffs.
+resources/** -text
+
+# A .sdzn is a file the application itself writes, and its round trip is
+# compared byte for byte. Freeze them wherever they live, not only under
+# resources/, so an example project committed alongside documentation is held
+# to the same rule as a fixture.
+*.sdzn -text
+
+# Genuinely binary. `binary` is shorthand for `-text -diff`.
+*.png binary
+*.ico binary
+*.jpg binary
+*.paa binary
+*.pbo binary
+*.pyc binary
+
+# GitHub language statistics and diff collapsing. catalog.json is 2.9 MB of
+# generated output from tools/build-catalog.mjs, and the mod template is
+# vendored from https://github.com/InclementDab/DayZ-Mod-Template. Neither is
+# code written for this project, and neither is useful to read in a diff.
+resources/catalog.json linguist-generated=true
+resources/mod-template/** linguist-vendored=true

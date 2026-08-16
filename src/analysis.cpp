@@ -2009,11 +2009,73 @@ bool isContainerClass(const QString &owner)
 // "delete mid-iteration" crash. Note that it is the container that must not
 // change: EntityAI::Delete() is deferred onto the call queue (object.c:82), so
 // calling Delete() on the item the loop handed you is safe.
+// The array builtins, and the pin each one works through. They exist because a
+// catalogue `array.Insert` targets an `array` OBJECT pin, which will not join
+// to an `array<ref X>`; every rule below that used to ask about a `target` pin
+// has to ask about `arr` as well or the group is a blind spot.
+const QHash<QString, QString> &arrayBuiltinNames()
+{
+    static const QHash<QString, QString> names = {
+        {bi::ArrayCount, QStringLiteral("Count")},
+        {bi::ArrayGet, QStringLiteral("Get")},
+        {bi::ArrayInsert, QStringLiteral("Insert")},
+        {bi::ArrayInsertAt, QStringLiteral("InsertAt")},
+        {bi::ArrayRemove, QStringLiteral("Remove")},
+        {bi::ArrayClear, QStringLiteral("Clear")},
+        {bi::ArrayFind, QStringLiteral("Find")},
+        {bi::ArraySort, QStringLiteral("Sort")},
+        {bi::ArrayForIndex, QStringLiteral("Count")},
+    };
+    return names;
+}
+
+// An array node with nothing on its array pin generates `null.Insert(...)`,
+// which is a crash and not a compile error, so nothing between here and the
+// running server reports it.
+void arrayWithoutArray(const Ctx &ctx, QVector<Diagnostic> &out)
+{
+    for (const GraphNode &n : ctx.graph.nodes) {
+        if (!ctx.reachable.contains(n.id)) continue;
+        const QString name = arrayBuiltinNames().value(n.ref);
+        if (name.isEmpty()) continue;
+        if (ctx.linkInto(n.id, QStringLiteral("arr"))) continue;
+        out.append(diag(Severity::Error, QStringLiteral("DZ321"),
+                        QStringLiteral("Nothing is wired to the array pin, so this generates "
+                                       "%1() on null and crashes when it runs.").arg(name),
+                        QStringLiteral("Wire the array in: a Get node for a member the "
+                                       "Variable Manager declares, a Make Array node, or the "
+                                       "call the array comes out of."),
+                        n.id, QStringLiteral("arr")));
+    }
+}
+
+// A Make Array nobody reads builds an array and throws it away. The same
+// finding discardedConstruction makes about `new`, which this node is.
+void discardedArray(const Ctx &ctx, QVector<Diagnostic> &out)
+{
+    for (const GraphNode &n : ctx.graph.nodes) {
+        if (n.ref != bi::MakeArray || !ctx.reachable.contains(n.id)) continue;
+        bool read = false;
+        for (const Link &l : ctx.linksFrom(n.id))
+            if (l.fromPin == QLatin1String("arr")) { read = true; break; }
+        if (read) continue;
+        out.append(diag(Severity::Warning, QStringLiteral("DZ322"),
+                        QStringLiteral("This array is built and then dropped: nothing is "
+                                       "wired to its array pin."),
+                        QStringLiteral("Wire it into the member, the parameter or the loop "
+                                       "it is for, or remove the node."),
+                        n.id, QStringLiteral("arr")));
+    }
+}
+
 void mutatedWhileIterating(const Ctx &ctx, QVector<Diagnostic> &out)
 {
     for (const GraphNode &loop : ctx.graph.nodes) {
-        if (loop.ref != bi::ForEach || !ctx.reachable.contains(loop.id)) continue;
-        const Link *src = ctx.linkInto(loop.id, QStringLiteral("array"));
+        const bool byElement = loop.ref == bi::ForEach;
+        const bool byIndex = loop.ref == bi::ArrayForIndex;
+        if ((!byElement && !byIndex) || !ctx.reachable.contains(loop.id)) continue;
+        const Link *src = ctx.linkInto(loop.id, byElement ? QStringLiteral("array")
+                                                          : QStringLiteral("arr"));
         if (!src) continue;
         const QString subject = valueIdentity(*src);
 
@@ -2028,17 +2090,24 @@ void mutatedWhileIterating(const Ctx &ctx, QVector<Diagnostic> &out)
         // order the nodes sit in, so the problem list reads the same way twice.
         for (const GraphNode &n : ctx.graph.nodes) {
             if (!body.contains(n.id)) continue;
-            const MethodSig *m = ctx.sig(n.id);
-            if (!m || !isContainerClass(m->owner)
-                || !containerResizers().contains(m->name))
-                continue;
-            const Link *target = ctx.linkInto(n.id, QStringLiteral("target"));
+            // Two shapes reach the same array: a catalogue call through its
+            // `target` pin, and one of the array builtins through `arr`.
+            QString called = arrayBuiltinNames().value(n.ref);
+            QString pin = QStringLiteral("arr");
+            if (called.isEmpty()) {
+                const MethodSig *m = ctx.sig(n.id);
+                if (!m || !isContainerClass(m->owner)) continue;
+                called = m->name;
+                pin = QStringLiteral("target");
+            }
+            if (!containerResizers().contains(called)) continue;
+            const Link *target = ctx.linkInto(n.id, pin);
             if (!target || valueIdentity(*target) != subject) continue;
 
             out.append(diag(Severity::Error, QStringLiteral("DZ307"),
-                            QStringLiteral("%1() changes the array this For Each is "
+                            QStringLiteral("%1() changes the array this loop is "
                                            "walking, which crashes partway through.")
-                                .arg(m->name),
+                                .arg(called),
                             QStringLiteral("Collect what you want to change into a "
                                            "second array inside the loop, then act on "
                                            "that array after the loop has finished. "
@@ -2437,6 +2506,8 @@ AnalysisResult analyzeGraph(const Graph &graph, const Catalog &cat,
     missingServerGuard(ctx, out);
     timerNeverRun(ctx, out);
     timingNodeIssues(ctx, out);
+    arrayWithoutArray(ctx, out);
+    discardedArray(ctx, out);
     persistNotSynced(ctx, out);
     moddedWithoutSuper(ctx, out);
     mutatedWhileIterating(ctx, out);

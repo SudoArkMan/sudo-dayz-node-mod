@@ -1,15 +1,53 @@
+# Build output. Every configure lands under build/<name>, so one rule covers
+# build/cli, build/shots, build/verify and whatever the next one is called.
 build/
 .backup/
-*.user
+
+# Release staging. windeployqt copies roughly 100 MB of Qt and runtime DLLs
+# beside the executable, and none of it belongs in the repository. See
+# RELEASING.md for where a release is assembled.
+dist/
+deploy/
+*.dll
 *.exe
 *.obj
-shot*.png
-final*.png
-events*.png
-livecode*.png
-vars.png
-code1.png
-FINDINGS.json
+*.a
+*.pdb
 
-# Screenshots written by the test targets and by --screenshot
+# Qt Creator and CMake per-user state. CMakeLists.txt.user carries absolute
+# paths to one machine's kits.
+*.user
+*.user.*
+.qtcreator/
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+
+# Local editor and tool state. Some of these hold scratch checkouts of this
+# repository, which is why they are ignored rather than merely untidy.
+.vscode/
+.idea/
+.claude/
+
+# Python bytecode from tools/ascii_sweep.py.
+__pycache__/
+*.py[cod]
+
+# Autosave sidecars. The application writes <project>.sdzn.autosave beside the
+# project every two minutes so the relative paths inside it still resolve.
+# It is recovery state, not project state.
+*.autosave
+
+# Screenshots. The test targets take them through their --shot options and the
+# application takes them through --screenshot; both write to the working
+# directory, which is normally the repository root.
+#
+# Root only, on purpose. This rule used to also carry unanchored names like
+# events*.png and vars.png, which would have silently swallowed a documentation
+# image with one of those names anywhere in the tree. Images that belong to the
+# project, under docs/ and resources/brand/, are tracked and are not affected by
+# this line.
 /*.png
+
+# Audit output.
+FINDINGS.json

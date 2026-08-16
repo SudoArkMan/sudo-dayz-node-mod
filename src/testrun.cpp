@@ -1,13 +1,20 @@
 #include "testrun.h"
 
+#include "config/configtree.h"
 #include "moddeps.h"
 #include "project.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSettings>
 #include <QTimer>
 
@@ -23,6 +30,12 @@ const QLatin1String kModsFolder("Mods");
 // to load. Shorter and the client knocks on a socket that is not listening yet
 // and drops to the main menu, which reads as the mod having failed.
 constexpr int kClientDelayMs = 8000;
+
+// Where the picks live inside the .sdzn. Nothing else writes under this key, and
+// project.cpp carries any root key it does not recognise straight through, so
+// the list survives a save and a load without project.cpp knowing about it.
+const QLatin1String kExtraKey("testRun");
+const QLatin1String kExtraMods("extraMods");
 
 bool isDir(const QString &path)
 {
@@ -123,18 +136,187 @@ QStringList folderNamesFor(const ModDependency &dep)
     return names;
 }
 
-// The folder inside `parent` whose name matches one of `names`, compared the
-// way Windows compares them. Returns the folder as it is actually spelt on
-// disk, because that spelling is what -mod= has to carry.
+// Two spellings of one mod, compared. "@Community-Online-Tools" off disk and
+// "Community Online Tools" out of mod.cpp name the same thing, and the only
+// difference is punctuation nobody agrees on.
+QString packedName(const QString &text)
+{
+    QString out = text.trimmed();
+    if (out.startsWith(QLatin1Char('@'))) out.remove(0, 1);
+    out.remove(QLatin1Char(' '));
+    out.remove(QLatin1Char('-'));
+    return out.toLower();
+}
+
+// The folder inside `parent` whose name matches one of `names`. Returns the
+// folder as it is actually spelt on disk, because that spelling is what -mod=
+// has to carry.
+//
+// Two passes. The first compares the way Windows compares, and the second drops
+// the punctuation, because the Workshop lets an author write the same mod as
+// @CommunityOnlineTools, @Community-Online-Tools or @Community Online Tools and
+// the installed folder here is the hyphenated one. Exact first, so a machine
+// carrying both spellings gets the one that was asked for.
 QString matchFolder(const QString &parent, const QStringList &names)
 {
     if (!isDir(parent)) return {};
     const QDir dir(parent);
+    const QStringList have =
+        dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     for (const QString &want : names)
-        for (const QString &have :
-             dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
-            if (have.compare(want, Qt::CaseInsensitive) == 0)
-                return clean(dir.filePath(have));
+        for (const QString &entry : have)
+            if (entry.compare(want, Qt::CaseInsensitive) == 0)
+                return clean(dir.filePath(entry));
+    for (const QString &want : names) {
+        const QString key = packedName(want);
+        if (key.isEmpty()) continue;
+        for (const QString &entry : have)
+            if (packedName(entry) == key) return clean(dir.filePath(entry));
+    }
+    return {};
+}
+
+// A file under resources/, found the way modTemplateAvailable finds the mod
+// template: by walking up from the executable, because a build tree and an
+// install tree put the folder at different depths.
+QString resourceFile(const QString &leaf)
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList places = {
+        appDir + QStringLiteral("/resources/"),
+        appDir + QStringLiteral("/../resources/"),
+        appDir + QStringLiteral("/../../resources/"),
+        appDir + QStringLiteral("/../../../resources/"),
+        appDir + QStringLiteral("/../../../../resources/"),
+    };
+    for (const QString &place : places)
+        if (isFile(place + leaf)) return clean(place + leaf);
+    return {};
+}
+
+// One entry of resources/known-mods.json, reduced to what the ordering needs.
+struct KnownMod {
+    QString id;           // the addon name, "JM_COT_Scripts"
+    QString displayName;  // "Community Online Tools"
+    QStringList addons;
+    QStringList requires;
+};
+
+QStringList jsonStrings(const QJsonValue &value)
+{
+    QStringList out;
+    for (const QJsonValue &item : value.toArray()) {
+        const QString text = item.toString().trimmed();
+        if (!text.isEmpty() && !out.contains(text)) out.append(text);
+    }
+    return out;
+}
+
+// resources/known-mods.json, read once. Its own note says the requires lists
+// were read out of each framework's config.cpp rather than remembered, which is
+// what makes them usable as ordering edges for mods whose config is packed.
+//
+// Falls back to the presets compiled into moddeps when the file is not beside
+// the executable, so an install layout that moved resources still orders CF and
+// COT correctly rather than losing every edge.
+const QVector<KnownMod> &knownMods()
+{
+    static const QVector<KnownMod> mods = []() {
+        QVector<KnownMod> out;
+        const QString path = resourceFile(QStringLiteral("known-mods.json"));
+        if (!path.isEmpty()) {
+            QFile file(path);
+            if (file.open(QIODevice::ReadOnly)) {
+                const QJsonObject root =
+                    QJsonDocument::fromJson(file.readAll()).object();
+                for (const QJsonValue &v : root.value(QStringLiteral("mods")).toArray()) {
+                    const QJsonObject o = v.toObject();
+                    KnownMod mod;
+                    mod.id = o.value(QStringLiteral("id")).toString().trimmed();
+                    if (mod.id.isEmpty()) continue;
+                    mod.displayName =
+                        o.value(QStringLiteral("displayName")).toString().trimmed();
+                    mod.addons = jsonStrings(o.value(QStringLiteral("addons")));
+                    if (mod.addons.isEmpty()) mod.addons << mod.id;
+                    mod.requires = jsonStrings(o.value(QStringLiteral("requires")));
+                    out.append(mod);
+                }
+            }
+        }
+        if (!out.isEmpty()) return out;
+        for (const ModDependency &dep : knownDependencies()) {
+            KnownMod mod;
+            mod.id = dep.id;
+            mod.displayName = dep.displayName;
+            mod.addons = dep.addons.isEmpty() ? QStringList{dep.id} : dep.addons;
+            mod.requires = dep.requires;
+            out.append(mod);
+        }
+        return out;
+    }();
+    return mods;
+}
+
+// The name a mod gives itself. mod.cpp sits loose at the root of every Workshop
+// mod folder, unlike config.cpp which is packed, so it is the one thing an
+// installed mod says about itself without opening a pbo. Empty when the file is
+// not there or carries no name, which is normal: 177 of the 254 installed mods
+// ship no mod.cpp at all.
+QString modCppName(const QString &folder)
+{
+    // QDir("").filePath resolves against the working directory, so an empty
+    // folder would read whatever mod.cpp happens to sit beside the executable.
+    if (folder.isEmpty()) return {};
+    const QString path = QDir(folder).filePath(QStringLiteral("mod.cpp"));
+    if (!isFile(path)) return {};
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    // Read as latin1 for the same reason readAddonFacts does: a config is not
+    // always valid UTF-8 and a decoder that refuses takes the whole file with it.
+    ConfigFile cfg = parseConfig(QString::fromLatin1(file.readAll()));
+    const ConfigValue *name = findValue(cfg, QStringLiteral("name"));
+    return name ? configUnquote(name->scalar).trimmed() : QString();
+}
+
+// The folder inside `parent` whose mod.cpp calls the mod one of `names`.
+//
+// The last way to resolve a dependency, and the one that catches the case the
+// folder name cannot: Community Framework ships as @CF, which shares no letters
+// with "Community Framework" or "JM_CF_Scripts", and the only thing on disk
+// tying the two together is `name = "Community Framework";` in its mod.cpp.
+// Getting this wrong is expensive rather than merely untidy: a -mod= entry the
+// engine cannot resolve is not an error, it is a mod that silently did not load.
+//
+// Cached per parent folder for the life of the process. This walks up to 254
+// folders and every checklist refresh would otherwise pay for it; installing a
+// mod mid-session is rare and the Mod Browser's Rescan is the way back. The
+// cache is a plain static because everything that reaches here does so from the
+// GUI thread: modChainFor is called by TestRun::refresh and by the test panel,
+// and the mod library's own scan thread has its own reader and never enters.
+QString matchFolderByModCpp(const QString &parent, const QStringList &names)
+{
+    if (!isDir(parent)) return {};
+    static QHash<QString, QHash<QString, QString>> cache;
+    const QString key = clean(parent).toLower();
+    if (!cache.contains(key)) {
+        QHash<QString, QString> byName;
+        const QDir dir(parent);
+        for (const QString &entry :
+             dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+            const QString said = packedName(modCppName(dir.filePath(entry)));
+            // First claim wins, so two copies of one mod resolve to the same
+            // folder on every refresh rather than alternating.
+            if (!said.isEmpty() && !byName.contains(said))
+                byName.insert(said, clean(dir.filePath(entry)));
+        }
+        cache.insert(key, byName);
+    }
+
+    const QHash<QString, QString> &byName = cache.value(key);
+    for (const QString &want : names) {
+        const QString hit = byName.value(packedName(want));
+        if (!hit.isEmpty()) return hit;
+    }
     return {};
 }
 
@@ -205,22 +387,52 @@ QString RunCommand::display() const
     return parts.join(QLatin1Char(' '));
 }
 
+namespace {
+
+// The chain, filtered to one side and with anything missing left out. A folder
+// that is not there produces no argument at all: the engine takes an unresolved
+// -mod= entry as a mod that loaded, so a path to nothing is worse than a short
+// chain, and every launch refuses while missingMods() has anything in it.
+QStringList chainSide(const QVector<ModRef> &chain, bool serverOnly, bool asPaths)
+{
+    QStringList out;
+    for (const ModRef &m : chain) {
+        if (m.serverOnly != serverOnly || m.missing) continue;
+        const QString value = asPaths && !m.path.isEmpty() ? m.path : m.name;
+        if (value.isEmpty()) continue;
+        out << (asPaths ? QDir::toNativeSeparators(value) : value);
+    }
+    return out;
+}
+
+} // namespace
+
 QStringList TestRunPaths::modNames() const
 {
-    QStringList names;
-    for (const ModRef &m : modChain)
-        if (!m.name.isEmpty()) names << m.name;
-    return names;
+    return chainSide(modChain, false, false);
+}
+
+QStringList TestRunPaths::serverModNames() const
+{
+    return chainSide(modChain, true, false);
 }
 
 QString TestRunPaths::modArgument() const
 {
-    QStringList parts;
-    for (const ModRef &m : modChain) {
-        const QString value = m.path.isEmpty() ? m.name : m.path;
-        if (!value.isEmpty()) parts << QDir::toNativeSeparators(value);
-    }
-    return parts.join(QLatin1Char(';'));
+    return chainSide(modChain, false, true).join(QLatin1Char(';'));
+}
+
+QString TestRunPaths::serverModArgument() const
+{
+    return chainSide(modChain, true, true).join(QLatin1Char(';'));
+}
+
+QStringList TestRunPaths::missingMods() const
+{
+    QStringList out;
+    for (const ModRef &m : modChain)
+        if (m.missing && !m.name.isEmpty()) out << m.name;
+    return out;
 }
 
 // -------------------------------------------------------------- the mod chain
@@ -262,6 +474,20 @@ ModRef modFolderFor(const ModDependency &dep, const QString &workDrive,
         return ref;
     }
 
+    // Nothing is called what this dependency is called, so what each folder
+    // calls itself is asked instead. @CF is Community Framework and no amount
+    // of comparing folder names finds that out.
+    for (const QString &place : places) {
+        const QString hit = matchFolderByModCpp(place, names);
+        if (hit.isEmpty()) continue;
+        ref.name = QFileInfo(hit).fileName();
+        ref.path = hit;
+        ref.from = QStringLiteral("found in %1, which its mod.cpp calls %2")
+                       .arg(QDir::toNativeSeparators(clean(place)),
+                            modCppName(hit));
+        return ref;
+    }
+
     // Nothing on this machine to check against, so this is the Workshop's
     // dominant spelling rather than a fact: @CommunityFramework and
     // @CommunityOnlineTools carry no space. applyExistingSpelling lets
@@ -272,33 +498,383 @@ ModRef modFolderFor(const ModDependency &dep, const QString &workDrive,
     return ref;
 }
 
+// ---------------------------------------------------------------- what it needs
+
+namespace {
+
+// A preset matched on any spelling of the mod's name. The addon ids are tried
+// too, because a dependency read off a folder is keyed by its addon rather than
+// by anything a human wrote.
+ModFacts presetFacts(const QStringList &spellings)
+{
+    ModFacts facts;
+    for (const QString &spelling : spellings) {
+        if (spelling.trimmed().isEmpty()) continue;
+        const QString want = packedName(spelling);
+        for (const KnownMod &known : knownMods()) {
+            bool hit = want == packedName(known.displayName)
+                       || want == packedName(known.id)
+                       || spelling.compare(known.id, Qt::CaseInsensitive) == 0;
+            for (const QString &addon : known.addons)
+                hit = hit || spelling.compare(addon, Qt::CaseInsensitive) == 0;
+            if (!hit) continue;
+            facts.addons = known.addons;
+            facts.requires = known.requires;
+            facts.from = QStringLiteral("known-mods.json, read from its own config");
+            return facts;
+        }
+    }
+    return facts;
+}
+
+// A mod listing its own addons under requiredAddons is common and says nothing
+// about what has to load first, so its own names come out.
+QStringList needsOf(const QStringList &requires, const QStringList &ships)
+{
+    const QSet<QString> own(ships.begin(), ships.end());
+    QStringList out;
+    for (const QString &need : requires)
+        if (!own.contains(need) && !out.contains(need)) out << need;
+    return out;
+}
+
+} // namespace
+
+ModFacts modFactsFor(const QString &folder, const QString &name)
+{
+    // The mod itself talking beats any preset, so a loose config.cpp is read
+    // first. Only a mod somebody has unpacked, a framework checked out beside
+    // the project, or the user's own mod has one.
+    const QString config = isDir(folder) ? configPathFor(folder) : QString();
+    if (!config.isEmpty()) {
+        const AddonFacts read = readAddonFacts(config);
+        if (read.found && !read.addons.isEmpty()) {
+            ModFacts facts;
+            facts.addons = read.addons;
+            facts.requires = needsOf(read.requires, read.addons);
+            facts.from = QStringLiteral("read from %1")
+                             .arg(QDir::toNativeSeparators(config));
+            return facts;
+        }
+    }
+
+    QStringList spellings;
+    spellings << modCppName(folder) << name;
+    if (!folder.isEmpty()) spellings << QFileInfo(folder).fileName();
+    const ModFacts preset = presetFacts(spellings);
+    if (!preset.addons.isEmpty()) return preset;
+
+    ModFacts facts;
+    facts.from = QStringLiteral("nothing on disk says; its config is packed as "
+                                "config.bin, which nothing here reads");
+    return facts;
+}
+
+// --------------------------------------------------------------- the load order
+
+QStringList orderModChain(QVector<ModRef> &chain)
+{
+    QStringList notes;
+    if (chain.size() < 2) return notes;
+
+    QStringList wasOrder;
+    for (const ModRef &m : chain) wasOrder << m.name;
+
+    // The mod being tested is pinned last rather than sorted, because every
+    // other entry in the chain is something it is written against and no edge
+    // read off a third-party config can be allowed to move it in front of them.
+    QVector<ModRef> self;
+    QVector<ModRef> rest;
+    for (const ModRef &m : chain) {
+        if (m.origin == ModOrigin::Self) self.append(m);
+        else rest.append(m);
+    }
+
+    // Which entry ships which addon. The first claim wins: two entries naming
+    // one addon is a conflict the engine settles by load order anyway, and
+    // inventing a second edge from it would only move them about.
+    QHash<QString, int> provider;
+    for (int i = 0; i < rest.size(); ++i)
+        for (const QString &addon : rest.at(i).addons) {
+            const QString key = addon.trimmed().toLower();
+            if (!key.isEmpty() && !provider.contains(key)) provider.insert(key, i);
+        }
+
+    QVector<QVector<int>> follows(rest.size());
+    QVector<int> waiting(rest.size(), 0);
+    for (int i = 0; i < rest.size(); ++i)
+        for (const QString &need : rest.at(i).requires) {
+            const int p = provider.value(need.trimmed().toLower(), -1);
+            // A required addon nothing in the chain ships is vanilla, or a mod
+            // the user did not add. Neither is an edge, and neither is an error
+            // here: DayZ warns on a missing requiredAddons target rather than
+            // refusing to start.
+            if (p < 0 || p == i || follows.at(p).contains(i)) continue;
+            follows[p].append(i);
+            ++waiting[i];
+        }
+
+    // Lowest seed index among the entries whose requirements are already placed,
+    // which keeps the result stable: where the edges say nothing, the order the
+    // user gave is the order that comes out.
+    QVector<ModRef> sorted;
+    QVector<bool> placed(rest.size(), false);
+    for (int done = 0; done < rest.size(); ++done) {
+        int pick = -1;
+        for (int i = 0; i < rest.size() && pick < 0; ++i)
+            if (!placed.at(i) && waiting.at(i) == 0) pick = i;
+        if (pick < 0) break;
+        placed[pick] = true;
+        sorted.append(rest.at(pick));
+        for (int next : follows.at(pick)) --waiting[next];
+    }
+
+    QStringList stuck;
+    for (int i = 0; i < rest.size(); ++i) {
+        if (placed.at(i)) continue;
+        stuck << rest.at(i).name;
+        sorted.append(rest.at(i));
+    }
+    if (!stuck.isEmpty())
+        notes << QStringLiteral("%1 require each other, which no order satisfies. "
+                                "They kept the order they were added in, and one "
+                                "of them will load before what it needs.")
+                     .arg(stuck.join(QStringLiteral(", ")));
+
+    chain = sorted + self;
+
+    QStringList blind;
+    for (const ModRef &m : chain)
+        if (m.origin != ModOrigin::Self && m.addons.isEmpty() && m.requires.isEmpty())
+            blind << m.name;
+    if (!blind.isEmpty())
+        notes << QStringLiteral("Nothing on disk says what these need, so they "
+                                "kept the place they were added at: %1. An "
+                                "installed mod carries its config.cpp packed as "
+                                "config.bin and nothing here reads that, so no "
+                                "order was invented for them. Move one up the "
+                                "list if it has to load first.")
+                     .arg(blind.join(QStringLiteral(", ")));
+
+    QStringList nowOrder;
+    for (const ModRef &m : chain) nowOrder << m.name;
+    if (nowOrder != wasOrder)
+        notes << QStringLiteral("Load order came from what each mod requires "
+                                "rather than from the order they were picked: %1.")
+                     .arg(nowOrder.join(QStringLiteral(", ")));
+    return notes;
+}
+
+// -------------------------------------------------------------- the whole chain
+
 QVector<ModRef> modChainFor(const Project &project, const QString &workDrive,
-                            const QString &gamePath)
+                            const QString &gamePath, QStringList *notes)
 {
     QVector<ModRef> chain;
+    QSet<QString> claimed;
+    // Two keys, because a mod has two names here and either one alone lets it
+    // into the chain twice.
+    //
+    // The name is compared with the punctuation out, because "@Dabs Framework"
+    // and "@DabsFramework" are one mod and loading it twice is a chain the
+    // engine will not thank anyone for. That is not enough on its own: a
+    // dependency resolves to the folder it is installed as, which for Community
+    // Framework is @CF, and a user who adds the same mod by hand writes
+    // @CommunityFramework. The two share no letters and only the folder they
+    // both resolve to says they are the same mod.
+    const auto claim = [&claimed](const QString &name, const QString &folder) {
+        const QString byName = packedName(name);
+        const QString byPath = folder.isEmpty()
+                                   ? QString()
+                                   : QDir::cleanPath(folder).toLower();
+        if (byName.isEmpty() && byPath.isEmpty()) return false;
+        if (claimed.contains(byName)) return false;
+        if (!byPath.isEmpty() && claimed.contains(byPath)) return false;
+        if (!byName.isEmpty()) claimed.insert(byName);
+        if (!byPath.isEmpty()) claimed.insert(byPath);
+        return true;
+    };
+
+    // The mod under test claims its name first even though it is appended last.
+    // Its own folder is under P:\Mods like any other, so it shows up in the
+    // picker, and a user who ticks it there would otherwise get it twice, with
+    // the copy that is not pinned last deciding the order.
+    const QString prefix = project.modRoot.isEmpty()
+                               ? QString()
+                               : prefixOf(project.modRoot, project.modPrefix);
+    const QString selfName =
+        prefix.isEmpty() ? QString() : QStringLiteral("@") + prefix;
+    const QString selfPath =
+        selfName.isEmpty()
+            ? QString()
+            : clean(QDir(workDrive).filePath(QString(kModsFolder)
+                                             + QLatin1Char('/') + selfName));
+    if (!selfName.isEmpty()) claim(selfName, selfPath);
+
     for (const ModDependency &dep : project.dependencies) {
         if (!dep.isValid()) continue;
-        const ModRef ref = modFolderFor(dep, workDrive, gamePath);
-        if (ref.name.isEmpty()) continue;
-        bool seen = false;
-        for (const ModRef &have : chain)
-            seen = seen || have.name.compare(ref.name, Qt::CaseInsensitive) == 0;
-        if (!seen) chain.append(ref);
+        ModRef ref = modFolderFor(dep, workDrive, gamePath);
+        if (ref.name.isEmpty() || !claim(ref.name, ref.path)) continue;
+        ref.origin = ModOrigin::Dependency;
+        if (!dep.addons.isEmpty()) {
+            // What the project already recorded, which is either a preset or
+            // what dependencyFromFolder read off the folder the user pointed at.
+            ref.addons = dep.addons;
+            ref.requires = needsOf(dep.requires, dep.addons);
+            ref.factsFrom = QStringLiteral("declared by this project");
+        } else {
+            const ModFacts facts = modFactsFor(ref.path, ref.name);
+            ref.addons = facts.addons;
+            ref.requires = facts.requires;
+            ref.factsFrom = facts.from;
+            if (ref.addons.isEmpty()) {
+                const ModFacts byId = presetFacts({ dep.id, dep.displayName });
+                if (!byId.addons.isEmpty()) {
+                    ref.addons = byId.addons;
+                    ref.requires = byId.requires;
+                    ref.factsFrom = byId.from;
+                }
+            }
+        }
+        chain.append(ref);
+    }
+
+    // What the user added for this run. These are not dependencies and nothing
+    // about the project changes by adding one: the mod is loaded so the classes
+    // this project reopens exist, and that is all.
+    for (const ExtraMod &extra : extraModsOf(project)) {
+        if (!extra.isValid()) continue;
+        ModRef ref;
+        ref.name = extra.name;
+        ref.origin = ModOrigin::Extra;
+        ref.serverOnly = extra.serverOnly;
+        if (isDir(extra.folder)) {
+            ref.path = clean(extra.folder);
+            ref.from = QStringLiteral("added for this run");
+        } else {
+            // A Steam library that moved is not a mod that was uninstalled, so
+            // the usual places are searched before the entry is called gone,
+            // and by the same three rules a declared dependency is resolved by,
+            // or a mod added as @CommunityFramework would be reported missing
+            // on a machine that has it installed as @CF.
+            const QStringList places = {
+                QDir(workDrive).filePath(kModsFolder),
+                QDir(gamePath).filePath(QStringLiteral("!Workshop")),
+                gamePath,
+            };
+            for (const QString &place : places) {
+                QString hit = matchFolder(place, { extra.name });
+                if (hit.isEmpty()) hit = matchFolderByModCpp(place, { extra.name });
+                if (hit.isEmpty()) continue;
+                ref.path = hit;
+                ref.from = QStringLiteral("added for this run, found again in %1")
+                               .arg(QDir::toNativeSeparators(clean(place)));
+                break;
+            }
+            if (ref.path.isEmpty()) {
+                ref.missing = true;
+                ref.from = extra.folder.isEmpty()
+                               ? QStringLiteral("added for this run, and no folder "
+                                                "of that name is installed here")
+                               : QStringLiteral("added for this run; %1 is not "
+                                                "there any more")
+                                     .arg(QDir::toNativeSeparators(extra.folder));
+            }
+        }
+        // Claimed after the folder is known, because the folder is what tells
+        // one mod's two spellings apart from two mods.
+        if (!claim(ref.name, ref.path)) {
+            // Named rather than dropped quietly, because the entry is still
+            // ticked in the picker and a list that disagrees with the chain is
+            // worse than either.
+            if (notes)
+                *notes << (ref.path.isEmpty()
+                               ? QStringLiteral("%1 is already in the chain, so "
+                                                "the copy added for this run was "
+                                                "dropped.")
+                                     .arg(extra.name)
+                               : QStringLiteral("%1 is already in the chain as %2, "
+                                                "so the copy added for this run "
+                                                "was dropped.")
+                                     .arg(extra.name,
+                                          QFileInfo(ref.path).fileName()));
+            continue;
+        }
+        const ModFacts facts = modFactsFor(ref.path, ref.name);
+        ref.addons = facts.addons;
+        ref.requires = facts.requires;
+        ref.factsFrom = facts.from;
+        chain.append(ref);
     }
 
     // The mod itself goes last: the engine loads the chain in order and a mod
     // that overrides a class its dependency declares has to come after it.
-    if (project.modRoot.isEmpty()) return chain;
-    const QString prefix = prefixOf(project.modRoot, project.modPrefix);
-    if (!prefix.isEmpty()) {
+    if (!selfName.isEmpty()) {
         ModRef self;
-        self.name = QStringLiteral("@") + prefix;
+        self.name = selfName;
         self.path = clean(QDir(workDrive).filePath(QString(kModsFolder)
                                                    + QLatin1Char('/') + self.name));
         self.from = QStringLiteral("this project");
+        self.origin = ModOrigin::Self;
+        const ModFacts facts = modFactsFor(
+            clean(QDir(project.modRoot).filePath(prefix)), self.name);
+        self.addons = facts.addons;
+        self.requires = facts.requires;
+        self.factsFrom = facts.from;
         chain.append(self);
     }
+
+    const QStringList ordering = orderModChain(chain);
+    if (notes) *notes += ordering;
     return chain;
+}
+
+// ------------------------------------------------------------- mods added by hand
+
+QVector<ExtraMod> extraModsOf(const Project &project)
+{
+    QVector<ExtraMod> out;
+    const QJsonArray list = project.extra.value(QString(kExtraKey)).toObject()
+                                .value(QString(kExtraMods)).toArray();
+    QSet<QString> seen;
+    for (const QJsonValue &value : list) {
+        const QJsonObject o = value.toObject();
+        ExtraMod mod;
+        mod.name = o.value(QStringLiteral("name")).toString().trimmed();
+        // A record with no folder name names nothing the engine could load, and
+        // a second record of one mod would load it twice.
+        if (mod.name.isEmpty()) continue;
+        const QString key = packedName(mod.name);
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+        mod.folder = o.value(QStringLiteral("folder")).toString().trimmed();
+        mod.label = o.value(QStringLiteral("label")).toString().trimmed();
+        mod.serverOnly = o.value(QStringLiteral("serverOnly")).toBool();
+        out.append(mod);
+    }
+    return out;
+}
+
+void setExtraMods(Project &project, const QVector<ExtraMod> &mods)
+{
+    QJsonArray list;
+    for (const ExtraMod &mod : mods) {
+        if (!mod.isValid()) continue;
+        QJsonObject o;
+        o.insert(QStringLiteral("name"), mod.name);
+        if (!mod.folder.isEmpty()) o.insert(QStringLiteral("folder"), mod.folder);
+        if (!mod.label.isEmpty()) o.insert(QStringLiteral("label"), mod.label);
+        if (mod.serverOnly) o.insert(QStringLiteral("serverOnly"), true);
+        list.append(o);
+    }
+
+    QJsonObject section = project.extra.value(QString(kExtraKey)).toObject();
+    if (list.isEmpty()) section.remove(QString(kExtraMods));
+    else section.insert(QString(kExtraMods), list);
+    // A project that never used the picker keeps the file it had, rather than
+    // gaining an empty object every time the panel refreshes.
+    if (section.isEmpty()) project.extra.remove(QString(kExtraKey));
+    else project.extra.insert(QString(kExtraKey), section);
 }
 
 void applyExistingSpelling(QVector<ModRef> &chain, const QByteArray &projectCfg)
@@ -330,11 +906,17 @@ void applyExistingSpelling(QVector<ModRef> &chain, const QByteArray &projectCfg)
     }
 }
 
-QByteArray withModChain(const QByteArray &projectCfg, const QStringList &modNames)
+namespace {
+
+// One key=value line replaced and every other byte kept, line endings and a
+// missing final newline included. Anchored at the start of the line with only
+// blanks in front, so rewriting Mods can never land on ServerMods.
+QByteArray withConfigLine(const QByteArray &projectCfg, const QString &key,
+                          const QStringList &values)
 {
-    const QByteArray line =
-        QByteArray("Mods=") + modNames.join(QLatin1Char(';')).toUtf8();
-    static const QRegularExpression modsKey(QStringLiteral("^\\s*Mods\\s*="));
+    const QByteArray line = key.toUtf8() + QByteArray("=")
+                            + values.join(QLatin1Char(';')).toUtf8();
+    const QRegularExpression keyLine(QStringLiteral("^[ \\t]*%1[ \\t]*=").arg(key));
 
     QByteArray out;
     out.reserve(projectCfg.size() + line.size());
@@ -349,7 +931,7 @@ QByteArray withModChain(const QByteArray &projectCfg, const QStringList &modName
         if (contentEnd > pos && projectCfg.at(contentEnd - 1) == '\r') --contentEnd;
 
         const QString text = QString::fromUtf8(projectCfg.mid(pos, contentEnd - pos));
-        if (!replaced && modsKey.match(text).hasMatch()) {
+        if (!replaced && keyLine.match(text).hasMatch()) {
             out += line;
             out += projectCfg.mid(contentEnd, end - contentEnd);
             replaced = true;
@@ -368,6 +950,30 @@ QByteArray withModChain(const QByteArray &projectCfg, const QStringList &modName
         out += '\n';
     }
     return out;
+}
+
+} // namespace
+
+QByteArray withModChain(const QByteArray &projectCfg, const QStringList &modNames)
+{
+    return withConfigLine(projectCfg, QStringLiteral("Mods"), modNames);
+}
+
+QByteArray withServerModChain(const QByteArray &projectCfg,
+                              const QStringList &modNames)
+{
+    // A file with no ServerMods line and nothing to put on one comes back
+    // untouched: appending an empty line rewrites somebody's project.cfg for no
+    // reason. A file that has the line always gets it rewritten, so taking the
+    // last server-only mod off empties the line rather than leaving a stale
+    // chain behind for Workbench to load.
+    static const QRegularExpression serverKey(
+        QStringLiteral("^[ \\t]*ServerMods[ \\t]*="),
+        QRegularExpression::MultilineOption);
+    if (modNames.isEmpty()
+        && !serverKey.match(QString::fromUtf8(projectCfg)).hasMatch())
+        return projectCfg;
+    return withConfigLine(projectCfg, QStringLiteral("ServerMods"), modNames);
 }
 
 // ---------------------------------------------------------------- P: junctions
@@ -503,6 +1109,19 @@ QVector<OfflineLimit> offlineLimits(const QVector<ModRef> &modChain)
     add(QStringLiteral("Anything set in server.cfg"),
         QStringLiteral("Offline passes no -config, so ServerConfigGetInt finds "
                        "nothing and cfggameplay.json is not loaded."));
+
+    // Only worth saying when there is a server-only chain to leave out. The two
+    // launches differ here and it is the one difference the user chose, so it
+    // gets said rather than discovered.
+    for (const ModRef &m : modChain) {
+        if (!m.serverOnly) continue;
+        add(QStringLiteral("A server-only mod"),
+            QStringLiteral("-serverMod= is what Bohemia's own server script "
+                           "passes to the server executable and to nothing else, "
+                           "so an offline run, which is one process and not a "
+                           "server launch, is given none of that chain."));
+        break;
+    }
 
     // Only worth saying to somebody loading COT. Spaces and dashes come out
     // because the folder ships as @Community-Online-Tools while the guessed
@@ -773,7 +1392,7 @@ void TestRun::refresh(const Project &project)
         if (p.mission.isEmpty()) p.mission = p.missions.value(0);
     }
 
-    p.modChain = modChainFor(project, p.workDrive, p.gamePath);
+    p.modChain = modChainFor(project, p.workDrive, p.gamePath, &p.chainNotes);
     // Reconciled here rather than at write time, so the chain the launch uses
     // and the chain written into project.cfg can never be two different things.
     if (isFile(p.projectCfg)) {
@@ -913,11 +1532,63 @@ QVector<PrereqCheck> TestRun::check() const
                                   "file-patched mod."));
     }
 
+    // The chain itself, before the file it gets written into. A folder that is
+    // not there is the one state that blocks: the engine treats an unresolved
+    // -mod= entry as a mod that loaded, so the mod written against it comes up
+    // hooking classes that do not exist and nothing on screen says why.
+    const QStringList gone = p.missingMods();
+    QStringList unsure;
+    QStringList blind;
+    for (const ModRef &m : p.modChain) {
+        if (m.guessed) unsure << m.name;
+        if (m.origin != ModOrigin::Self && !m.missing && m.addons.isEmpty()
+            && m.requires.isEmpty())
+            blind << m.name;
+    }
+    // The names are not repeated here. The panel prints the whole chain in
+    // order above the checklist, and a row that says it again is a row nobody
+    // reads. This one is about the state of the chain rather than its content.
+    const QString chainLine =
+        p.modChain.isEmpty()
+            ? QStringLiteral("Nothing to load")
+            : p.modChain.size() == 1
+                  ? QStringLiteral("One mod")
+                  : QStringLiteral("%1 mods, in the order each one requires")
+                        .arg(p.modChain.size());
+    if (!gone.isEmpty())
+        out << bad(QStringLiteral("modchain"), QStringLiteral("Mod chain"),
+                   QStringLiteral("%1 was added for this run and is not installed "
+                                  "here any more.")
+                       .arg(gone.join(QStringLiteral(", "))),
+                   QStringLiteral("Install it again, or take it out with Choose "
+                                  "mods. Nothing launches while the chain names a "
+                                  "folder that is not there."));
+    else if (!unsure.isEmpty())
+        out << bad(QStringLiteral("modchain"), QStringLiteral("Mod chain"),
+                   QStringLiteral("%1. Nothing here confirmed the spelling of %2, "
+                                  "so the Workshop's usual one was used.")
+                       .arg(chainLine, unsure.join(QStringLiteral(", "))),
+                   QStringLiteral("Point the dependency at its folder, or add the "
+                                  "installed mod with Choose mods, and the name "
+                                  "comes off disk instead."),
+                   PrereqState::Warning);
+    else if (!blind.isEmpty())
+        out << bad(QStringLiteral("modchain"), QStringLiteral("Mod chain"),
+                   QStringLiteral("%1. Nothing on disk says what these need, so "
+                                  "they kept the place they were added at: %2.")
+                       .arg(chainLine, blind.join(QStringLiteral(", "))),
+                   QStringLiteral("An installed mod carries its config packed as "
+                                  "config.bin. If it has to load before something "
+                                  "else, put it higher in Choose mods."),
+                   PrereqState::Warning);
+    else
+        out << ok(QStringLiteral("modchain"), QStringLiteral("Mod chain"), chainLine);
+
     if (isFile(p.projectCfg))
-        out << ok(QStringLiteral("projectcfg"), QStringLiteral("Mod chain"),
+        out << ok(QStringLiteral("projectcfg"), QStringLiteral("Workbench project"),
                   QStringLiteral("Mods=%1").arg(p.modNames().join(QLatin1Char(';'))));
     else
-        out << bad(QStringLiteral("projectcfg"), QStringLiteral("Mod chain"),
+        out << bad(QStringLiteral("projectcfg"), QStringLiteral("Workbench project"),
                    QStringLiteral("No %1.")
                        .arg(QDir::toNativeSeparators(p.projectCfg)),
                    QStringLiteral("The template writes this file. Scaffold the mod "
@@ -1070,10 +1741,20 @@ RunStep TestRun::writeModChain()
     file.close();
 
     const QStringList names = m_paths.modNames();
-    const QByteArray after = withModChain(before, names);
+    const QStringList serverNames = m_paths.serverModNames();
+    // Both lines, in one pass over the file, so Workbench and a launch from
+    // here can never be loading two different chains.
+    const QByteArray after =
+        withServerModChain(withModChain(before, names), serverNames);
+    const QString written =
+        serverNames.isEmpty()
+            ? QStringLiteral("Mods=%1").arg(names.join(QLatin1Char(';')))
+            : QStringLiteral("Mods=%1 / ServerMods=%2")
+                  .arg(names.join(QLatin1Char(';')),
+                       serverNames.join(QLatin1Char(';')));
     if (after == before) {
         step.ok = true;
-        step.output = QStringLiteral("Mods=%1").arg(names.join(QLatin1Char(';')));
+        step.output = written;
         step.detail = QStringLiteral("Already correct.");
         return step;
     }
@@ -1092,10 +1773,16 @@ RunStep TestRun::writeModChain()
     file.close();
 
     step.ok = true;
-    step.output = QStringLiteral("Mods=%1").arg(names.join(QLatin1Char(';')));
+    step.output = written;
     QStringList how;
     for (const ModRef &m : m_paths.modChain)
         how << QStringLiteral("%1 (%2)").arg(m.name, m.from);
+    // Anything not installed was left off both lines rather than written as a
+    // path to nothing, and a line that quietly lost an entry is worth saying.
+    const QStringList gone = m_paths.missingMods();
+    if (!gone.isEmpty())
+        how << QStringLiteral("left out because it is not installed here: %1")
+                   .arg(gone.join(QStringLiteral(", ")));
     step.detail = how.join(QStringLiteral(", "));
     return step;
 }
@@ -1136,6 +1823,24 @@ RunCommand TestRun::buildCommand(bool clean_, QString *error) const
     return cmd;
 }
 
+// A chain naming a folder that is not there. Refused before anything starts,
+// rather than launched with the entry quietly dropped: the mod under test is
+// written against that mod, so a session without it comes up hooking classes
+// that do not exist, which looks exactly like the mod being broken.
+QString TestRun::missingChainReason() const
+{
+    const QStringList gone = m_paths.missingMods();
+    if (gone.isEmpty()) return {};
+    QStringList where;
+    for (const ModRef &m : m_paths.modChain)
+        if (m.missing) where << QStringLiteral("%1 (%2)").arg(m.name, m.from);
+    return QStringLiteral("%1 %2 in the mod chain and not installed here. %3. "
+                          "Install it again, or take it out with Choose mods.")
+        .arg(gone.join(QStringLiteral(", ")),
+             gone.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
+             where.join(QStringLiteral("; ")));
+}
+
 RunCommand TestRun::serverCommand(QString *error) const
 {
     const TestRunPaths &p = m_paths;
@@ -1149,6 +1854,8 @@ RunCommand TestRun::serverCommand(QString *error) const
     if (p.serverCfg.isEmpty() || !isFile(p.serverCfg))
         return fail(QStringLiteral("No server.cfg at %1.")
                         .arg(QDir::toNativeSeparators(p.serverCfg)));
+    const QString gone = missingChainReason();
+    if (!gone.isEmpty()) return fail(gone);
 
     RunCommand cmd;
     cmd.program = p.diagExe;
@@ -1165,6 +1872,13 @@ RunCommand TestRun::serverCommand(QString *error) const
                              .arg(QDir::toNativeSeparators(p.mission));
     const QString mods = p.modArgument();
     if (!mods.isEmpty()) cmd.arguments << QStringLiteral("-mod=%1").arg(mods);
+    // The server-only half of the chain, and the only place it appears. The
+    // evidence for the parameter is on withServerModChain in the header: it is
+    // what Bohemia's own Server_manager.ps1 hands DayZServer_x64.exe, alongside
+    // -mod= and never instead of it.
+    const QString serverMods = p.serverModArgument();
+    if (!serverMods.isEmpty())
+        cmd.arguments << QStringLiteral("-serverMod=%1").arg(serverMods);
     // Without this the engine reads scripts out of the PBO only, which is the
     // whole reason server.cfg sets allowFilePatching.
     cmd.arguments << QStringLiteral("-filePatching")
@@ -1178,6 +1892,11 @@ RunCommand TestRun::clientCommand(QString *error) const
     const TestRunPaths &p = m_paths;
     if (p.diagExe.isEmpty()) {
         if (error) *error = QStringLiteral("DayZDiag_x64.exe was not found.");
+        return {};
+    }
+    const QString gone = missingChainReason();
+    if (!gone.isEmpty()) {
+        if (error) *error = gone;
         return {};
     }
 
@@ -1208,6 +1927,8 @@ RunCommand TestRun::offlineCommand(QString *error) const
 
     if (p.diagExe.isEmpty())
         return fail(QStringLiteral("DayZDiag_x64.exe was not found."));
+    const QString gone = missingChainReason();
+    if (!gone.isEmpty()) return fail(gone);
     // Refused here rather than launched without it. The engine takes a missing
     // -mission= as a request for the main menu, so the session would come up
     // looking exactly like a mod that failed to load.

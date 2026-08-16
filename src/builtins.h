@@ -93,6 +93,41 @@ extern const QString Cast;
 extern const QString Literal;
 extern const QString Print;
 
+// Arrays. Make Array is the one node in the group that declares an array
+// instead of working on one, and the only builtin whose pin list is decided by
+// the user rather than by its definition.
+extern const QString MakeArray;
+extern const QString ArrayCount;
+extern const QString ArrayGet;
+extern const QString ArrayInsert;
+extern const QString ArrayInsertAt;
+extern const QString ArrayRemove;
+extern const QString ArrayClear;
+extern const QString ArrayFind;
+extern const QString ArraySort;
+extern const QString ArrayForIndex;
+// Written before these existed and still the node for `arr[i] = v`, so it is
+// named here rather than respelled in every module that has to recognise it.
+extern const QString SetElement;
+
+// How many element pins a Make Array carries, read off opts["count"] and
+// clamped to the def's own limits. An untouched node answers the default, so a
+// node placed from the palette already has somewhere to type.
+int listCount(const GraphNode &node, const PinList &list);
+// The pin id of element `index`, "el0" and up. One spelling, because the
+// canvas, the generator and the analyser all have to name the same pin. Two
+// letters rather than one: "exec" also begins with an "e", so a prefix test
+// written against "e" would count an exec pin as an element.
+QString listPinId(const PinList &list, int index);
+
+// The element type of an array node, as far as the node itself can say: what
+// the author set in Details, or nothing. Deliberately does NOT guess from the
+// wires, because the canvas resolves a def without the graph in hand and a
+// subtitle claiming a type the generator then disagreed with would be worse
+// than one that stays quiet. The generator does the wire-based inference, and
+// its rule is written out at arrayElementFor in codegen.cpp.
+QString declaredElementType(const GraphNode &node);
+
 // Timing. These four are the only nodes that write more than statements: Set
 // Timer declares a `ref` member and a whole callback method, Call Later writes
 // a callback method. Everything about that is derived from one name, so the

@@ -1,0 +1,60 @@
+name: Feature request
+description: Something the application should do and does not.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: >-
+        The mod you are writing and the part of it this tool makes harder than
+        it should be. Describe the job rather than the feature, because there
+        is often a shorter way to the same place.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How you do it today
+      description: >-
+        Whether that is a raw node, dropping to the code view, editing the file
+        outside the application, or not doing it at all.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think it should do
+      description: >-
+        If this is a node, say what its pins are and what Enforce Script it
+        should generate. A worked example of the generated output settles most
+        of the design.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Node canvas and editing
+        - Palette and the node catalogue
+        - Generated code
+        - Reading existing script (import and lowering)
+        - Analysis and diagnostics
+        - config.cpp editor
+        - Mod browser and PBO reading
+        - Mod scaffolding and templates
+        - Running and testing a mod
+        - Projects, start page, recent files
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues.
+          required: true

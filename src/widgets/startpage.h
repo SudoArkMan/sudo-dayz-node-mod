@@ -11,8 +11,16 @@
 // so it takes the left column on its own while the two fixed regions stack in
 // the right one. That is what keeps the page whole on a first run, where the
 // left panel holds one line and the right column is still full.
+//
+// A fourth region was added under the recent list: what is new. It sits in the
+// left column rather than the right one because the right column's two panels
+// are the page's fixed furniture and the left column is where the page already
+// says what has happened. It is bounded like the others, and the notes it draws
+// are capped in lines, so a long release cannot push the recent list off a
+// laptop screen.
 #pragma once
 
+#include "update.h"
 #include "widgets/newscriptdialog.h"
 
 #include <QVector>
@@ -25,6 +33,8 @@ class QHBoxLayout;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
+class QPushButton;
+class QVBoxLayout;
 
 // What picking a tile asks the window to do.
 enum class StartTemplateKind {
@@ -58,7 +68,14 @@ class StartPage : public QWidget {
     Q_OBJECT
 public:
     // `recent` is owned by the window and outlives the page.
-    explicit StartPage(RecentProjects *recent, QWidget *parent = nullptr);
+    //
+    // `updateSettingsPath` sends the remembered answer about update checks to
+    // an ini file of the caller's choosing. Empty is the app's own settings,
+    // which is what the window passes; the test passes a file of its own so a
+    // run never reads or writes the user's real answer.
+    explicit StartPage(RecentProjects *recent, QWidget *parent = nullptr,
+                       const QString &updateSettingsPath = QString());
+    ~StartPage() override;
 
     // Restats the recent list and redraws the rows. Only a file that has
     // actually changed is read again, so this is cheap enough to run on every
@@ -67,6 +84,26 @@ public:
 
     // The templates column on its own, for a screenshot of the gallery.
     QWidget *gallery() const { return m_gallery; }
+
+    // The what is new panel on its own, for a screenshot and for a test that
+    // wants to measure it rather than the whole page.
+    QWidget *whatsNew() const { return m_whatsNewPanel; }
+
+    // Where the release notes for the running version are read from. Set by the
+    // constructor to CHANGELOG.md beside the executable when there is one; a
+    // caller can point it somewhere else, and does when there is no install.
+    void setChangelogPath(const QString &path);
+    QString changelogPath() const { return m_changelogPath; }
+
+    // Stops the page opening a socket at all, whatever the settings file it was
+    // handed says. The screenshot harness sets this off, so no run of the test
+    // can reach the network even if it grants consent to draw a state.
+    void setAutomaticUpdateCheck(bool on);
+
+    // Puts the panel in the state an answer from GitHub would put it in. The
+    // page's own check calls this; a test calls it to draw a newer release
+    // without a request having been made.
+    void applyUpdateOutcome(const UpdateOutcome &outcome);
 
     // The second line of the Read a mod card. The window pushes what the mod
     // library has actually found, because "266 mods installed on this machine"
@@ -99,7 +136,14 @@ private:
     QWidget *buildRecentPanel();
     QWidget *buildStartPanel();
     QWidget *buildTemplatesPanel();
+    QWidget *buildWhatsNewPanel();
     void rebuildRecent();
+    void reloadChangelog();
+    void rebuildWhatsNew();
+    // The once-a-day one, from the first show. Does nothing without consent.
+    void maybeStartUpdateCheck();
+    // The one a button press asks for.
+    void startUpdateCheck();
     QString selectedPath() const;
 
     RecentProjects *m_recent;
@@ -115,4 +159,26 @@ private:
     QWidget *m_firstAction;  // where the keyboard lands when there are no rows
     QAbstractButton *m_readModCard;  // a StartCard, whose summary the window sets
     QVector<StartTemplate> m_templates;
+
+    // What is new. The page owns the check rather than being driven by the
+    // window, so the whole feature is one file and adding it moved nothing in
+    // the window that hosts the page.
+    QWidget *m_whatsNewPanel;
+    QLabel *m_versionLine;
+    QLabel *m_checkStatus;    // right of the version line, dim, never an error
+    QLabel *m_currentNotes;
+    QLabel *m_updateHeadline;
+    QLabel *m_updateNotes;
+    QWidget *m_updateBlock;   // headline and notes together, hidden when there is nothing
+    QPushButton *m_primary;
+    QPushButton *m_secondary;
+    QPushButton *m_tertiary;
+    UpdatePreferences *m_prefs;
+    UpdateCheck *m_check;
+    UpdateOutcome m_outcome;
+    QVector<ChangelogEntry> m_changelog;
+    QString m_changelogPath;
+    QString m_version;
+    bool m_autoCheck;
+    bool m_updatedSinceLastRun;  // the running version is not the one last shown
 };

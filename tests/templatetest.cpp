@@ -4,7 +4,14 @@
 // The load bearing assertion is that the "ModTemplate" token is gone from
 // every file name and every file body. A token left in one config is not a
 // visible failure, it is a Workbench load error days later.
+//
+// The second half covers the work drive junction, which is the other thing
+// creating a mod has to get right. A stand in drive is used throughout: a
+// QTemporaryDir plays P:, and nothing in this file creates, renames or removes
+// anything under the real work drive, which holds the user's unpacked game
+// data and every other mod they have.
 #include "modtemplate.h"
+#include "workdrive.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -78,6 +85,78 @@ static QString describeEndings(const QByteArray &data)
         .arg(data.count('\n'));
 }
 
+// ------------------------------------------------------------- the work drive
+
+static QString stateName(WorkDriveState state)
+{
+    switch (state) {
+    case WorkDriveState::NoModFolder:     return QStringLiteral("NoModFolder");
+    case WorkDriveState::NameReserved:    return QStringLiteral("NameReserved");
+    case WorkDriveState::DriveMissing:    return QStringLiteral("DriveMissing");
+    case WorkDriveState::Overlapping:     return QStringLiteral("Overlapping");
+    case WorkDriveState::Linked:          return QStringLiteral("Linked");
+    case WorkDriveState::LinkedElsewhere: return QStringLiteral("LinkedElsewhere");
+    case WorkDriveState::NotLinked:       return QStringLiteral("NotLinked");
+    case WorkDriveState::FolderIsCopy:    return QStringLiteral("FolderIsCopy");
+    case WorkDriveState::FolderHasOwn:    return QStringLiteral("FolderHasOwn");
+    case WorkDriveState::FolderUnchecked: return QStringLiteral("FolderUnchecked");
+    case WorkDriveState::RealFile:        return QStringLiteral("RealFile");
+    }
+    return QStringLiteral("?");
+}
+
+static void checkState(const WorkDriveLink &link, WorkDriveState want,
+                       const QString &what)
+{
+    check(link.state == want,
+          QStringLiteral("%1: %2 (%3)")
+              .arg(what, stateName(link.state), link.message()));
+}
+
+// Junctions made under the stand in drive, taken back out before the temporary
+// directory is cleaned up. QDir::removeRecursively walking into a live junction
+// would delete the mod folder it points at, which is the single mistake this
+// whole area is about not making. Every link this test makes is a direct child
+// of the drive, so one sweep at that depth covers all of them, including any
+// left behind by a check that failed early.
+struct DriveGuard {
+    QString drive;
+    ~DriveGuard()
+    {
+        if (drive.isEmpty()) return;
+        const QDir dir(drive);
+        for (const QString &name :
+             dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden
+                           | QDir::System)) {
+            const QString path = dir.filePath(name);
+            if (QFileInfo(path).isJunction()) QDir().rmdir(path);
+        }
+    }
+};
+
+static bool copyTree(const QString &from, const QString &to)
+{
+    if (!QDir().mkpath(to)) return false;
+    const QDir src(from);
+    QDirIterator it(from, QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString path = it.next();
+        const QString dest = to + QLatin1Char('/') + src.relativeFilePath(path);
+        if (!QDir().mkpath(QFileInfo(dest).absolutePath())) return false;
+        if (!QFile::copy(path, dest)) return false;
+    }
+    return true;
+}
+
+static bool writeFile(const QString &path, const QByteArray &data)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    return f.write(data) == qint64(data.size());
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -106,6 +185,18 @@ int main(int argc, char *argv[])
         out << "       keeping " << tmp.path() << Qt::endl;
     }
     const QString sandbox = tmp.path();
+
+    // The stand in for P:. Every scaffold below points at this instead of the
+    // real work drive, so the junctions this test makes land here and the
+    // user's own P: is only ever read. Declared after tmp and before the guard
+    // so the links come out before either directory is cleaned up.
+    QTemporaryDir driveTmp;
+    check(driveTmp.isValid(), QStringLiteral("stand in work drive created"));
+    if (!driveTmp.isValid()) return 1;
+    const QString drive = driveTmp.path();
+    DriveGuard guard;
+    guard.drive = drive;
+    out << "       stand in drive " << QDir::toNativeSeparators(drive) << Qt::endl;
 
     // ---------------------------------------------------------------- refusals
     out << Qt::endl << "refusals" << Qt::endl;
@@ -140,6 +231,7 @@ int main(int argc, char *argv[])
     opts.displayName = QStringLiteral("SUDO Link");
     opts.author = QStringLiteral("Dillan Stephenson");
     opts.includeMissions = false;
+    opts.workDrive = drive;
 
     const ModTemplateResult res = scaffoldMod(sandbox, opts);
     check(res.ok, QStringLiteral("scaffolded (%1)").arg(res.error));
@@ -329,6 +421,7 @@ int main(int argc, char *argv[])
         ModTemplateOptions pre;
         pre.prefix = QStringLiteral("SUDO_Pre");
         pre.displayName = QStringLiteral("SUDO Pre");
+        pre.workDrive = drive;
         QDir().mkpath(sandbox + QStringLiteral("/SUDO_Pre"));
         const ModTemplateResult r = scaffoldMod(sandbox, pre);
         check(r.ok, QStringLiteral("scaffolds into an existing empty folder (%1)").arg(r.error));
@@ -345,6 +438,7 @@ int main(int argc, char *argv[])
     withMap.author = QStringLiteral("Dillan Stephenson");
     withMap.includeMissions = true;
     withMap.maps = { QStringLiteral("ChernarusPlus") };
+    withMap.workDrive = drive;
     const ModTemplateResult mapped = scaffoldMod(sandbox, withMap);
     check(mapped.ok, QStringLiteral("scaffolded (%1)").arg(mapped.error));
     if (mapped.ok) {
@@ -395,6 +489,7 @@ int main(int argc, char *argv[])
     all.displayName = QStringLiteral("SUDO All");
     all.includeMissions = true;
     all.extraMissionSource = extra;
+    all.workDrive = drive;
     const ModTemplateResult everything = scaffoldMod(sandbox, all);
     check(everything.ok, QStringLiteral("scaffolded (%1)").arg(everything.error));
     if (everything.ok) {
@@ -427,6 +522,406 @@ int main(int argc, char *argv[])
               QStringLiteral("token gone from the full tree (%1)").arg(hits.join(", ")));
         out << "       full tree holds " << relativeFiles(root).size() << " files"
             << Qt::endl;
+    }
+
+    // ============================================================ work drive
+    //
+    // Every case P:\<Name> can be in when a mod is created, and what each one
+    // is allowed to do about it. All of it against the stand in drive.
+
+    out << Qt::endl << "work drive: a new mod lands linked" << Qt::endl;
+    const QString modFolder = res.modFolder;
+    const QString link = workDriveLinkFor(modFolder, drive);
+    check(!modFolder.isEmpty() && QFileInfo(modFolder).isDir(),
+          QStringLiteral("the result names the mod folder"));
+    check(res.workDrive.ok,
+          QStringLiteral("scaffolding linked it, with no second button press (%1)")
+              .arg(res.workDrive.error));
+    checkState(res.workDrive.link, WorkDriveState::Linked,
+               QStringLiteral("state after scaffolding"));
+    check(QFileInfo(link).isJunction(), QStringLiteral("the link is a junction"));
+    check(QDir::cleanPath(QFileInfo(link).junctionTarget())
+              == QDir::cleanPath(modFolder),
+          QStringLiteral("it points at the mod folder, not at the project root"));
+    // The one that matters to AddonBuilder: the config has to be reachable
+    // through the link at the depth the PBO prefix expects.
+    check(QFile::exists(link + QStringLiteral("/Scripts/config.cpp")),
+          QStringLiteral("config.cpp resolves through the link"));
+    check(!res.workDrive.command.isEmpty(),
+          QStringLiteral("the mklink line is kept for the log"));
+    check(res.workDrive.movedTo.isEmpty(),
+          QStringLiteral("nothing was moved to make room"));
+    for (const ModTemplateResult *r : { &res, &mapped, &everything }) {
+        if (!r->ok) continue;
+        check(r->workDrive.ok,
+              QStringLiteral("%1 linked too (%2)")
+                  .arg(QFileInfo(r->modFolder).fileName(), r->workDrive.error));
+    }
+
+    // The stand in drive is the point of the whole section. If any of these
+    // fail, this test has been writing to the user's real work drive.
+    out << Qt::endl << "work drive: the real P: was never touched" << Qt::endl;
+    for (const QString &name : { QStringLiteral("SUDO_Link"), QStringLiteral("SUDO_Pre"),
+                                 QStringLiteral("SUDO_Chern"), QStringLiteral("SUDO_All"),
+                                 QStringLiteral("SUDO_Dup"), QStringLiteral("SUDO_Own"),
+                                 QStringLiteral("SUDO_Whole") }) {
+        check(!QFileInfo::exists(workDriveRoot() + name),
+              QStringLiteral("%1%2 was not created")
+                  .arg(QDir::toNativeSeparators(workDriveRoot()), name));
+    }
+
+    out << Qt::endl << "work drive: already correct" << Qt::endl;
+    {
+        const WorkDriveAction repeat = linkModFolder(link, modFolder);
+        check(repeat.ok, QStringLiteral("linking again is a success"));
+        checkState(repeat.link, WorkDriveState::Linked, QStringLiteral("state"));
+        check(repeat.command.isEmpty(),
+              QStringLiteral("nothing was run the second time"));
+        check(repeat.link.fix().isEmpty(),
+              QStringLiteral("a correct link asks nothing of the user"));
+    }
+
+    out << Qt::endl << "work drive: a junction pointing somewhere else" << Qt::endl;
+    {
+        const QString elsewhere = QDir(sandbox).filePath(QStringLiteral("elsewhere"));
+        QDir().mkpath(elsewhere);
+        const QString taken = QDir(drive).filePath(QStringLiteral("SUDO_Taken"));
+        check(linkModFolder(taken, elsewhere).ok,
+              QStringLiteral("a junction to another folder set up for the case"));
+
+        const WorkDriveLink seen = inspectWorkDriveLink(taken, modFolder);
+        checkState(seen, WorkDriveState::LinkedElsewhere, QStringLiteral("state"));
+        check(QDir::cleanPath(seen.pointsAt) == QDir::cleanPath(elsewhere),
+              QStringLiteral("it says where the junction points"));
+        check(seen.message().contains(QDir::toNativeSeparators(elsewhere)),
+              QStringLiteral("the message names that folder"));
+
+        const WorkDriveAction refused = linkModFolder(taken, modFolder);
+        check(!refused.ok, QStringLiteral("linking over it refused"));
+        check(refused.command.isEmpty(), QStringLiteral("nothing was run"));
+        const WorkDriveAction refusedMove = moveAsideAndLinkModFolder(taken, modFolder);
+        check(!refusedMove.ok && refusedMove.movedTo.isEmpty(),
+              QStringLiteral("moving it aside refused as well"));
+        check(QFileInfo(taken).isJunction()
+                  && QDir::cleanPath(QFileInfo(taken).junctionTarget())
+                         == QDir::cleanPath(elsewhere),
+              QStringLiteral("the other junction still points where it did"));
+    }
+
+    // ---------------------------------------------------------------- a copy
+    //
+    // The user's own case: P:\<Name> is a real folder holding a byte for byte
+    // copy of the project. Nothing in it is unique, so it can be renamed out of
+    // the way, and renaming is the most that is ever done to it.
+    out << Qt::endl << "work drive: a real folder that is a copy" << Qt::endl;
+    ModTemplateOptions dupOpts;
+    dupOpts.prefix = QStringLiteral("SUDO_Dup");
+    dupOpts.displayName = QStringLiteral("SUDO Dup");
+    dupOpts.author = QStringLiteral("Dillan Stephenson");
+    dupOpts.linkWorkDrive = false;
+    const ModTemplateResult dup = scaffoldMod(sandbox, dupOpts);
+    check(dup.ok, QStringLiteral("a second mod scaffolded (%1)").arg(dup.error));
+    check(!dup.workDrive.attempted(),
+          QStringLiteral("linking turned off means nothing was tried"));
+    if (dup.ok) {
+        const QString dupLink = workDriveLinkFor(dup.modFolder, drive);
+        check(copyTree(dup.modFolder, dupLink),
+              QStringLiteral("a copy of it placed at the link"));
+        const int copied = relativeFiles(dup.modFolder).size();
+        const QStringList wasThere = signature(dupLink);
+
+        const WorkDriveLink seen = inspectWorkDriveLink(dupLink, dup.modFolder);
+        checkState(seen, WorkDriveState::FolderIsCopy, QStringLiteral("state"));
+        check(seen.uniqueTotal == 0, QStringLiteral("nothing in it is unique"));
+        check(seen.files == copied,
+              QStringLiteral("all %1 files were looked at (%2)").arg(copied).arg(seen.files));
+        check(seen.compared == copied,
+              QStringLiteral("all %1 read byte for byte, not trusted on size (%2)")
+                  .arg(copied).arg(seen.compared));
+        check(seen.canMoveAside(),
+              QStringLiteral("a copy is the one case that can be cleared"));
+
+        // Linking on its own never moves anything. The move is a separate call
+        // because it is a separate decision, and the user makes it.
+        const WorkDriveAction refused = linkModFolder(dupLink, dup.modFolder);
+        check(!refused.ok && refused.command.isEmpty(),
+              QStringLiteral("linking alone will not move a folder"));
+        check(signature(dupLink) == wasThere,
+              QStringLiteral("the folder is exactly as it was"));
+
+        const WorkDriveAction moved = moveAsideAndLinkModFolder(dupLink, dup.modFolder);
+        check(moved.ok, QStringLiteral("moved aside and linked (%1)").arg(moved.error));
+        check(!moved.movedTo.isEmpty(), QStringLiteral("it says where the folder went"));
+        check(QFileInfo(moved.movedTo).isDir(),
+              QStringLiteral("the folder is still on disk under its new name"));
+        check(signature(moved.movedTo) == wasThere,
+              QStringLiteral("every one of its %1 files survived the move").arg(copied));
+        check(QFileInfo(dupLink).isJunction(),
+              QStringLiteral("the link is a junction now"));
+        check(QFile::exists(dupLink + QStringLiteral("/Scripts/config.cpp")),
+              QStringLiteral("config.cpp resolves through it"));
+    }
+
+    // --------------------------------------------- a copy of the whole project
+    //
+    // What was actually on the user's disk: P:\TimerTest held a copy of the
+    // project, not of the mod folder the junction has to point at. Against the
+    // mod folder alone that reads as a folder full of somebody's work, which is
+    // the reading that turns a one click fix into a dead end.
+    out << Qt::endl << "work drive: a real folder that copies the whole project"
+        << Qt::endl;
+    ModTemplateOptions wholeOpts;
+    wholeOpts.prefix = QStringLiteral("SUDO_Whole");
+    wholeOpts.displayName = QStringLiteral("SUDO Whole");
+    wholeOpts.linkWorkDrive = false;
+    const ModTemplateResult whole = scaffoldMod(sandbox, wholeOpts);
+    check(whole.ok, QStringLiteral("a fourth mod scaffolded (%1)").arg(whole.error));
+    if (whole.ok) {
+        const QString wholeLink = workDriveLinkFor(whole.modFolder, drive);
+        check(copyTree(whole.modRoot, wholeLink),
+              QStringLiteral("the whole project copied to the link"));
+        const QStringList wasThere = signature(wholeLink);
+
+        checkState(inspectWorkDriveLink(wholeLink, whole.modFolder),
+                   WorkDriveState::FolderHasOwn,
+                   QStringLiteral("against the mod folder alone"));
+
+        const WorkDriveLink seen =
+            inspectWorkDriveLink(wholeLink, whole.modFolder, whole.modRoot);
+        checkState(seen, WorkDriveState::FolderIsCopy,
+                   QStringLiteral("with the project root as well"));
+        check(QDir::cleanPath(seen.copyOf) == QDir::cleanPath(whole.modRoot),
+              QStringLiteral("it says which folder it is a copy of"));
+        check(seen.message().contains(QDir::toNativeSeparators(whole.modRoot)),
+              QStringLiteral("and the message names that folder"));
+
+        const WorkDriveAction moved =
+            moveAsideAndLinkModFolder(wholeLink, whole.modFolder, whole.modRoot);
+        check(moved.ok, QStringLiteral("moved aside and linked (%1)").arg(moved.error));
+        check(signature(moved.movedTo) == wasThere,
+              QStringLiteral("the copy survived the move whole"));
+        check(QFile::exists(wholeLink + QStringLiteral("/Scripts/config.cpp")),
+              QStringLiteral("the link points at the mod folder, not the project root"));
+    }
+
+    // ------------------------------------------------- a folder of their own
+    out << Qt::endl << "work drive: a real folder with content of its own" << Qt::endl;
+    ModTemplateOptions ownOpts;
+    ownOpts.prefix = QStringLiteral("SUDO_Own");
+    ownOpts.displayName = QStringLiteral("SUDO Own");
+    ownOpts.linkWorkDrive = false;
+    const ModTemplateResult own = scaffoldMod(sandbox, ownOpts);
+    check(own.ok, QStringLiteral("a third mod scaffolded (%1)").arg(own.error));
+    if (own.ok) {
+        const QString ownLink = workDriveLinkFor(own.modFolder, drive);
+        check(copyTree(own.modFolder, ownLink), QStringLiteral("copied to the link"));
+
+        // One file that is not in the mod folder at all.
+        check(writeFile(ownLink + QStringLiteral("/notes.txt"),
+                        QByteArrayLiteral("a day of work\r\n")),
+              QStringLiteral("a file of their own added"));
+        // And one that is there, at the same size, with different bytes. Sizes
+        // alone would call this a copy, which is how a folder full of work gets
+        // renamed out from under somebody.
+        const QString configRel = QStringLiteral("Scripts/config.cpp");
+        QByteArray body = readFile(ownLink + QLatin1Char('/') + configRel);
+        check(!body.isEmpty(), QStringLiteral("the copied config.cpp was readable"));
+        body[0] = body.at(0) == 'x' ? 'y' : 'x';
+        check(writeFile(ownLink + QLatin1Char('/') + configRel, body),
+              QStringLiteral("one byte changed, same length"));
+
+        const QStringList wasThere = signature(ownLink);
+        const WorkDriveLink seen = inspectWorkDriveLink(ownLink, own.modFolder);
+        checkState(seen, WorkDriveState::FolderHasOwn, QStringLiteral("state"));
+        check(seen.uniqueTotal == 2,
+              QStringLiteral("both are unique, the extra and the edited one (%1)")
+                  .arg(seen.uniqueTotal));
+        check(seen.unique.contains(QStringLiteral("notes.txt")),
+              QStringLiteral("the extra file is named"));
+        check(seen.unique.contains(configRel),
+              QStringLiteral("the one that differs only in its bytes is named too"));
+        check(!seen.canMoveAside(),
+              QStringLiteral("a folder with anything of its own cannot be moved"));
+
+        const WorkDriveAction refused = moveAsideAndLinkModFolder(ownLink, own.modFolder);
+        check(!refused.ok && refused.movedTo.isEmpty(),
+              QStringLiteral("the move refused and said why"));
+        check(refused.error.contains(QStringLiteral("notes.txt")),
+              QStringLiteral("the refusal names what it found"));
+        check(signature(ownLink) == wasThere,
+              QStringLiteral("the folder is exactly as it was"));
+        check(!QFileInfo(ownLink).isJunction(),
+              QStringLiteral("and it is still a real folder"));
+    }
+
+    // ------------------------------------- the project created on the drive
+    //
+    // What was really on the user's disk. P:\TimerTest carries TimerTest.sdzn
+    // and P:\SUDO_Test_3 carries a SUDO_Test_3 folder inside it, so both are
+    // projects that were scaffolded onto the work drive root rather than copies
+    // some tool made. The link P:\<Name> would need is then the project folder
+    // itself, and every other row of this table would read that folder as a
+    // perfect copy of the project and offer to rename it. It is the one case
+    // where the folder in the way is the work.
+    out << Qt::endl << "work drive: the project is the link path" << Qt::endl;
+    {
+        ModTemplateOptions onDrive;
+        onDrive.prefix = QStringLiteral("SUDO_OnDrive");
+        onDrive.displayName = QStringLiteral("SUDO OnDrive");
+        onDrive.workDrive = drive;
+        // Created on the drive itself, which is what the dialog now refuses and
+        // what every project made before it did.
+        const ModTemplateResult r = scaffoldMod(drive, onDrive);
+        check(r.ok, QStringLiteral("the mod is written (%1)").arg(r.error));
+        if (r.ok) {
+            const QStringList wasThere = signature(r.modRoot);
+            check(QDir::cleanPath(r.modRoot)
+                      == QDir::cleanPath(workDriveLinkFor(r.modFolder, drive)),
+                  QStringLiteral("the project folder is the link path"));
+            check(!r.workDrive.ok, QStringLiteral("so it is not linked"));
+            checkState(r.workDrive.link, WorkDriveState::Overlapping,
+                       QStringLiteral("state"));
+            check(r.workDrive.command.isEmpty(), QStringLiteral("nothing was run"));
+            check(r.workDrive.movedTo.isEmpty(), QStringLiteral("nothing was moved"));
+            check(!r.workDrive.link.canMoveAside(),
+                  QStringLiteral("and it can never be offered as a move"));
+            check(!r.workDrive.link.fix().isEmpty(),
+                  QStringLiteral("the fix says to keep the project off the drive"));
+
+            // Asked for directly, which is what a caller that ignores the state
+            // would do. It still refuses, because the guard is in the rule and
+            // not in the caller.
+            const WorkDriveAction forced =
+                moveAsideAndLinkModFolder(r.modRoot, r.modFolder, r.modRoot);
+            check(!forced.ok && forced.movedTo.isEmpty(),
+                  QStringLiteral("moving it aside refuses even when asked outright"));
+            check(signature(r.modRoot) == wasThere,
+                  QStringLiteral("the project is exactly as it was written"));
+            check(QFile::exists(r.modFolder + QStringLiteral("/Scripts/config.cpp")),
+                  QStringLiteral("and its config.cpp is still where it belongs"));
+        }
+
+        // The other two ways two paths can overlap.
+        checkState(inspectWorkDriveLink(modFolder, modFolder),
+                   WorkDriveState::Overlapping, QStringLiteral("a link to itself"));
+        // Not Scripts: P:\scripts is the vanilla tree, so that name is answered
+        // by the reserved rule one line earlier and would prove nothing here.
+        checkState(inspectWorkDriveLink(modFolder + QStringLiteral("/Workbench"),
+                                        modFolder),
+                   WorkDriveState::Overlapping,
+                   QStringLiteral("a link inside the mod folder"));
+    }
+
+    // ------------------------------------------------------- reserved names
+    out << Qt::endl << "work drive: names the drive already owns" << Qt::endl;
+    for (const QString &name : { QStringLiteral("DZ"), QStringLiteral("Mods"),
+                                 QStringLiteral("Core"), QStringLiteral("scripts") }) {
+        check(isReservedWorkDriveName(name),
+              QStringLiteral("%1 is reserved").arg(name));
+        // Called on its own line: the reason is written by the call, and
+        // reading it in the same expression is not ordered against it.
+        QString reason;
+        const bool valid = isValidModPrefix(name, &reason);
+        check(!valid, QStringLiteral("%1 refused as a prefix (%2)").arg(name, reason));
+
+        ModTemplateOptions bad;
+        bad.prefix = name;
+        bad.workDrive = drive;
+        const ModTemplateResult r = scaffoldMod(sandbox, bad);
+        check(!r.ok, QStringLiteral("%1 refused before anything was written").arg(name));
+        check(!QFileInfo::exists(QDir(sandbox).filePath(name)),
+              QStringLiteral("no %1 folder created").arg(name));
+
+        checkState(inspectWorkDriveLink(QDir(drive).filePath(name), modFolder),
+                   WorkDriveState::NameReserved, QStringLiteral("%1 at the link").arg(name));
+    }
+    check(!isReservedWorkDriveName(QStringLiteral("SUDO_Link")),
+          QStringLiteral("an ordinary prefix is not reserved"));
+
+    // -------------------------------------------------------- drive not there
+    out << Qt::endl << "work drive: not mounted" << Qt::endl;
+    {
+        const QString absent = QDir(sandbox).filePath(QStringLiteral("no-such-drive"));
+        ModTemplateOptions offline;
+        offline.prefix = QStringLiteral("SUDO_Offline");
+        offline.displayName = QStringLiteral("SUDO Offline");
+        offline.workDrive = absent;
+        const ModTemplateResult r = scaffoldMod(sandbox, offline);
+        check(r.ok, QStringLiteral("the mod is written anyway (%1)").arg(r.error));
+        check(QFile::exists(r.modFolder + QStringLiteral("/Scripts/config.cpp")),
+              QStringLiteral("and it is complete"));
+        check(!r.workDrive.ok, QStringLiteral("but it is not linked"));
+        checkState(r.workDrive.link, WorkDriveState::DriveMissing, QStringLiteral("state"));
+        check(r.workDrive.command.isEmpty(), QStringLiteral("nothing was run"));
+        check(!r.workDrive.link.fix().isEmpty(),
+              QStringLiteral("the fix is spelled out (%1)").arg(r.workDrive.link.fix()));
+        check(!QFileInfo::exists(absent),
+              QStringLiteral("the missing drive folder was not created either"));
+
+        // A drive letter is the case with a one line answer, so it gives one.
+        QString letter;
+        for (const QString &candidate : { QStringLiteral("Y:/"), QStringLiteral("X:/"),
+                                          QStringLiteral("W:/"), QStringLiteral("V:/") }) {
+            if (!QFileInfo(candidate).isDir()) { letter = candidate; break; }
+        }
+        if (letter.isEmpty()) {
+            out << "       every candidate letter is mounted, subst wording skipped"
+                << Qt::endl;
+        } else {
+            const WorkDriveLink seen =
+                inspectWorkDriveLink(letter + QStringLiteral("SUDO_Offline"), modFolder);
+            checkState(seen, WorkDriveState::DriveMissing,
+                       QStringLiteral("an unmounted letter"));
+            check(seen.fix().contains(QStringLiteral("subst ") + letter.left(2)),
+                  QStringLiteral("the fix carries the subst line (%1)").arg(seen.fix()));
+        }
+    }
+
+    // ---------------------------------------------------- the remaining two
+    out << Qt::endl << "work drive: a file, and no mod folder" << Qt::endl;
+    {
+        const QString filePath = QDir(drive).filePath(QStringLiteral("SUDO_File"));
+        check(writeFile(filePath, QByteArrayLiteral("not a folder")),
+              QStringLiteral("a file placed at a link path"));
+        checkState(inspectWorkDriveLink(filePath, modFolder), WorkDriveState::RealFile,
+                   QStringLiteral("state"));
+        const WorkDriveAction refused = linkModFolder(filePath, modFolder);
+        check(!refused.ok && refused.command.isEmpty(),
+              QStringLiteral("linking over a file refused, and ran nothing"));
+        check(QFileInfo(filePath).isFile() && readFile(filePath) == "not a folder",
+              QStringLiteral("the file is untouched"));
+
+        checkState(inspectWorkDriveLink(QDir(drive).filePath(QStringLiteral("SUDO_Ghost")),
+                                        QDir(sandbox).filePath(QStringLiteral("nothing"))),
+                   WorkDriveState::NoModFolder, QStringLiteral("no mod folder to link"));
+    }
+
+    // ------------------------------------------- a project that arrives later
+    //
+    // Creating a mod is not the only way to end up with no link. A clone, a
+    // folder that moved, or a project made before any of this existed all reach
+    // the same place, and the answer has to be the same one.
+    out << Qt::endl << "work drive: a project opened later" << Qt::endl;
+    {
+        checkState(inspectModFolder(modFolder, drive), WorkDriveState::Linked,
+                   QStringLiteral("one that is already linked"));
+
+        const QString later =
+            QDir(sandbox).filePath(QStringLiteral("cloned/SUDO_Later"));
+        check(writeFile(later + QStringLiteral("/Workbench/dayz.gproj"),
+                        QByteArrayLiteral("ID \"SUDO_Later\"\r\n")),
+              QStringLiteral("a mod folder that was never scaffolded here"));
+        const WorkDriveLink seen = inspectModFolder(later, drive);
+        checkState(seen, WorkDriveState::NotLinked, QStringLiteral("state"));
+        check(seen.link == QDir::cleanPath(QDir(drive).filePath(
+                  QStringLiteral("SUDO_Later"))),
+              QStringLiteral("the link it needs is named"));
+        check(!seen.fix().isEmpty(), QStringLiteral("and what to do about it"));
+
+        const WorkDriveAction made = linkModFolder(seen.link, later);
+        check(made.ok, QStringLiteral("linking it works the same way (%1)").arg(made.error));
+        checkState(inspectModFolder(later, drive), WorkDriveState::Linked,
+                   QStringLiteral("state afterwards"));
     }
 
     out << Qt::endl

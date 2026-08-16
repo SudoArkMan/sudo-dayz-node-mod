@@ -140,7 +140,25 @@ const Curated kMaths[] = {
 
 const Curated kMembers[] = {
     {"bi.setMember", "", ""},
-    {"bi.setElement", "", ""},
+};
+
+// Arrays, together, because separately they are unfindable: the words a modder
+// looks for are Count, Get and Insert, and each of those matches a few hundred
+// rows in the catalogue. The aliases are what somebody types when they do not
+// know the method name, which is the state anybody is in the first time an
+// array comes out of a call.
+const Curated kArrays[] = {
+    {"bi.makeArray", "", "", "new list literal fill build"},
+    {"bi.arrayCount", "", "", "size length how many"},
+    {"bi.arrayGet", "", "", "element at index read"},
+    {"bi.setElement", "", "", "write slot at index"},
+    {"bi.arrayInsert", "", "", "add append push"},
+    {"bi.arrayInsertAt", "", "", "add at position"},
+    {"bi.arrayRemove", "", "", "delete drop erase"},
+    {"bi.arrayClear", "", "", "empty reset wipe"},
+    {"bi.arrayFind", "", "", "index of contains search"},
+    {"bi.arraySort", "", "", "order"},
+    {"bi.arrayForIndex", "", "", "loop iterate count walk"},
 };
 
 const Curated kLogging[] = {
@@ -211,11 +229,17 @@ const Group kGroups[] = {
           "one names the value it yields, and a comparison always yields a "
           "bool whatever it is given.",
           kMaths),
-    GROUP("Members and arrays",
+    GROUP("Members",
           "Writing into something that already exists. Declare the member in "
           "the Variable Manager first; its Get and Set nodes come from there, "
           "because they only exist in this graph.",
           kMembers),
+    GROUP("Arrays and lists",
+          "Everything an array can be asked. These take an array pin rather "
+          "than an object pin, which is what lets them join to the "
+          "array<ref Something> a call hands back. Make Array is the one that "
+          "builds a new one, with plus and minus on the node for its elements.",
+          kArrays),
     GROUP("See what it is doing",
           "Print truncates at 1026 characters on the server and 240 on the "
           "client, which are different undocumented limits. Long output "

@@ -74,3 +74,27 @@ void setNodeInput(Document *doc, const QString &nodeId, const QString &pinId,
 // the node and the checkbox in the panel agree on what "not true" is written as.
 QString toggledBool(const QString &value);
 bool isTrueLiteral(const QString &value);
+
+// ------------------------------------------------------- variable-arity nodes
+//
+// A Make Array carries its own element count, and two surfaces change it: the
+// plus and minus drawn on the node, and whatever the Details panel grows. Both
+// go through here for the same reason literals do, and for one more: shrinking
+// a node has to take the wires and the values of the pins that go away with it,
+// and doing that in two places is how one of them ends up not doing it.
+
+// How many element pins `nodeId` draws. Zero when the node has a fixed shape,
+// which is every node but Make Array today.
+int nodeListCount(const Document &doc, const QString &nodeId);
+
+// Sets it, clamped to what the node's definition allows, inside a single
+// beginEdit/commitEdit. Pins that fall off the end lose their wires and their
+// typed values; nothing happens at all when the count is already what is asked
+// for, so a panel echoing its own control back cannot fill the undo history.
+void setNodeListCount(Document *doc, const QString &nodeId, int count);
+
+// The one writer for a per-node option (the Make Array element type, the Begin
+// mode, a timing name). An empty value removes the key rather than storing a
+// blank, so "not set" is one state and not two.
+void setNodeOption(Document *doc, const QString &nodeId, const QString &key,
+                   const QString &value);

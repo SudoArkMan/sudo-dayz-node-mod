@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
- * Turns the dayz-script-api index into resources/catalog.json.
+ * Turns an index of the DayZ script tree into resources/catalog.json.
  *
  *   node tools/build-catalog.mjs [apiIndex.json] [out.json]
  *   node tools/build-catalog.mjs --legacy-events   (the pre-fix classification)
  *
- * Default source is the dayz-script-api skill's index. Re-run after a DayZ
- * update (regenerate that index first) to refresh the node library.
+ * The source index is a JSON description of every class, method, enum, global
+ * and constant under P:\scripts. Give its path as the first argument, or set
+ * DAYZ_API_INDEX, or leave a copy at reference/api-index.json in this
+ * repository. Re-run after a DayZ update, regenerating the index first, to
+ * refresh the node library.
  *
  * The output is packed, a string table plus flat tuples, because the verbose
  * shape of the source index is ~12 MB and most of it (docs, field lists, parse
@@ -26,15 +29,23 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const args = process.argv.slice(2)
 const LEGACY_EVENTS = args.includes('--legacy-events')
 const positional = args.filter((a) => !a.startsWith('--'))
+// Explicit argument first, then the environment, then a copy kept in the
+// repository. The index is built from P:\scripts and is not committed here,
+// so the default is a path to put one at rather than a path that exists.
 const SRC = positional[0]
-  ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? '',
-    '.claude', 'skills', 'dayz-script-api', 'reference', 'api-index.json')
+  || process.env.DAYZ_API_INDEX
+  || path.join(HERE, '..', 'reference', 'api-index.json')
 const OUT = positional[1] ?? path.join(HERE, '..', 'resources', 'catalog.json')
 
 if (!fs.existsSync(SRC)) {
   console.error(`API index not found: ${SRC}
-Generate it first:
-  node ~/.claude/skills/dayz-script-api/scripts/build_index.mjs P:\\scripts`)
+
+The catalogue is built from an index of the DayZ script tree. Generate that
+index from P:\\scripts first, then point this script at it:
+
+  node tools/build-catalog.mjs <path to api-index.json>
+
+or set DAYZ_API_INDEX to its path.`)
   process.exit(2)
 }
 

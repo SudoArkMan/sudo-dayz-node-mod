@@ -7,6 +7,7 @@
 #include "builtins.h"
 #include "catalog.h"
 #include "codegen.h"
+#include "document.h"
 #include "graph.h"
 #include "project.h"
 
@@ -594,6 +595,171 @@ int main(int argc, char *argv[])
               QStringLiteral("and each script comes back with the ending its file had"));
     }
 
+    out << "closing a tab" << Qt::endl;
+    {
+        // What a tab is, and therefore what closing one means. The bar is a view
+        // of project().scripts and nothing else, so a close takes the script out
+        // of the project rather than hiding a window onto something that carries
+        // on existing. That makes it a removal, and the two things it must never
+        // do are take a script it was not asked for and drop one for good.
+        //
+        // The read only mark is written here by hand under the key modlibrary.cpp
+        // uses. That file is Qt Widgets and this target stops at Qt Gui, so the
+        // marker cannot be called from here; the mark itself is a bool in
+        // Graph::extra, which the .sdzn reader and writer carry through.
+        Document doc;
+        Project &p = doc.project();
+        p.scripts.clear();
+        const auto add = [&p](const char *id, const char *name, bool browsed) {
+            ScriptEntry s;
+            s.id = QLatin1String(id);
+            s.name = QLatin1String(name);
+            s.graph.className = s.name;
+            GraphNode n;
+            n.id = QStringLiteral("n_") + s.id;
+            n.kind = NodeKind::Builtin;
+            n.ref = bi::Print;
+            s.graph.nodes.append(n);
+            if (browsed) s.graph.extra.insert(QStringLiteral("readOnly"), true);
+            p.scripts.append(s);
+        };
+        add("s1", "SUDO_Mine", false);
+        add("s2", "CarScript", true);
+        add("s3", "SUDO_Other", false);
+        p.activeId = QStringLiteral("s2");
+
+        int projectSignals = 0;
+        QObject::connect(&doc, &Document::projectChanged,
+                         [&projectSignals]() { projectSignals++; });
+
+        check(!doc.closeScript(QStringLiteral("nope")),
+              QStringLiteral("an id the project does not hold closes nothing"));
+        check(p.scripts.size() == 3 && projectSignals == 0,
+              QStringLiteral("and says nothing happened"));
+
+        // The case the Mod Browser creates: a class read out of somebody else's
+        // mod, sitting between two of the user's own.
+        check(doc.closeScript(QStringLiteral("s2")),
+              QStringLiteral("a browsed script closes"));
+        check(p.scripts.size() == 2 && !p.script(QStringLiteral("s2")),
+              QStringLiteral("and is out of the project"));
+        check(projectSignals == 1, QStringLiteral("one projectChanged for one close"));
+
+        const ScriptEntry *mine = p.script(QStringLiteral("s1"));
+        const ScriptEntry *other = p.script(QStringLiteral("s3"));
+        check(mine && other, QStringLiteral("the project's own scripts are still there"));
+        check(mine && mine->name == QLatin1String("SUDO_Mine")
+                  && mine->graph.nodes.size() == 1
+                  && mine->graph.nodes.first().id == QLatin1String("n_s1"),
+              QStringLiteral("and their graphs are untouched"));
+        check(other && other->graph.nodes.size() == 1
+                  && other->graph.nodes.first().id == QLatin1String("n_s3"),
+              QStringLiteral("both of them, not just the one beside the gap"));
+
+        // Closing the tab in front has to leave the editor pointing somewhere.
+        // Project::active falls back to the first script when activeId names
+        // nothing, so a dangling id looks like it works and stamps every undo
+        // snapshot with a script no lookup can find.
+        check(p.script(p.activeId) != nullptr,
+              QStringLiteral("closing the tab in front repoints the active script"));
+        check(doc.activeScriptId() == QLatin1String("s3"),
+              QStringLiteral("at the tab that took its place, got '%1'")
+                  .arg(doc.activeScriptId()));
+        check(doc.activeGraph() != nullptr,
+              QStringLiteral("so there is still a graph to draw"));
+
+        // Nothing is dropped in silence: the close is on the modified flag, so
+        // the project is behind the file and the existing quit prompt fires, and
+        // the entry itself is still reachable.
+        check(doc.isModified(),
+              QStringLiteral("a close leaves the project modified, so quitting asks"));
+        check(doc.canReopenScript() && doc.lastClosedName() == QLatin1String("CarScript"),
+              QStringLiteral("the closed script is on the reopen stack by name"));
+        check(doc.reopenClosedScript(), QStringLiteral("reopening it succeeds"));
+        check(p.scripts.size() == 3, QStringLiteral("the project has it back"));
+        check(p.scripts.at(1).id == QLatin1String("s2"),
+              QStringLiteral("at the tab position it was closed from"));
+        check(p.scripts.at(1).graph.nodes.size() == 1
+                  && p.scripts.at(1).graph.nodes.first().id == QLatin1String("n_s2"),
+              QStringLiteral("with its graph whole"));
+        check(p.scripts.at(1).graph.extra.value(QStringLiteral("readOnly")).toBool(),
+              QStringLiteral("and still marked read only, so it cannot be exported"));
+        check(doc.activeScriptId() == QLatin1String("s2"),
+              QStringLiteral("and in front, which is where a reopen is looking"));
+        check(!doc.canReopenScript(), QStringLiteral("the stack is empty again"));
+
+        // Undo belongs to a graph, so closing a tab in the background may not
+        // take the history off the graph in front. The script being closed is
+        // the one whose snapshots have to go: undo skips an entry it cannot
+        // apply, but a reopen makes them applicable again and the first Ctrl+Z
+        // after that would rewind past the close.
+        doc.setActiveScript(QStringLiteral("s3"));
+        doc.beginEdit(QStringLiteral("an edit on the script in front"));
+        p.script(QStringLiteral("s3"))->graph.nodes.first().x = 42;
+        doc.commitEdit();
+        check(doc.canUndo(), QStringLiteral("the script in front has an undo step"));
+        check(doc.closeScript(QStringLiteral("s2")),
+              QStringLiteral("closing a tab in the background works"));
+        check(doc.canUndo(),
+              QStringLiteral("and leaves the undo history of the script in front"));
+        doc.undo();
+        check(p.script(QStringLiteral("s3"))
+                  && qFuzzyIsNull(p.script(QStringLiteral("s3"))->graph.nodes.first().x),
+              QStringLiteral("which still undoes the edit it was taken for"));
+        check(doc.reopenClosedScript(),
+              QStringLiteral("and the background tab comes back"));
+
+        // A script the project is the only copy of. Closing it may not be the
+        // end of the graph, whatever the window decides to ask first.
+        GraphVariable authored;
+        authored.id = QStringLiteral("v1");
+        authored.name = QStringLiteral("m_Unsaved");
+        authored.type = QStringLiteral("int");
+        p.script(QStringLiteral("s1"))->graph.variables.append(authored);
+        check(doc.closeScript(QStringLiteral("s1")),
+              QStringLiteral("a script of the user's own closes too"));
+        check(doc.reopenClosedScript()
+                  && p.script(QStringLiteral("s1"))
+                  && p.script(QStringLiteral("s1"))->graph.variables.size() == 1
+                  && p.script(QStringLiteral("s1"))->graph.variables.first().name
+                         == QLatin1String("m_Unsaved"),
+              QStringLiteral("and comes back carrying the work that was in it"));
+        check(p.scripts.first().id == QLatin1String("s1"),
+              QStringLiteral("in the position it held, not appended to the end"));
+
+        // An id the project has grown back in the meantime. Two entries under
+        // one id is worse than a renumbered one: every lookup here takes the
+        // first match, so the tab bar, the undo stack and the exporter would
+        // each be free to pick a different script.
+        check(doc.closeScript(QStringLiteral("s3")), QStringLiteral("closes s3"));
+        add("s3", "SUDO_Impostor", false);
+        check(doc.reopenClosedScript(), QStringLiteral("reopens it over the collision"));
+        check(p.scripts.size() == 4, QStringLiteral("both scripts are in the project"));
+        int named = 0;
+        for (const ScriptEntry &s : p.scripts)
+            if (s.id == QLatin1String("s3")) named++;
+        check(named == 1, QStringLiteral("and exactly one of them answers to s3"));
+
+        // The floor. Every dock and the canvas read the active graph, so the
+        // project keeps one script rather than each of them growing an empty
+        // case nobody would ever see except by closing every tab.
+        QStringList left;
+        for (const ScriptEntry &s : p.scripts) left << s.id;
+        for (const QString &id : left) doc.closeScript(id);
+        check(p.scripts.size() == 1,
+              QStringLiteral("the last script will not close, got %1 left")
+                  .arg(p.scripts.size()));
+        check(doc.activeGraph() != nullptr,
+              QStringLiteral("so the canvas always has something to draw"));
+
+        // A project opened over the top of this one takes its own scripts with
+        // it. Reopening across that boundary would graft a class out of the last
+        // project into this one.
+        doc.resetToNew();
+        check(!doc.canReopenScript(),
+              QStringLiteral("starting a new project empties the reopen stack"));
+    }
+
     out << "codegen" << Qt::endl;
     if (opened) {
         int generated = 0, empty = 0, unbalanced = 0;
@@ -1100,6 +1266,339 @@ int main(int argc, char *argv[])
         clashVar.variables << var;
         check(rules(clashVar).contains(QStringLiteral("DZ320")),
               QStringLiteral("a timer landing on a declared variable is reported"));
+    }
+
+    // ------------------------------------------------------------------ arrays
+    //
+    // An array used to be a dead end: no editor, no Make Array node, and a
+    // catalogue `array.Insert` whose target pin is an `array` OBJECT, which
+    // canConnect refuses to join to an `array<ref X>` pin. All three are
+    // checked here, plus the one thing that decides whether the generated
+    // script compiles: Enforce takes a brace list after a type in a declaration
+    // and nowhere else.
+    out << "arrays" << Qt::endl;
+    {
+        const PinList list = builtins.def(bi::MakeArray).list;
+        check(list.valid(), QStringLiteral("Make Array declares a pin list"));
+
+        // An array pin still gets no box to type into, and that stays true: a
+        // list of values is not something one field can hold, and a pin's
+        // literal is emitted code. What changed is that there is now a node
+        // whose element pins each get one.
+        const PinType arrayOfStrings{PinKind::String, {}, true};
+        const PinType oneString{PinKind::String, {}, false};
+        check(inlineEditorFor(arrayOfStrings) == InlineEditor::None
+                  && inlineEditorFor(oneString) == InlineEditor::Text,
+              QStringLiteral("an array has no inline editor and its element does"));
+
+        // The count lives in opts, so it goes out to the .sdzn and comes back.
+        Graph counted;
+        GraphNode mk;
+        mk.id = QStringLiteral("mk");
+        mk.kind = NodeKind::Builtin;
+        mk.ref = bi::MakeArray;
+        mk.opts.insert(QStringLiteral("count"), QStringLiteral("3"));
+        mk.inputs.insert(QStringLiteral("el2"), QStringLiteral("third"));
+        counted.nodes << mk;
+        counted.edges.append({QStringLiteral("ex"), {QStringLiteral("other"),
+                                                     QStringLiteral("ret")},
+                              {QStringLiteral("mk"), QStringLiteral("el2")}, {}});
+        const Graph reloaded = graphFromJson(graphToJson(counted));
+        check(reloaded.nodes.size() == 1
+                  && bi::listCount(reloaded.nodes.first(), list) == 3,
+              QStringLiteral("the element count survives a save and a load"));
+
+        GraphNode untouched;
+        untouched.ref = bi::MakeArray;
+        check(bi::listCount(untouched, list) == 2,
+              QStringLiteral("a node placed from the palette already has elements"));
+        GraphNode absurd = untouched;
+        absurd.opts.insert(QStringLiteral("count"), QStringLiteral("100000"));
+        check(bi::listCount(absurd, list) == list.max,
+              QStringLiteral("a hand-edited count is clamped to %1").arg(list.max));
+
+        const NodeDef threeUp = builtins.defForNode(mk, cat);
+        int elementPins = 0;
+        for (const Pin &p : threeUp.pins)
+            if (p.dir == PinDir::In && p.type.kind != PinKind::Exec
+                && p.id.startsWith(list.pinPrefix))
+                elementPins++;
+        check(elementPins == 3, QStringLiteral("three element pins are drawn, got %1")
+                                    .arg(elementPins));
+
+        // Shrinking takes the wire and the value of the pin that goes away.
+        // Leaving either behind means growing the node back resurrects a value
+        // the author deleted, and leaves a wire pointing at no pin at all.
+        removePin(counted, QStringLiteral("mk"), QStringLiteral("el2"));
+        check(counted.edges.isEmpty()
+                  && !counted.nodes.first().inputs.contains(QStringLiteral("el2")),
+              QStringLiteral("dropping an element takes its wire and its value"));
+
+        // -------------------------------------------------- the two forms
+        const auto generate = [&](const Graph &g) {
+            Project proj;
+            return generateEnforce(g, cat, builtins, proj).code;
+        };
+        const auto lineWith = [](const QString &code, const QString &needle) {
+            for (const QString &l : code.split(QLatin1Char('\n')))
+                if (l.contains(needle)) return l.trimmed();
+            return QString();
+        };
+
+        GraphNode begin;
+        begin.id = QStringLiteral("b");
+        begin.kind = NodeKind::Builtin;
+        begin.ref = bi::Begin;
+        begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+
+        // A declaration, so the vanilla brace form is legal and is what a DayZ
+        // author writes: batterycharger.c:388 is exactly this shape.
+        Graph decl;
+        decl.className = QStringLiteral("SUDO_Arrays");
+        decl.baseClass = QStringLiteral("ItemBase");
+        GraphNode make;
+        make.id = QStringLiteral("mk");
+        make.kind = NodeKind::Builtin;
+        make.ref = bi::MakeArray;
+        make.opts.insert(QStringLiteral("count"), QStringLiteral("2"));
+        make.opts.insert(QStringLiteral("type"), QStringLiteral("string"));
+        make.inputs.insert(QStringLiteral("el0"), QStringLiteral("shortname1"));
+        make.inputs.insert(QStringLiteral("el1"), QStringLiteral("shortname2"));
+        decl.nodes << begin << make;
+        decl.edges.append({QStringLiteral("e1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                           {QStringLiteral("mk"), QStringLiteral("exec")}, {}});
+        const QString declared = lineWith(generate(decl), QStringLiteral("array<string>"));
+        check(declared == QStringLiteral("array<string> arr0 = {\"shortname1\", \"shortname2\"};"),
+              QStringLiteral("a declaration takes the brace form, got [%1]").arg(declared));
+
+        // The same node feeding a member that already exists. There is no
+        // declaration to hang an initialiser off, so it has to allocate and
+        // insert, which is what vanilla and Expansion both write mid-flow.
+        Graph assign;
+        assign.className = QStringLiteral("SUDO_Arrays");
+        assign.baseClass = QStringLiteral("ItemBase");
+        GraphVariable junk;
+        junk.id = QStringLiteral("v0");
+        junk.name = QStringLiteral("m_JunkTypes");
+        junk.type = QStringLiteral("ref array<string>");
+        assign.variables << junk;
+        GraphNode bare = make;
+        // Nothing says what it holds except the member it goes into.
+        bare.opts.remove(QStringLiteral("type"));
+        GraphNode set;
+        set.id = QStringLiteral("st");
+        set.kind = NodeKind::VarSet;
+        set.ref = QStringLiteral("var.set.v0");
+        assign.nodes << begin << bare << set;
+        assign.edges.append({QStringLiteral("e1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                             {QStringLiteral("mk"), QStringLiteral("exec")}, {}});
+        assign.edges.append({QStringLiteral("e2"), {QStringLiteral("mk"), QStringLiteral("exec")},
+                             {QStringLiteral("st"), QStringLiteral("exec")}, {}});
+        assign.edges.append({QStringLiteral("e3"), {QStringLiteral("mk"), QStringLiteral("arr")},
+                             {QStringLiteral("st"), QStringLiteral("v")}, {}});
+        const QString assigned = generate(assign);
+        check(lineWith(assigned, QStringLiteral("new array"))
+                  == QStringLiteral("m_JunkTypes = new array<string>();"),
+              QStringLiteral("an assignment allocates, got [%1]")
+                  .arg(lineWith(assigned, QStringLiteral("new array"))));
+        check(assigned.contains(QStringLiteral("m_JunkTypes.Insert(\"shortname1\");"))
+                  && assigned.contains(QStringLiteral("m_JunkTypes.Insert(\"shortname2\");")),
+              QStringLiteral("and inserts each element behind it"));
+        check(!assigned.contains(QLatin1String("= {")),
+              QStringLiteral("with no brace list anywhere, which would not compile"));
+        // The Inserts belong AFTER the assignment. Emitted where the Make Array
+        // sits they would run against a member that is still null.
+        check(assigned.indexOf(QStringLiteral("new array<string>()"))
+                  < assigned.indexOf(QStringLiteral("m_JunkTypes.Insert")),
+              QStringLiteral("the inserts land behind the assignment"));
+
+        // ------------------------------------------------- type inference
+        // The pin the array is wired into, in the spelling that declaration
+        // used. array<ref X> and array<X> are different instantiations, so the
+        // modifier has to survive.
+        SearchOptions opts;
+        opts.ofClass = QStringLiteral("ItemBase");
+        QString takesFloats;
+        for (const SearchHit &h : cat.search(QStringLiteral("TransferVariablesFloat"), opts)) {
+            const MethodSig sig = cat.method(h.key);
+            if (sig.valid && sig.name == QLatin1String("TransferVariablesFloat"))
+                takesFloats = h.key;
+        }
+        check(!takesFloats.isEmpty(),
+              QStringLiteral("the catalogue still declares EntityAI::TransferVariablesFloat"));
+        if (!takesFloats.isEmpty()) {
+            Graph intoCall;
+            intoCall.className = QStringLiteral("SUDO_Arrays");
+            intoCall.baseClass = QStringLiteral("ItemBase");
+            GraphNode call;
+            call.id = QStringLiteral("cl");
+            call.kind = NodeKind::Call;
+            call.ref = takesFloats;
+            GraphNode untyped = make;
+            untyped.opts.remove(QStringLiteral("type"));
+            untyped.inputs.clear();
+            intoCall.nodes << begin << untyped << call;
+            intoCall.edges.append({QStringLiteral("e1"),
+                                   {QStringLiteral("b"), QStringLiteral("exec")},
+                                   {QStringLiteral("mk"), QStringLiteral("exec")}, {}});
+            intoCall.edges.append({QStringLiteral("e2"),
+                                   {QStringLiteral("mk"), QStringLiteral("exec")},
+                                   {QStringLiteral("cl"), QStringLiteral("exec")}, {}});
+            intoCall.edges.append({QStringLiteral("e3"),
+                                   {QStringLiteral("mk"), QStringLiteral("arr")},
+                                   {QStringLiteral("cl"), QStringLiteral("p0")}, {}});
+            const QString code = generate(intoCall);
+            check(code.contains(QStringLiteral("array<float> arr0 = {")),
+                  QStringLiteral("the type comes off the pin the array is wired into"));
+        }
+
+        // Nothing wired and nothing set: what is typed on the elements is the
+        // last thing left to read, and only for spellings with one meaning.
+        Graph sniffed = decl;
+        sniffed.nodes[1].opts.remove(QStringLiteral("type"));
+        sniffed.nodes[1].inputs.insert(QStringLiteral("el0"), QStringLiteral("1"));
+        sniffed.nodes[1].inputs.insert(QStringLiteral("el1"), QStringLiteral("2"));
+        check(generate(sniffed).contains(QStringLiteral("array<int> arr0 = {1, 2};")),
+              QStringLiteral("whole numbers typed on the elements read as an int array"));
+
+        // What the author set beats everything under it.
+        Graph forced = assign;
+        for (GraphNode &n : forced.nodes)
+            if (n.ref == bi::MakeArray) n.opts.insert(QStringLiteral("type"),
+                                                      QStringLiteral("ref EntityAI"));
+        check(generate(forced).contains(QStringLiteral("new array<ref EntityAI>()")),
+              QStringLiteral("an element type set in Details wins over the member's own"));
+
+        // `array<ref X>` and `array<X>` are different instantiations, so a
+        // modifier read off a declaration has to survive into the generated
+        // type. Dropping it is a compile error at whatever the array feeds.
+        Graph owning = assign;
+        owning.variables[0].type = QStringLiteral("ref array<ref EntityAI>");
+        check(generate(owning).contains(QStringLiteral("new array<ref EntityAI>()")),
+              QStringLiteral("the ref inside a declared array type is kept"));
+
+        // ------------------------------------------------ the rest of them
+        Graph ops;
+        ops.className = QStringLiteral("SUDO_Arrays");
+        ops.baseClass = QStringLiteral("ItemBase");
+        GraphVariable bag;
+        bag.id = QStringLiteral("v1");
+        bag.name = QStringLiteral("m_Bag");
+        bag.type = QStringLiteral("ref array<string>");
+        ops.variables << bag;
+        GraphNode get;
+        get.id = QStringLiteral("gv");
+        get.kind = NodeKind::VarGet;
+        get.ref = QStringLiteral("var.get.v1");
+        GraphNode insert;
+        insert.id = QStringLiteral("ins");
+        insert.kind = NodeKind::Builtin;
+        insert.ref = bi::ArrayInsert;
+        insert.inputs.insert(QStringLiteral("v"), QStringLiteral("\"rag\""));
+        GraphNode loop;
+        loop.id = QStringLiteral("lp");
+        loop.kind = NodeKind::Builtin;
+        loop.ref = bi::ArrayForIndex;
+        GraphNode shout;
+        shout.id = QStringLiteral("pr");
+        shout.kind = NodeKind::Builtin;
+        shout.ref = bi::Print;
+        ops.nodes << begin << get << insert << loop << shout;
+        ops.edges.append({QStringLiteral("e1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                          {QStringLiteral("ins"), QStringLiteral("exec")}, {}});
+        ops.edges.append({QStringLiteral("e2"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                          {QStringLiteral("ins"), QStringLiteral("arr")}, {}});
+        ops.edges.append({QStringLiteral("e3"), {QStringLiteral("ins"), QStringLiteral("exec")},
+                          {QStringLiteral("lp"), QStringLiteral("exec")}, {}});
+        ops.edges.append({QStringLiteral("e4"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                          {QStringLiteral("lp"), QStringLiteral("arr")}, {}});
+        ops.edges.append({QStringLiteral("e5"), {QStringLiteral("lp"), QStringLiteral("body")},
+                          {QStringLiteral("pr"), QStringLiteral("exec")}, {}});
+        ops.edges.append({QStringLiteral("e6"), {QStringLiteral("lp"), QStringLiteral("item")},
+                          {QStringLiteral("pr"), QStringLiteral("value")}, {}});
+        const QString opsCode = generate(ops);
+        check(opsCode.contains(QStringLiteral("m_Bag.Insert(\"rag\");")),
+              QStringLiteral("Array Insert runs against the array pin, not a target pin"));
+        check(opsCode.contains(QStringLiteral("for (int i0 = 0; i0 < m_Bag.Count(); i0++)")),
+              QStringLiteral("For Each Index counts up to Count()"));
+        check(opsCode.contains(QStringLiteral("Print(m_Bag.Get(i0));")),
+              QStringLiteral("and its item pin reads the element back"));
+
+        // ------------------------------------------------- what is reported
+        const auto rulesOf = [&](const Graph &g) {
+            QStringList ids;
+            for (const Diagnostic &d : analyzeGraph(g, cat, builtins).diagnostics)
+                ids << d.rule;
+            return ids;
+        };
+        check(!rulesOf(ops).contains(QStringLiteral("DZ321")),
+              QStringLiteral("an array node with its array wired is not reported"));
+        Graph loose = ops;
+        for (int i = loose.edges.size() - 1; i >= 0; --i)
+            if (loose.edges.at(i).to.pin == QLatin1String("arr")) loose.edges.removeAt(i);
+        check(rulesOf(loose).contains(QStringLiteral("DZ321")),
+              QStringLiteral("one with nothing on it generates a call on null and is reported"));
+
+        // Insert inside a loop over the same array is the crash the rule for
+        // catalogue calls already covered. The builtin has to be seen too.
+        Graph inLoop;
+        inLoop.className = QStringLiteral("SUDO_Arrays");
+        inLoop.baseClass = QStringLiteral("ItemBase");
+        inLoop.variables << bag;
+        inLoop.nodes << begin << get << loop << insert;
+        inLoop.edges.append({QStringLiteral("l1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                             {QStringLiteral("lp"), QStringLiteral("exec")}, {}});
+        inLoop.edges.append({QStringLiteral("l2"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                             {QStringLiteral("lp"), QStringLiteral("arr")}, {}});
+        inLoop.edges.append({QStringLiteral("l3"), {QStringLiteral("lp"), QStringLiteral("body")},
+                             {QStringLiteral("ins"), QStringLiteral("exec")}, {}});
+        inLoop.edges.append({QStringLiteral("l4"), {QStringLiteral("gv"), QStringLiteral("ret")},
+                             {QStringLiteral("ins"), QStringLiteral("arr")}, {}});
+        check(rulesOf(inLoop).contains(QStringLiteral("DZ307")),
+              QStringLiteral("Array Insert inside a loop over the same array is reported"));
+
+        Graph dropped;
+        dropped.className = QStringLiteral("SUDO_Arrays");
+        dropped.baseClass = QStringLiteral("ItemBase");
+        dropped.nodes << begin << make;
+        dropped.edges.append({QStringLiteral("e1"), {QStringLiteral("b"), QStringLiteral("exec")},
+                              {QStringLiteral("mk"), QStringLiteral("exec")}, {}});
+        check(rulesOf(dropped).contains(QStringLiteral("DZ322")),
+              QStringLiteral("an array nobody reads is reported"));
+
+        // ------------------------------------------- what could not connect
+        // The shape from the user's own screenshot: an array<ref X> coming out
+        // of a catalogue call. The array group has to take it.
+        Pin containers;
+        containers.id = QStringLiteral("ret");
+        containers.dir = PinDir::Out;
+        containers.type = pinTypeOf(QStringLiteral("array<ref ExpansionLootContainer>"),
+                                    [&cat](const QString &n) { return cat.isEnum(n); });
+        check(containers.type.isArray && containers.type.kind == PinKind::Object,
+              QStringLiteral("array<ref X> parses as an array of objects"));
+
+        const NodeDef countDef = builtins.def(bi::ArrayCount);
+        const Pin *arrPin = countDef.pin(QStringLiteral("arr"), PinDir::In);
+        check(arrPin && canConnect(containers, *arrPin),
+              QStringLiteral("Array Count takes it"));
+
+        // And the catalogue's own array.Insert does not, which is the whole
+        // reason the group exists rather than being a set of curated rows.
+        QString catalogueInsert;
+        SearchOptions arrayOpts;
+        arrayOpts.ofClass = QStringLiteral("array");
+        for (const SearchHit &h : cat.search(QStringLiteral("Insert"), arrayOpts)) {
+            const MethodSig sig = cat.method(h.key);
+            if (sig.valid && sig.owner == QLatin1String("array")
+                && sig.name == QLatin1String("Insert"))
+                catalogueInsert = h.key;
+        }
+        if (!catalogueInsert.isEmpty()) {
+            const NodeDef fromCat = cat.defFor(catalogueInsert);
+            const Pin *target = fromCat.pin(QStringLiteral("target"), PinDir::In);
+            check(target && !canConnect(containers, *target),
+                  QStringLiteral("the catalogue's own array.Insert still cannot"));
+        }
     }
 
     out << Qt::endl << (failures == 0 ? "ALL CORE TESTS PASSED"

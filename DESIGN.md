@@ -4,10 +4,10 @@ Visual scripting for DayZ Enforce Script, in Qt Widgets. Modelled on O3DE's
 Script Canvas: dockable panels around a tabbed node canvas, dark chrome, no
 decoration that does not carry information.
 
-Reference implementation for all model/codegen behaviour is the Electron build
-at `C:\Users\dilla\SUDO DayZ Script Node\src`. Port the semantics faithfully,
-do not redesign them. The `.sdzn` project format must stay compatible in both
-directions.
+The model and codegen semantics come from an earlier Electron implementation of
+the same editor, and this build reproduces them rather than redesigning them.
+The `.sdzn` project format stays compatible in both directions, so a project
+written by either one opens in the other.
 
 ## Window layout
 

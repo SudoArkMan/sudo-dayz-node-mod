@@ -549,6 +549,13 @@ int main(int argc, char *argv[])
             // whole `if` around it back to text.
             {"an unreadable line stays on its own",
              "if (m_Ready)\n{\n\tdelete m_Timer;\n\tSetQuantity(1);\n}", "bi.raw", 1},
+            // The array literal, which the tool can now generate but does not
+            // read. Vanilla writes both `{0,1,2,3}` and `{1.2, 5.6, 8.1}` and
+            // nothing in a graph records which spacing a file used, so a Make
+            // Array node built from this could not put it back character for
+            // character. It stays text, and the text is what comes out.
+            {"an array literal keeps its text",
+             "array<string> selections = {\"cord\", \"clips\"};", "bi.raw", 1},
         };
         for (const Exact &c : exacts) {
             const QString code = QString::fromUtf8(c.code);
@@ -569,6 +576,32 @@ int main(int argc, char *argv[])
                 out << "         out: " << QString(got).replace('\n', "\\n") << Qt::endl;
             }
         }
+
+        // The Make Array node generates the vanilla brace form. Reading one
+        // back is a different promise and it is not made: vanilla writes both
+        // `{0,1,2,3}` (enscript.c:682) and `{1.2, 5.6, 8.1}` (gameplay.c:29),
+        // a graph has no field for which spacing a file used, and a method is
+        // only taken as nodes when it regenerates character for character. So
+        // the importer keeps the line as text and every one of these methods
+        // is refused rather than half-recognised. This is the check that keeps
+        // it that way, because a Make Array built here would move importtest
+        // off zero changed files.
+        const QStringList literals = {
+            QStringLiteral("array<int> arr1 = {0,1,2,3};"),
+            QStringLiteral("array<float> farray = {1.2, 5.6, 8.1};"),
+            QStringLiteral("array<string> selections = {\"cord\", \"clips\"};"),
+            QStringLiteral("ref array<string> m_JunkTypes = {};"),
+        };
+        int invented = 0;
+        for (const QString &code : literals) {
+            LowerOptions opts;
+            opts.selfClass = base.baseClass;
+            const LowerResult r = lowerEnforceCode(code, cat, builtins, base, project, opts);
+            for (const GraphNode &n : r.nodes)
+                if (n.ref == bi::MakeArray) invented++;
+        }
+        check(invented == 0,
+              QStringLiteral("the importer never builds a Make Array (%1 did)").arg(invented));
     }
 
     // ------------------------------------------ the author's own formatting

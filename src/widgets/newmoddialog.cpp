@@ -95,6 +95,68 @@ QString fileNames(const QStringList &paths)
     return names.join(QStringLiteral(", "));
 }
 
+// What creating the mod did to the work drive, in the words the report uses.
+// Always says something: a junction the user did not ask for is a change to
+// their disk, and one made silently is nearly as bad as one never made.
+QStringList workDriveLines(const WorkDriveAction &action)
+{
+    if (!action.attempted()) return {};
+
+    QStringList lines;
+    if (!action.movedTo.isEmpty())
+        lines << QObject::tr("Moved the folder that was in the way to %1. Nothing "
+                             "was deleted.").arg(shown(action.movedTo));
+    if (action.ok) {
+        lines << QObject::tr("Work drive: %1 now points at the mod folder, which is "
+                             "what lets binarize and Workbench find it.")
+                     .arg(shown(action.link.link));
+        return lines;
+    }
+
+    lines << QObject::tr("Work drive: %1").arg(action.link.message());
+    // The reason mklink itself gave, when it was reached at all. A link that
+    // failed with nothing on screen is the thing that costs an evening.
+    if (!action.error.isEmpty() && action.error != action.link.message())
+        lines << action.error;
+    if (!action.link.fix().isEmpty()) lines << action.link.fix();
+    return lines;
+}
+
+// The one case where a folder in the way can be cleared without losing
+// anything, and the only one the user is ever asked about. Every other row of
+// the decision table is reported and left exactly as it was found.
+//
+// The ask names the folder, what was compared, and where it would go, because
+// agreeing to move a folder you cannot see is not agreeing to anything.
+// Nothing is deleted whichever answer comes back.
+bool offerToMoveAside(QWidget *parent, ModTemplateResult &result)
+{
+    const WorkDriveLink link = result.workDrive.link;
+    if (!link.canMoveAside()) return false;
+
+    const QString aside = asideNameFor(link.link);
+    QMessageBox box(QMessageBox::Question, QObject::tr("Work drive link"),
+                    QObject::tr("%1 is already a real folder.").arg(shown(link.link)),
+                    QMessageBox::NoButton, parent);
+    box.setInformativeText(
+        QObject::tr("%1\n\nMoving it to %2 clears the way for the link. That is a "
+                    "rename, so nothing is deleted and you can put it back.")
+            .arg(link.message(), shown(aside)));
+    QPushButton *move =
+        box.addButton(QObject::tr("Move it aside and link"), QMessageBox::AcceptRole);
+    QPushButton *leave =
+        box.addButton(QObject::tr("Leave it alone"), QMessageBox::RejectRole);
+    // Leaving it alone is the default, because the safe answer should be the
+    // one a stray Return key gives.
+    box.setDefaultButton(leave);
+    box.exec();
+    if (box.clickedButton() != move) return false;
+
+    result.workDrive =
+        moveAsideAndLinkModFolder(link.link, link.target, result.modRoot);
+    return true;
+}
+
 void showReport(QWidget *parent, const ModTemplateResult &result)
 {
     const QString root = shown(result.modRoot);
@@ -115,7 +177,13 @@ void showReport(QWidget *parent, const ModTemplateResult &result)
                       : QObject::tr("%1 files were not copied.")
                             .arg(result.skipped.size()));
 
-    QMessageBox box(QMessageBox::Information, QObject::tr("Mod created"),
+    lines << workDriveLines(result.workDrive);
+
+    // An unlinked mod still builds nothing, so the box says so rather than
+    // wearing the information icon over a warning.
+    const bool linked = !result.workDrive.attempted() || result.workDrive.ok;
+    QMessageBox box(linked ? QMessageBox::Information : QMessageBox::Warning,
+                    QObject::tr("Mod created"),
                     QObject::tr("%1 is ready.").arg(QFileInfo(result.modRoot).fileName()),
                     QMessageBox::Ok, parent);
     box.setInformativeText(lines.join(QLatin1Char('\n')));
@@ -198,10 +266,11 @@ NewModDialog::NewModDialog(QWidget *parent)
 
     m_preview->setWordWrap(true);
     m_preview->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    // Three lines are held open whatever the text says, so the dialog does not
-    // resize under the pointer every time the preview changes length. A path
-    // long enough to need a fourth gets it rather than losing the line.
-    m_preview->setMinimumHeight(QFontMetrics(m_preview->font()).lineSpacing() * 3 + 4);
+    // Four lines are held open whatever the text says, so the dialog does not
+    // resize under the pointer every time the preview changes length. That is
+    // the folder, what goes in it, and the work drive line, with one spare for
+    // a path long enough to wrap.
+    m_preview->setMinimumHeight(QFontMetrics(m_preview->font()).lineSpacing() * 4 + 4);
 
     m_buttons->button(QDialogButtonBox::Ok)->setText(tr("Create mod"));
     m_buttons->button(QDialogButtonBox::Ok)->setDefault(true);
@@ -317,13 +386,41 @@ void NewModDialog::validateInput()
         problem = tr("%1 already exists and has files in it.").arg(shown(target));
     else if (missions && maps.isEmpty())
         problem = tr("Pick a map, or leave the mission out.");
+    // The mod folder would be the work drive folder its own junction has to
+    // take, so no link can be made and AddonBuilder is handed a path that is
+    // not there. It is the layout behind every "P:\<name> is a real folder"
+    // report, and the only place to catch it is before the folder is written.
+    else if (!target.isEmpty()
+             && workDriveLinkFor(joinPath(target, prefix))
+                    .compare(target, Qt::CaseInsensitive) == 0)
+        problem = tr("A mod created directly on %1 takes the name its own work drive "
+                     "link needs, and then it cannot be built. Pick a folder outside "
+                     "the work drive.").arg(shown(workDriveRoot()));
 
     if (problem.isEmpty()) {
-        const QString contents =
-            missions ? tr("config.cpp, Scripts, a Workbench project, and missions for %1.")
-                           .arg(maps.join(QStringLiteral(", ")))
-                     : tr("config.cpp, Scripts and a Workbench project.");
-        m_preview->setText(tr("Creates %1\n%2").arg(shown(target), contents));
+        QStringList lines;
+        lines << tr("Creates %1").arg(shown(target));
+        lines << (missions
+                      ? tr("config.cpp, Scripts, a Workbench project, and missions for %1.")
+                            .arg(maps.join(QStringLiteral(", ")))
+                      : tr("config.cpp, Scripts and a Workbench project."));
+
+        // The junction is part of creating the mod, so the dialog says so
+        // before it is made. Only the two things that can be known before the
+        // folder exists are claimed here; what is actually at that path is
+        // classified after the write, when there is something to compare with.
+        const QString link = workDriveLinkFor(joinPath(target, prefix));
+        if (!QFileInfo(workDriveRoot()).isDir())
+            lines << tr("%1 is not mounted, so the mod will not be linked to the "
+                        "work drive yet.").arg(shown(workDriveRoot()));
+        else if (QFileInfo::exists(link))
+            lines << tr("Something is already at %1, so the report will say what it "
+                        "is before anything is linked.").arg(shown(link));
+        else
+            lines << tr("Links %1 to it, so binarize and Workbench can find it.")
+                         .arg(shown(link));
+
+        m_preview->setText(lines.join(QLatin1Char('\n')));
         setSeverity(m_preview, "note");
     } else {
         m_preview->setText(problem);
@@ -337,7 +434,7 @@ ModTemplateResult NewModDialog::run(QWidget *parent)
     NewModDialog dialog(parent);
     while (dialog.exec() == QDialog::Accepted) {
         const ModTemplateOptions options = dialog.options();
-        const ModTemplateResult result = scaffoldMod(dialog.parentDirectory(), options);
+        ModTemplateResult result = scaffoldMod(dialog.parentDirectory(), options);
         if (!result.ok) {
             // The dialog is shown again with everything still in it: a scaffold
             // fails on one wrong character in a path far more often than it
@@ -353,6 +450,9 @@ ModTemplateResult NewModDialog::run(QWidget *parent)
         settings.setValue(QLatin1String(kLocationKey), dialog.parentDirectory());
         settings.setValue(QLatin1String(kAuthorKey), options.author);
 
+        // Asked before the report, so the report is what is true when the user
+        // closes it rather than a state that has already moved on.
+        offerToMoveAside(parent, result);
         showReport(parent, result);
         return result;
     }

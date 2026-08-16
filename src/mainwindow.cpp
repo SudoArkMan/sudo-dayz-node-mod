@@ -29,6 +29,7 @@
 #include "widgets/newscriptdialog.h"
 #include "widgets/startpage.h"
 
+#include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
@@ -48,6 +49,8 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
@@ -310,6 +313,227 @@ void setSeverity(QWidget *w, const char *value)
     w->style()->polish(w);
     w->update();
 }
+
+// What closing a tab costs, which is the only question a close prompt turns on.
+// Read from the script rather than asked of the user, because the user cannot
+// see which of the three a tab is without opening the file it came from.
+enum class CloseCost {
+    Browsed,  // read out of another mod; the Mod Browser has it again on demand
+    OnDisk,   // imported from a .c that is still there, so the file outlives the tab
+    OnlyCopy, // authored here, so this project is the only place the graph exists
+};
+
+CloseCost closeCostOf(const ScriptEntry &s)
+{
+    if (graphIsReadOnly(s.graph)) return CloseCost::Browsed;
+    // A sourcePath naming a file that has since been deleted or moved is worth
+    // no more than none at all, so it is checked rather than trusted.
+    if (!s.sourcePath.isEmpty() && QFileInfo::exists(s.sourcePath))
+        return CloseCost::OnDisk;
+    return CloseCost::OnlyCopy;
+}
+
+// The cross on a script tab.
+//
+// Painted here rather than left to setTabsClosable, which draws
+// PE_IndicatorTabClose: a dark grey X, and drawn at QIcon::Disabled on every tab
+// that is not the current one or under the mouse. Against #1b1e23 that is close
+// to invisible, and it cannot be swapped for a lighter one because Qt's close
+// button paints the primitive and ignores any icon it is given.
+class TabCloseButton : public QAbstractButton {
+public:
+    TabCloseButton(const QString &name, QWidget *parent)
+        : QAbstractButton(parent)
+    {
+        setFocusPolicy(Qt::NoFocus);
+        setCursor(Qt::ArrowCursor);
+        setToolTip(QStringLiteral("Close %1").arg(name));
+        setFixedSize(14, 14);
+    }
+
+    QSize sizeHint() const override { return {14, 14}; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const bool hot = underMouse() || isDown();
+        if (hot) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(isDown() ? theme::accent().darker(150) : theme::headerBg());
+            p.drawRoundedRect(QRectF(rect()), 3, 3);
+        }
+        QPen pen(hot ? theme::text() : theme::textDim());
+        pen.setWidthF(1.2);
+        pen.setCapStyle(Qt::RoundCap);
+        p.setPen(pen);
+        const QRectF x = QRectF(rect()).adjusted(4.5, 4.5, -4.5, -4.5);
+        p.drawLine(x.topLeft(), x.bottomRight());
+        p.drawLine(x.topRight(), x.bottomLeft());
+    }
+
+    // The cross is dim until the pointer is on it, so both edges have to repaint.
+    void enterEvent(QEnterEvent *) override { update(); }
+    void leaveEvent(QEvent *) override { update(); }
+};
+
+// Every script in the project, filtered as you type.
+//
+// The tab bar starts scrolling somewhere around eight tabs and a bar that has to
+// be scrolled is not a way to find anything, least of all in a session where the
+// Mod Browser has been filling it with other people's classes. Same shape as the
+// add-node search below it and for the same reason: the caret is in the box from
+// the first frame and Return picks.
+//
+// Deliberately not a Q_OBJECT, like AddNodePopup: it lives in this file, so a
+// callback is cheaper than a signal and does not need moc to see the class.
+class ScriptListPopup : public QWidget {
+public:
+    ScriptListPopup(const Project &project, std::function<void(const QString &)> onPick,
+                    QWidget *parent)
+        : QWidget(parent, Qt::Popup), m_onPick(std::move(onPick)),
+          m_search(new QLineEdit(this)), m_list(new QTreeWidget(this))
+    {
+        setAttribute(Qt::WA_DeleteOnClose, true);
+        setAttribute(Qt::WA_StyledBackground, true);
+        setObjectName(QStringLiteral("scriptListPopup"));
+        setStyleSheet(QStringLiteral("QWidget#scriptListPopup { background: %1;"
+                                     " border: 1px solid %2; }")
+                          .arg(theme::panelBg().name(), theme::accent().name()));
+
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(6, 6, 6, 6);
+        layout->setSpacing(4);
+
+        m_search->setPlaceholderText(tr("Go to script: type to search"));
+        layout->addWidget(m_search);
+
+        m_list->setColumnCount(2);
+        m_list->setHeaderHidden(true);
+        m_list->setRootIsDecorated(false);
+        m_list->setUniformRowHeights(true);
+        m_list->setTextElideMode(Qt::ElideMiddle);
+        m_list->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_list->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        m_list->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        layout->addWidget(m_list, 1);
+
+        for (const ScriptEntry &s : project.scripts) {
+            Row row;
+            row.id = s.id;
+            row.name = s.name;
+            // A browsed class has no folder of the user's to show, and where it
+            // came from is what tells two mods' PlayerBase apart.
+            row.detail = graphIsReadOnly(s.graph) ? graphOrigin(s.graph) : s.folder;
+            row.browsed = graphIsReadOnly(s.graph);
+            row.current = s.id == project.activeId;
+            m_rows.append(row);
+        }
+
+        connect(m_search, &QLineEdit::textChanged, this,
+                [this](const QString &text) { populate(text); });
+        connect(m_list, &QTreeWidget::itemActivated, this,
+                [this](QTreeWidgetItem *item, int) { pick(item); });
+        connect(m_list, &QTreeWidget::itemClicked, this,
+                [this](QTreeWidgetItem *item, int) { pick(item); });
+
+        m_search->installEventFilter(this);
+        resize(420, 340);
+        populate(QString());
+    }
+
+    void popupAt(const QPoint &globalPos)
+    {
+        QPoint at = globalPos;
+        if (const QScreen *screen = QGuiApplication::screenAt(globalPos)) {
+            const QRect avail = screen->availableGeometry();
+            at.setX(qBound(avail.left(), at.x(), avail.right() - width()));
+            at.setY(qBound(avail.top(), at.y(), avail.bottom() - height()));
+        }
+        move(at);
+        show();
+        m_search->setFocus(Qt::PopupFocusReason);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched != m_search || event->type() != QEvent::KeyPress)
+            return QWidget::eventFilter(watched, event);
+
+        auto *key = static_cast<QKeyEvent *>(event);
+        switch (key->key()) {
+        case Qt::Key_Down:
+        case Qt::Key_Up:
+        case Qt::Key_PageDown:
+        case Qt::Key_PageUp:
+            QCoreApplication::sendEvent(m_list, key);
+            return true;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            pick(m_list->currentItem());
+            return true;
+        default:
+            break;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+private:
+    struct Row {
+        QString id;
+        QString name;
+        QString detail;
+        bool browsed = false;
+        bool current = false;
+    };
+
+    void pick(QTreeWidgetItem *item)
+    {
+        if (m_picked || !item) return;
+        const QString id = item->data(0, kKeyRole).toString();
+        if (id.isEmpty()) return;
+        m_picked = true;
+        close();
+        if (m_onPick) m_onPick(id);
+    }
+
+    void populate(const QString &query)
+    {
+        m_list->setUpdatesEnabled(false);
+        m_list->clear();
+        const QString q = query.trimmed();
+        QTreeWidgetItem *landOn = nullptr;
+        for (const Row &row : m_rows) {
+            if (!matchesQuery(q, {row.name, row.detail})) continue;
+            auto *item = new QTreeWidgetItem(m_list);
+            item->setText(0, row.name);
+            item->setData(0, kKeyRole, row.id);
+            item->setText(1, row.detail);
+            item->setForeground(1, theme::textDim());
+            item->setToolTip(0, row.detail);
+            // Same dimming the tab bar gives a browsed class, so the two
+            // surfaces agree about which scripts are not the user's.
+            if (row.browsed) item->setForeground(0, theme::textDim());
+            if (row.current) {
+                item->setFont(0, theme::uiFont(8, true));
+                item->setForeground(0, theme::accent());
+            }
+            // The script in front is where the arrow keys start, so Down goes to
+            // the next tab rather than back to the top of the list.
+            if (!landOn || row.current) landOn = item;
+        }
+        if (landOn) m_list->setCurrentItem(landOn);
+        m_list->setUpdatesEnabled(true);
+    }
+
+    std::function<void(const QString &)> m_onPick;
+    QLineEdit *m_search;
+    QTreeWidget *m_list;
+    QVector<Row> m_rows;
+    bool m_picked = false;
+};
 
 // The add-node search the canvas right-click opens, and the menu a wire dropped
 // on empty canvas opens too: a search box over a result list, at the cursor,
@@ -774,7 +998,35 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     // the clip, and the dropdown beside the bar reaches every script whatever
     // the bar can fit.
     m_tabs->setElideMode(Qt::ElideRight);
+    // Room for a name to survive.
+    //
+    // Once the tabs no longer fit, QTabBar lays every one of them out at its
+    // minimum rather than at its size hint, so this floor is the whole of what a
+    // tab gets in any project big enough to scroll. Measured on the 25 script
+    // project in resources, at 1600x950 and again at 1280x800:
+    //
+    //   theme.cpp's 64px, no cross   18 of 25 elided, and five of them read
+    //                                "SUDO_Com..." with no way to tell which
+    //   120px, with the cross        12 of 25 elided, three pairs still identical
+    //   140px, with the cross        5 of 25 elided, no two the same
+    //
+    // 140 is 120 plus the 18 the cross and its gap take, which is what makes it
+    // the number: it hands back exactly what the cross costs. Wider is not free.
+    // Every tab pays this, so the bar starts scrolling sooner, and scrolling is
+    // the recoverable end of the trade: the dropdown beside the bar and Go to
+    // script reach any script whatever the bar can fit, while two tabs that read
+    // the same are a coin toss every time.
+    //
+    // On the widget rather than in theme.cpp because that file's QTabBar rules
+    // also style the dock tab bars, where "Events" and "MiniMap" would be padded
+    // out to nothing.
+    m_tabs->setStyleSheet(
+        QStringLiteral("QTabBar::tab { min-width: 140px; padding-right: 6px; }"));
     m_tabs->setContextMenuPolicy(Qt::CustomContextMenu);
+    // Middle-click closes, which is what people try before they look for a
+    // cross. QTabBar reads the left button and nothing else, so the release has
+    // to be caught here or it reaches nothing that could act on it.
+    m_tabs->installEventFilter(this);
     tabLayout->addWidget(m_tabs, 1);
 
     m_tabList = new QToolButton(tabRow);
@@ -829,8 +1081,8 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     buildStatusBar();
 
     connect(m_tabList, &QToolButton::clicked, this, &MainWindow::showTabList);
-    connect(m_tabs, &QTabBar::customContextMenuRequested, this,
-            [this](const QPoint &) { showTabList(); });
+    connect(m_tabs, &QTabBar::customContextMenuRequested,
+            this, &MainWindow::showTabMenu);
 
     connect(m_doc, &Document::graphChanged, this, &MainWindow::onGraphChanged);
     connect(m_doc, &Document::projectChanged, this, &MainWindow::onProjectChanged);
@@ -987,6 +1239,17 @@ void MainWindow::buildMenus()
                     this, &MainWindow::saveScriptFile);
     file->addAction(QStringLiteral("Export scripts..."), this, &MainWindow::exportScripts);
     file->addSeparator();
+    // Here rather than under View, because a tab is not a window onto a file
+    // that carries on existing: closing one takes the script out of the project,
+    // which is a File-menu sized thing to do.
+    file->addAction(QStringLiteral("Close script"), QKeySequence(Qt::CTRL | Qt::Key_W),
+                    this, &MainWindow::closeActiveScript);
+    m_reopenAction =
+        file->addAction(QStringLiteral("Reopen closed script"),
+                        QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T),
+                        this, &MainWindow::reopenClosedScript);
+    m_reopenAction->setEnabled(false);
+    file->addSeparator();
     file->addAction(QStringLiteral("Edit mod config..."), this,
                     &MainWindow::editModConfig);
     file->addSeparator();
@@ -1026,6 +1289,11 @@ void MainWindow::buildMenus()
                     this, [this]() { m_view->zoomToFit(); });
     view->addAction(QStringLiteral("Reset zoom"), QKeySequence(Qt::CTRL | Qt::Key_0),
                     this, [this]() { m_view->resetZoom(); });
+    view->addSeparator();
+    // The tab bar scrolls once a project carries more scripts than the window is
+    // wide, and scrolling is not a way to find a name you already know.
+    view->addAction(QStringLiteral("Go to script..."), QKeySequence(Qt::CTRL | Qt::Key_P),
+                    this, &MainWindow::showTabList);
     view->addSeparator();
     // Dock toggles are appended in buildDocks once the docks exist.
 
@@ -1138,6 +1406,19 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_readOnlyBar && event->type() == QEvent::Resize)
         updateReadOnlyBar();
+    // Middle-click closes the tab under the pointer. On release, not on press,
+    // so a click that started on a tab and ended somewhere else closes nothing.
+    if (watched == m_tabs && event->type() == QEvent::MouseButtonRelease) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::MiddleButton) {
+            const int index = m_tabs->tabAt(mouse->position().toPoint());
+            const QString id = index >= 0 ? m_tabs->tabData(index).toString() : QString();
+            if (!id.isEmpty()) {
+                closeScripts({id});
+                return true;
+            }
+        }
+    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -1559,7 +1840,19 @@ void MainWindow::openPopupForScreenshot()
         QPoint(m_view->viewport()->width() / 3, m_view->viewport()->height() / 5));
     const QPointF scenePos = m_view->mapToScene(m_view->mapFromGlobal(at));
 
-    if (wanted == QLatin1String("event")) {
+    // The tab bar's own two surfaces. The menu is a QMenu and main.cpp paints
+    // any of those into the grab by itself, so this one is finished here.
+    if (wanted == QLatin1String("tabmenu")) {
+        const int index = m_tabs->currentIndex();
+        if (QMenu *menu = buildTabMenu(index))
+            menu->popup(m_tabs->mapToGlobal(m_tabs->tabRect(index).bottomLeft()));
+        QCoreApplication::processEvents();
+        return;
+    }
+
+    if (wanted == QLatin1String("scripts")) {
+        showTabList();
+    } else if (wanted == QLatin1String("event")) {
         showEventSearch(scenePos);
     } else if (wanted.startsWith(QLatin1String("connect"))) {
         // Opened through showConnectSearch rather than by building the popup
@@ -1581,7 +1874,8 @@ void MainWindow::openPopupForScreenshot()
     for (QWidget *top : QApplication::topLevelWidgets()) {
         if (!top->isVisible() || !top->isWindow()) continue;
         const QString name = top->objectName();
-        if (name != QLatin1String("addNodePopup") && name != QLatin1String("eventPopup"))
+        if (name != QLatin1String("addNodePopup") && name != QLatin1String("eventPopup")
+            && name != QLatin1String("scriptListPopup"))
             continue;
         // The pixmap is the popup's own rendering at its own size and position.
         // Painted into a child of the window because that is what win.grab()
@@ -1606,6 +1900,11 @@ void MainWindow::buildTestMenu()
     // the shortcuts on the window: an action nothing has added is never heard.
     m_testMenu->addAction(m_testRun->linkAction());
     m_testMenu->addAction(m_testRun->buildAction());
+    m_testMenu->addSeparator();
+    // Above the launch entries because it decides what they load, and on the
+    // menu at all because the dock it lives in is tabbed behind the generated
+    // file: a button nobody can see is a feature nobody finds.
+    m_testMenu->addAction(m_testRun->modsAction());
     m_testMenu->addSeparator();
     m_testMenu->addAction(m_testRun->launchAction());
     m_testMenu->addAction(m_testRun->stopAction());
@@ -1636,10 +1935,21 @@ void MainWindow::refreshTabs()
             // the user's own while it is sitting in the background.
             m_tabs->setTabTextColor(i, theme::textDim());
         }
+
+        // The bar owns the button from here: removeTab hides it and defers its
+        // delete, which is what makes closing from inside the button's own click
+        // safe even though the first thing the close does is rebuild this bar.
+        auto *cross = new TabCloseButton(s.name, m_tabs);
+        const QString id = s.id;
+        connect(cross, &QAbstractButton::clicked, this,
+                [this, id]() { closeScripts({id}); });
+        m_tabs->setTabButton(i, QTabBar::RightSide, cross);
+
         if (s.id == p.activeId) active = i;
     }
     m_tabs->setCurrentIndex(active);
     updateReadOnlyBar();
+    updateReopenAction();
 }
 
 void MainWindow::updateReadOnlyBar()
@@ -1958,15 +2268,216 @@ void MainWindow::showTabList()
     const Project &p = m_doc->project();
     if (p.scripts.isEmpty()) return;
 
-    QMenu menu(this);
-    for (const ScriptEntry &s : p.scripts) {
-        QAction *entry = menu.addAction(QStringLiteral("%1/%2").arg(s.folder, s.name));
-        entry->setCheckable(true);
-        entry->setChecked(s.id == p.activeId);
-        const QString id = s.id;
-        connect(entry, &QAction::triggered, this, [this, id]() { m_doc->setActiveScript(id); });
+    auto *popup = new ScriptListPopup(p, [this](const QString &id) {
+        m_doc->setActiveScript(id);
+        m_view->zoomToFit();
+    }, this);
+    // Right edge under the right edge of the button that opens it. The button
+    // sits at the far right of the tab row, and hanging the popup off its left
+    // corner puts most of it past the window.
+    const QPoint under =
+        m_tabList->mapToGlobal(QPoint(m_tabList->width(), m_tabList->height()));
+    popup->popupAt(under - QPoint(popup->width(), 0));
+}
+
+void MainWindow::showTabMenu(const QPoint &pos)
+{
+    const int index = m_tabs->tabAt(pos);
+    // Off the tabs themselves there is no tab this is about, so the gesture
+    // keeps the answer it gave before there was anything to close: the list of
+    // every script in the project.
+    if (index < 0) {
+        showTabList();
+        return;
     }
-    menu.exec(m_tabList->mapToGlobal(QPoint(0, m_tabList->height())));
+    if (QMenu *menu = buildTabMenu(index))
+        menu->popup(m_tabs->mapToGlobal(pos));
+}
+
+QMenu *MainWindow::buildTabMenu(int index)
+{
+    if (index < 0 || index >= m_tabs->count()) return nullptr;
+
+    const Project &p = m_doc->project();
+    const QString id = m_tabs->tabData(index).toString();
+    // The tab index and the script index agree because refreshTabs walks the
+    // project in order, but the id is the thing the rest of the app is keyed on
+    // and looking it up is what keeps a stale bar from closing the wrong script.
+    int at = -1;
+    for (int i = 0; i < p.scripts.size(); ++i) {
+        if (p.scripts.at(i).id != id) continue;
+        at = i;
+        break;
+    }
+    if (at < 0) return nullptr;
+    const QString name = p.scripts.at(at).name;
+
+    QStringList others;
+    QStringList toRight;
+    QStringList browsed;
+    for (int i = 0; i < p.scripts.size(); ++i) {
+        const ScriptEntry &s = p.scripts.at(i);
+        if (i != at) others << s.id;
+        if (i > at) toRight << s.id;
+        if (closeCostOf(s) == CloseCost::Browsed) browsed << s.id;
+    }
+
+    // Shown with popup() rather than exec(), so it deletes itself once it has
+    // been dismissed instead of holding an event loop open while a close prompt
+    // wants one of its own.
+    auto *menu = new QMenu(this);
+    menu->setAttribute(Qt::WA_DeleteOnClose, true);
+    menu->setToolTipsVisible(true);
+
+    QAction *one = menu->addAction(QStringLiteral("Close %1").arg(name));
+    one->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
+    connect(one, &QAction::triggered, this, [this, id]() { closeScripts({id}); });
+
+    QAction *rest = menu->addAction(
+        QStringLiteral("Close other tabs (%1)").arg(others.size()));
+    rest->setEnabled(!others.isEmpty());
+    connect(rest, &QAction::triggered, this, [this, others]() { closeScripts(others); });
+
+    QAction *right = menu->addAction(
+        QStringLiteral("Close tabs to the right (%1)").arg(toRight.size()));
+    right->setEnabled(!toRight.isEmpty());
+    connect(right, &QAction::triggered, this, [this, toRight]() { closeScripts(toRight); });
+
+    // The entry the Mod Browser makes necessary: reading four classes out of
+    // somebody else's mod leaves four tabs that carry none of the user's work,
+    // and taking them one at a time is the wrong amount of effort for that.
+    QAction *reads = menu->addAction(
+        QStringLiteral("Close browsed scripts (%1)").arg(browsed.size()));
+    reads->setEnabled(!browsed.isEmpty());
+    reads->setToolTip(QStringLiteral("Scripts read out of other mods. Nothing in "
+                                     "them is yours, and the Mod Browser opens "
+                                     "them again."));
+    connect(reads, &QAction::triggered, this, [this, browsed]() { closeScripts(browsed); });
+
+    menu->addSeparator();
+    // The File menu's own action, so the label, the shortcut and the enabled
+    // state are written once and cannot disagree between the two menus.
+    if (m_reopenAction) menu->addAction(m_reopenAction);
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("Go to script..."), this, &MainWindow::showTabList);
+    return menu;
+}
+
+void MainWindow::closeScripts(const QStringList &ids)
+{
+    const Project &p = m_doc->project();
+    QStringList live;
+    QStringList onlyCopies;
+    QString firstName;
+    int owned = 0;
+    for (const QString &id : ids) {
+        const ScriptEntry *s = p.script(id);
+        // A menu built before an import or another close can name a script that
+        // is no longer there. Skipping is the only safe reading of that: closing
+        // whatever now sits at that position would close something else.
+        if (!s) continue;
+        if (live.isEmpty()) firstName = s->name;
+        live << id;
+        const CloseCost cost = closeCostOf(*s);
+        if (cost == CloseCost::Browsed) continue;
+        owned++;
+        if (cost == CloseCost::OnlyCopy) onlyCopies << s->name;
+    }
+    if (live.isEmpty()) return;
+
+    // Asked when the graph is the only copy of itself, and when one gesture
+    // takes more than one of the user's own scripts. A single close of a script
+    // whose .c is still on disk is neither, and gets the status line and the
+    // reopen entry rather than a box in the way.
+    if (!onlyCopies.isEmpty() || owned > 1) {
+        const QString what = live.size() == 1
+                                 ? QStringLiteral("Close %1?").arg(firstName)
+                                 : QStringLiteral("Close %1 scripts?").arg(live.size());
+        QStringList why;
+        if (onlyCopies.size() == 1) {
+            why << QStringLiteral("This project is the only place %1 exists.")
+                       .arg(onlyCopies.first());
+        } else if (onlyCopies.size() > 1) {
+            why << QStringLiteral("This project is the only place these exist: %1.")
+                       .arg(onlyCopies.join(QStringLiteral(", ")));
+        }
+        why << (live.size() == 1
+                    ? QStringLiteral("Closing takes it out of the project. No .c on "
+                                     "disk is touched, and Reopen closed script puts "
+                                     "it back until this session ends.")
+                    : QStringLiteral("Closing takes them out of the project. No .c on "
+                                     "disk is touched, and Reopen closed script puts "
+                                     "them back one at a time until this session "
+                                     "ends."));
+
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("Close scripts"));
+        box.setText(what);
+        box.setInformativeText(why.join(QStringLiteral("\n\n")));
+        QPushButton *go = box.addButton(QStringLiteral("Close"),
+                                        QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() != go) return;
+    }
+
+    int closed = 0;
+    QString last;
+    for (const QString &id : live) {
+        // Re-read per step: each close rewrites the project, and the name is
+        // wanted after the entry it belongs to has gone.
+        const ScriptEntry *s = p.script(id);
+        const QString name = s ? s->name : QString();
+        if (!m_doc->closeScript(id)) continue;
+        last = name;
+        closed++;
+    }
+
+    if (closed == 0) {
+        flashStatus(QStringLiteral("The project keeps at least one script, and this "
+                                   "is the last one."));
+        return;
+    }
+    flashStatus(closed == 1
+                    ? QStringLiteral("Closed %1. Ctrl+Shift+T brings it back.").arg(last)
+                    : QStringLiteral("Closed %1 scripts. Ctrl+Shift+T brings them "
+                                     "back, newest first.").arg(closed));
+}
+
+void MainWindow::closeActiveScript()
+{
+    // The start page is in front of the editor, not beside it, so a shortcut
+    // pressed there would change a project nobody can see.
+    if (m_stack->currentWidget() != m_editor) return;
+    const int index = m_tabs->currentIndex();
+    const QString id = index >= 0 ? m_tabs->tabData(index).toString() : QString();
+    if (id.isEmpty()) return;
+    closeScripts({id});
+}
+
+void MainWindow::reopenClosedScript()
+{
+    // Read before the pop, because after it the stack names the one below.
+    const QString name = m_doc->lastClosedName();
+    if (!m_doc->reopenClosedScript()) {
+        flashStatus(QStringLiteral("Nothing has been closed this session."));
+        return;
+    }
+    showEditor();
+    m_view->zoomToFit();
+    flashStatus(QStringLiteral("Reopened %1.").arg(name));
+}
+
+void MainWindow::updateReopenAction()
+{
+    if (!m_reopenAction) return;
+    const QString name = m_doc->lastClosedName();
+    m_reopenAction->setEnabled(m_doc->canReopenScript());
+    m_reopenAction->setText(name.isEmpty()
+                                ? QStringLiteral("Reopen closed script")
+                                : QStringLiteral("Reopen %1").arg(name));
 }
 
 void MainWindow::newProject()
