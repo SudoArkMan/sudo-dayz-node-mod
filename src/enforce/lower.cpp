@@ -2,6 +2,7 @@
 
 #include "builtins.h"
 #include "catalog.h"
+#include "codegen.h"
 #include "layout.h"
 #include "lexer.h"
 #include "project.h"
@@ -76,7 +77,109 @@ struct Chain {
     QString tailNode;
     QString tailPin;
     bool ok = false;
+    // What the author left between the last statement of this block and the
+    // brace that closes it. Whoever writes that brace has to write these first.
+    QString endTrivia;
 };
+
+// The author's own text between two points in a body: what trails the line the
+// previous statement ended on, and the whole lines standing above the next one.
+struct Gap {
+    QString trailing;
+    QStringList before;
+    QString indent; // what the statements of this block sit behind
+};
+
+// The lines of a gap, with the block's own indentation taken off the front of
+// each comment so the generator can put it back at whatever depth the node ends
+// up at. A blank line keeps whatever it held: there is no indentation to speak
+// of on a line with nothing on it, and adding some leaves trailing spaces in
+// the file. A comment standing at a different column from the code around it
+// cannot be expressed this way, and the whole gap is turned down instead.
+bool dedentGap(const QStringList &lines, const QString &indent, QStringList *out)
+{
+    if (!nodefmt::isCommentaryOnly(lines.join(QLatin1Char('\n')))) return false;
+    for (const QString &l : lines) {
+        if (nodefmt::isBlankLine(l)) {
+            out->append(l);
+            continue;
+        }
+        if (!l.startsWith(indent)) return false;
+        out->append(l.mid(indent.size()));
+    }
+    return true;
+}
+
+// `from` is one past the previous statement, or the inside edge of the brace
+// that opens the block. `atLineStart` says the first character of the range is
+// already the start of a line, which is true of a method body and of nothing
+// else. False means nothing here can be kept, and the body is then refused
+// rather than regenerated without it.
+bool splitGap(const QString &src, int from, int to, bool atLineStart, Gap *out)
+{
+    if (from < 0 || to < from || to > src.size()) return false;
+    QString text = src.mid(from, to - from);
+    if (!atLineStart) {
+        const int nl = text.indexOf(QLatin1Char('\n'));
+        // The two statements share a line. The generator writes one statement
+        // to a line, so no field here could bring that back.
+        if (nl < 0) return false;
+        out->trailing = text.left(nl);
+        text = text.mid(nl + 1);
+    }
+    QStringList lines = text.split(QLatin1Char('\n'));
+    // The last piece is the indentation in front of the statement itself, which
+    // the generator writes for the node rather than keeping here.
+    out->indent = lines.takeLast();
+    if (!nodefmt::isIndentText(out->indent)) return false;
+    if (!nodefmt::isCommentaryOnly(out->trailing)) return false;
+    return dedentGap(lines, out->indent, &out->before);
+}
+
+// The same, for the run between the last statement of a block and its end.
+// `dropCloseIndent` is for a block whose closing brace is still in the text:
+// the indent in front of that brace belongs to the generator.
+bool splitEndGap(const QString &src, int from, int to, bool dropCloseIndent,
+                 const QString &indent, Gap *out)
+{
+    if (from < 0 || to < from || to > src.size()) return false;
+    const QString text = src.mid(from, to - from);
+    const int nl = text.indexOf(QLatin1Char('\n'));
+    if (nl < 0) {
+        out->trailing = text;
+        return nodefmt::isCommentaryOnly(text);
+    }
+    out->trailing = text.left(nl);
+    if (!nodefmt::isCommentaryOnly(out->trailing)) return false;
+    QStringList lines = text.mid(nl + 1).split(QLatin1Char('\n'));
+    if (dropCloseIndent) {
+        const QString closeIndent = lines.takeLast();
+        if (!nodefmt::isIndentText(closeIndent)) return false;
+    }
+    return dedentGap(lines, indent, &out->before);
+}
+
+// Statements the generator always writes out as a header and a braced block,
+// however few lines the author wrote them on. The first line it produces for
+// one of these is the header, so a comment written under the whole construct
+// must not be hung on it: coming back on top, the comment would be describing
+// different code from the one it was written about.
+bool writesBlock(StmtKind k)
+{
+    return k == StmtKind::If || k == StmtKind::For || k == StmtKind::ForEach
+           || k == StmtKind::While || k == StmtKind::Switch || k == StmtKind::Block;
+}
+
+// The whitespace in front of the line `at` sits on, empty when the character
+// before it is not whitespace.
+QString indentAt(const QString &src, int at)
+{
+    if (at < 0 || at > src.size()) return {};
+    int from = at > 0 ? src.lastIndexOf(QLatin1Char('\n'), at - 1) : -1;
+    from = from < 0 ? 0 : from + 1;
+    const QString lead = src.mid(from, at - from);
+    return nodefmt::isIndentText(lead) ? lead : QString();
+}
 
 // The parser keeps `i++` and `++i` apart by spelling the postfix form
 // "post++". Either way the statement means the same thing.
@@ -351,6 +454,12 @@ private:
     QString addNode(NodeKind kind, const QString &ref);
     GraphNode *node(const QString &id);
     void setOpt(const QString &id, const QString &key, const QString &value);
+    // Lines above a node, put above whatever it already carries. A bare block
+    // splices its statements into the block around it, so the first of them is
+    // also the block's own entry and two gaps land on the same node: what the
+    // author wrote above the brace, and what they wrote inside it. Writing one
+    // over the other takes a comment out of their file.
+    void addBefore(const QString &id, const QStringList &lines);
     void setInput(const QString &id, const QString &pin, const QString &value);
     void wire(const QString &fromNode, const QString &fromPin, const QString &toNode,
               const QString &toPin);
@@ -373,7 +482,12 @@ private:
     void createVariables();
 
     // ---- statements
-    Chain lowerBlock(const std::vector<StmtPtr> &stmts);
+    // `blockStart` and `blockEnd` bracket the block inside the text the
+    // statements were parsed from; -1 for either turns the formatting work
+    // off. `topLevel` is the method body, whose opening brace and closing
+    // brace are both outside the text.
+    Chain lowerBlock(const std::vector<StmtPtr> &stmts, int blockStart = -1,
+                     int blockEnd = -1, bool topLevel = false);
     Chain lowerStmt(const Stmt &s);
     Chain lowerStmtInner(const Stmt &s);
     Chain lowerExprStmt(const Stmt &s);
@@ -508,6 +622,15 @@ GraphNode *Lowerer::node(const QString &id)
 void Lowerer::setOpt(const QString &id, const QString &key, const QString &value)
 {
     if (GraphNode *n = node(id)) n->opts.insert(key, value);
+}
+
+void Lowerer::addBefore(const QString &id, const QStringList &lines)
+{
+    if (lines.isEmpty()) return;
+    GraphNode *n = node(id);
+    if (!n) return;
+    n->opts.insert(nodefmt::keyBefore(),
+                   nodefmt::store(lines) + n->opts.value(nodefmt::keyBefore()));
 }
 
 void Lowerer::setInput(const QString &id, const QString &pin, const QString &value)
@@ -844,13 +967,48 @@ void Lowerer::pruneSequences()
 
 // -------------------------------------------------------------- statements
 
-Chain Lowerer::lowerBlock(const std::vector<StmtPtr> &stmts)
+Chain Lowerer::lowerBlock(const std::vector<StmtPtr> &stmts, int blockStart, int blockEnd,
+                          bool topLevel)
 {
     Chain out;
+    const QString &src = m_opts.sourceText;
+    const bool holdTrivia = !src.isEmpty() && blockStart >= 0;
+    int prevEnd = blockStart;
+    bool lineStart = topLevel;
+    // The node whose first generated line is the line the previous statement
+    // was written on, or empty when there is no such line to hang a trailing
+    // comment back onto.
+    QString prevEntry;
+    // What the statements of this block stand behind, which is what a comment
+    // between them has to be measured against.
+    QString blockIndent;
+    bool sawStatement = false;
+
     for (int i = 0; i < int(stmts.size()); ++i) {
         const Stmt *s = stmts.at(i).get();
         if (!s) continue;
         const Chain c = lowerStmt(*s);
+
+        if (holdTrivia && s->srcStart >= 0 && s->srcEnd >= s->srcStart) {
+            blockIndent = indentAt(src, s->srcStart);
+            sawStatement = true;
+            Gap gap;
+            if (splitGap(src, prevEnd, s->srcStart, lineStart, &gap)) {
+                if (!c.entry.isEmpty()) addBefore(c.entry, gap.before);
+                if (!gap.trailing.isEmpty() && !prevEntry.isEmpty())
+                    setOpt(prevEntry, nodefmt::keyTrailing(), gap.trailing);
+            }
+            prevEnd = s->srcEnd;
+            lineStart = false;
+            // A statement written over several lines has its closing brace on
+            // the last of them, and a comment sitting after that brace would
+            // move up to the header if it were kept on the node's first line.
+            const bool oneLine =
+                !src.mid(s->srcStart, s->srcEnd - s->srcStart).contains(QLatin1Char('\n'));
+            prevEntry = !c.entry.isEmpty() && oneLine && !writesBlock(s->kind) ? c.entry
+                                                                              : QString();
+        }
+
         if (c.entry.isEmpty()) continue;
 
         if (c.tailPin.isEmpty() && i + 1 < int(stmts.size())) {
@@ -865,6 +1023,22 @@ Chain Lowerer::lowerBlock(const std::vector<StmtPtr> &stmts)
         out.tailNode = c.tailNode;
         out.tailPin = c.tailPin;
     }
+
+    if (holdTrivia && blockEnd >= prevEnd) {
+        Gap gap;
+        bool holdable = splitEndGap(src, prevEnd, blockEnd, !topLevel, blockIndent, &gap);
+        // A block with no statement in it has no indentation of its own for a
+        // comment to be measured against, so only its blank lines can be kept.
+        if (holdable && !sawStatement)
+            for (const QString &l : gap.before)
+                if (!nodefmt::isBlankLine(l)) holdable = false;
+        if (holdable) {
+            if (!gap.trailing.isEmpty() && !prevEntry.isEmpty())
+                setOpt(prevEntry, nodefmt::keyTrailing(), gap.trailing);
+            out.endTrivia = nodefmt::store(gap.before);
+        }
+    }
+
     out.ok = true;
     return out;
 }
@@ -976,7 +1150,7 @@ Chain Lowerer::lowerStmtInner(const Stmt &s)
     case StmtKind::Switch:     return lowerSwitch(s);
     case StmtKind::Block: {
         pushScope();
-        const Chain c = lowerBlock(s.body);
+        const Chain c = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
         popScope();
         return c;
     }
@@ -1374,15 +1548,17 @@ Chain Lowerer::lowerIf(const Stmt &s)
                 bound->value = asVal;
                 bound->bound = true;
             }
-            const Chain t = lowerBlock(s.body);
+            const Chain t = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
             popScope();
             if (m_unsafeRaw) return no(__LINE__);
             if (!t.entry.isEmpty()) wire(cast, QStringLiteral("success"), t.entry, PinExec);
 
             pushScope();
-            const Chain f = lowerBlock(s.elseBody);
+            const Chain f = lowerBlock(s.elseBody, s.elseStart, s.elseEnd);
             popScope();
             if (!f.entry.isEmpty()) wire(cast, QStringLiteral("failed"), f.entry, PinExec);
+            if (!t.endTrivia.isEmpty()) setOpt(cast, nodefmt::keyEnd(), t.endTrivia);
+            if (!f.endTrivia.isEmpty()) setOpt(cast, nodefmt::keyEndElse(), f.endTrivia);
             if (m_unsafeRaw) return no(__LINE__);
 
             // The local outlives the `if` in the source, but the value only
@@ -1406,14 +1582,16 @@ Chain Lowerer::lowerIf(const Stmt &s)
     bindInput(br, QStringLiteral("cond"), c);
 
     pushScope();
-    const Chain t = lowerBlock(s.body);
+    const Chain t = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
     popScope();
     if (!t.entry.isEmpty()) wire(br, QStringLiteral("true"), t.entry, PinExec);
 
     pushScope();
-    const Chain f = lowerBlock(s.elseBody);
+    const Chain f = lowerBlock(s.elseBody, s.elseStart, s.elseEnd);
     popScope();
     if (!f.entry.isEmpty()) wire(br, QStringLiteral("false"), f.entry, PinExec);
+    if (!t.endTrivia.isEmpty()) setOpt(br, nodefmt::keyEnd(), t.endTrivia);
+    if (!f.endTrivia.isEmpty()) setOpt(br, nodefmt::keyEndElse(), f.endTrivia);
     if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, br);
@@ -1515,9 +1693,10 @@ Chain Lowerer::lowerForEach(const Stmt &s)
             idx->bound = true;
         }
     }
-    const Chain body = lowerBlock(s.body);
+    const Chain body = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
     popScope();
     if (!body.entry.isEmpty()) wire(fe, QStringLiteral("body"), body.entry, PinExec);
+    if (!body.endTrivia.isEmpty()) setOpt(fe, nodefmt::keyEnd(), body.endTrivia);
     if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, fe);
@@ -1559,9 +1738,10 @@ Chain Lowerer::lowerFor(const Stmt &s)
         l->value = {loop, QStringLiteral("index"), QString(), QStringLiteral("int"), true};
         l->bound = true;
     }
-    const Chain body = lowerBlock(s.body);
+    const Chain body = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
     popScope();
     if (!body.entry.isEmpty()) wire(loop, QStringLiteral("body"), body.entry, PinExec);
+    if (!body.endTrivia.isEmpty()) setOpt(loop, nodefmt::keyEnd(), body.endTrivia);
     if (m_unsafeRaw) return no(__LINE__);
 
     Chain out = chainOf(pre, loop);
@@ -1587,9 +1767,10 @@ Chain Lowerer::lowerWhile(const Stmt &s)
     const QString loop = addNode(NodeKind::Builtin, bi::While);
     bindInput(loop, QStringLiteral("cond"), c);
     pushScope();
-    const Chain body = lowerBlock(s.body);
+    const Chain body = lowerBlock(s.body, s.bodyStart, s.bodyEnd);
     popScope();
     if (!body.entry.isEmpty()) wire(loop, QStringLiteral("body"), body.entry, PinExec);
+    if (!body.endTrivia.isEmpty()) setOpt(loop, nodefmt::keyEnd(), body.endTrivia);
     if (m_unsafeRaw) return no(__LINE__);
 
     // Built from the empty list on purpose: lowering the body left its own
@@ -2443,7 +2624,8 @@ LowerResult Lowerer::run(const std::vector<StmtPtr> &stmts)
     scanStmts(stmts, 0);
     createVariables();
 
-    const Chain c = lowerBlock(stmts);
+    const Chain c = lowerBlock(stmts, m_opts.sourceText.isEmpty() ? -1 : 0,
+                               m_opts.sourceText.size(), true);
 
     if (diag::enabled()) {
         const qint64 id = diag::nextRun();
@@ -2499,6 +2681,7 @@ LowerResult Lowerer::run(const std::vector<StmtPtr> &stmts)
     }
     m_res.entryNode = c.entry;
     m_res.exitNode = c.tailNode;
+    m_res.endTrivia = c.endTrivia;
     pruneSequences();
     return m_res;
 }
@@ -2670,7 +2853,11 @@ LowerResult lowerEnforceCode(const QString &code, const Catalog &cat,
         out.notes = parsed.errors;
         return out;
     }
-    LowerResult out = lowerToNodes(parsed.statements, cat, builtins, graph, project, opts);
+    // The text is right here, so a "convert to nodes" on a raw block keeps the
+    // author's blank lines and comments instead of quietly dropping them.
+    LowerOptions withText = opts;
+    if (withText.sourceText.isEmpty()) withText.sourceText = code;
+    LowerResult out = lowerToNodes(parsed.statements, cat, builtins, graph, project, withText);
     out.notes = parsed.notes + out.notes;
     return out;
 }
@@ -2682,6 +2869,19 @@ bool explodeRawNode(Graph &graph, const QString &nodeId, const Catalog &cat,
     if (!raw || raw->ref != bi::Raw) return false;
     const QString code = raw->opts.value(QStringLiteral("code"));
     if (code.trimmed().isEmpty()) return false;
+
+    // What this graph says before anything is touched. The importer decides
+    // between text and nodes by generating both and comparing them, and this
+    // path needs the same gate for a stronger reason: it writes into the graph
+    // the user is about to save over their own mod, so anything the lowering
+    // cannot carry is a line taken out of a file they still have to ship.
+    const Graph asItStands = graph;
+    const QString wasCode = generateEnforce(graph, cat, builtins, project).code;
+
+    // Read off the node before anything is appended to the graph: this node is
+    // about to be removed, and its opts go with it.
+    const QString ownBefore = raw->opts.value(nodefmt::keyBefore());
+    const QString ownTrailing = raw->opts.value(nodefmt::keyTrailing());
 
     const double originX = raw->x;
     const double originY = raw->y;
@@ -2735,6 +2935,31 @@ bool explodeRawNode(Graph &graph, const QString &nodeId, const Catalog &cat,
         if (notes && r.notes.isEmpty())
             *notes << QStringLiteral("Nothing here could be read as nodes, so the code is "
                                      "left as it is.");
+        return false;
+    }
+
+    // A blank line or a comment under the last statement belongs to the brace
+    // that closes the block, and this node does not own that brace. Converting
+    // anyway would take the author's own words out of their own mod, so the
+    // block keeps its code instead.
+    if (!r.endTrivia.isEmpty()) {
+        if (notes)
+            *notes << QStringLiteral("What is written under the last line here has no "
+                                     "statement to belong to, so the code is left as it is.");
+        return false;
+    }
+
+    // A comment at the end of this node's own line. It goes back at the end of
+    // the last line whatever replaces this node writes, and no node has a field
+    // that says that: trivia.trailing lands on a node's first line, which is a
+    // different line as soon as the block becomes more than one. Rather than
+    // move the author's words to a line they did not write them on, the block
+    // keeps its code.
+    if (!ownTrailing.isEmpty()) {
+        if (notes)
+            *notes << QStringLiteral("The comment at the end of this line has no single "
+                                     "statement to sit behind once this is more than one "
+                                     "node, so the code is left as it is.");
         return false;
     }
 
@@ -2812,6 +3037,42 @@ bool explodeRawNode(Graph &graph, const QString &nodeId, const Catalog &cat,
             if (!graph.node(graph.edges.at(i).from.node)
                 || !graph.node(graph.edges.at(i).to.node))
                 graph.edges.removeAt(i);
+    }
+
+    // The lines the author wrote above this node. `head` is what now runs in
+    // its place, so those lines go on it, above anything the block held of its
+    // own. Done last because the rewiring above is what settles which node that
+    // is, and because removeNode has already taken the old one away.
+    if (!ownBefore.isEmpty()) {
+        if (GraphNode *n = graph.node(head))
+            n->opts.insert(nodefmt::keyBefore(),
+                           ownBefore + n->opts.value(nodefmt::keyBefore()));
+    }
+
+    // A raw node holds the bytes the file was written with, carriage returns
+    // and all, and it writes them straight back out. The nodes replacing it
+    // write headers, braces and blank lines that have no source line to read an
+    // ending from, so the ending goes on the node that owns the method, exactly
+    // as the importer puts it there. A method that already carries one is left
+    // alone: the comparison below is what decides whether either answer is
+    // right, and overwriting it would reformat the statements around this one.
+    if (!entryId.isEmpty() && nodefmt::eolOf(code) == QLatin1String("\r\n")) {
+        if (GraphNode *n = graph.node(entryId))
+            if (!n->opts.contains(nodefmt::keyEol()))
+                n->opts.insert(nodefmt::keyEol(), QStringLiteral("\r\n"));
+    }
+
+    // The gate. Nothing above here is allowed to stand unless the file the
+    // graph now generates is the file it generated a moment ago, character for
+    // character. Refusing costs a conversion; converting wrongly costs the
+    // author a comment out of their own mod, which is not recoverable from the
+    // graph afterwards.
+    if (generateEnforce(graph, cat, builtins, project).code != wasCode) {
+        graph = asItStands;
+        if (notes)
+            *notes << QStringLiteral("Converting this would not write the same code back, so "
+                                     "it is left as it is.");
+        return false;
     }
 
     layoutNodes(graph, fresh, {originX, originY});

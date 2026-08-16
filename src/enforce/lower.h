@@ -25,6 +25,11 @@ struct LowerOptions {
     // Where to start placing nodes.
     double originX = 0;
     double originY = 0;
+    // The body these statements were parsed out of. Statements carry offsets
+    // into it, so the blank lines and comments between them can be read back
+    // and hung on the nodes. Empty means the caller has no text to offer, and
+    // nothing is kept.
+    QString sourceText;
 };
 
 struct LowerResult {
@@ -38,6 +43,11 @@ struct LowerResult {
     // result into an existing chain.
     QString entryNode;
     QString exitNode;
+
+    // Blank lines and comments the author left between the last statement and
+    // the end of the body. The caller owns the closing brace, so it is the one
+    // that has to put them back.
+    QString endTrivia;
 
     QStringList notes;     // what fell back to Raw, and why
     int statementsLowered = 0;

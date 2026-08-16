@@ -28,8 +28,27 @@ struct ScriptEntry {
     QJsonObject extra;
 };
 
+// What shape of .sdzn this build writes.
+//
+//   1  the shape the Electron build wrote, and every build up to the one that
+//      taught a node to carry the indentation, blank lines and comments a
+//      method was written with
+//   2  fmt.base, fmt.unit, fmt.eol and the trivia.* keys on nodes
+//
+// A file with no version field is version 1: nothing before this wrote one.
+// That direction is safe: a v1 file has no layout keys, and every body
+// regenerates the way the build that wrote it regenerated them. The other
+// direction is the one that costs an author their formatting, and it is why the
+// field exists at all: a v2 file opened by a v1 build comes back with tab
+// indentation and no comments, and until there is a number in the file nothing
+// can tell the user that is about to happen.
+constexpr int kProjectFormatVersion = 2;
+
 struct Project {
     QString name = QStringLiteral("Untitled");
+    // The version the file claimed, kept so saving never quietly relabels a
+    // file written by a newer build as one of ours.
+    int formatVersion = kProjectFormatVersion;
     QStringList folders;
     QVector<ScriptEntry> scripts;
     QString activeId;

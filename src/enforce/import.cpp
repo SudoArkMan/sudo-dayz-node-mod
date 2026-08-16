@@ -666,6 +666,92 @@ QString bodyText(const QString &src, int open, int close)
     return body;
 }
 
+// ------------------------------------------------------------ body formatting
+
+// The indentation a body was written with. `base` is what stands in front of a
+// statement at the top of it and `unit` is what one more level adds. The
+// generator writes two tabs and one tab; every body written any other way comes
+// back reformatted unless the graph carries these two strings.
+struct BodyFormat {
+    QString base = QStringLiteral("\t\t");
+    QString unit = QStringLiteral("\t");
+    // Always "\n" as things stand, whatever the file on disk uses:
+    // importEnforceText removes every carriage return before any of this runs,
+    // so nothing here has ever seen one. Read and carried anyway, because the
+    // day that normalisation goes the answer has to come from the body rather
+    // than from a constant, and because a body that did arrive with CRLF
+    // endings would otherwise come back with two kinds in it.
+    QString eol = QStringLiteral("\n");
+};
+
+// The whitespace between the start of a line and `at`. False when something
+// other than whitespace sits in front of it, which is a statement sharing a
+// line with the one before it.
+bool leadBefore(const QString &text, int at, QString *lead)
+{
+    if (at < 0 || at > text.size()) return false;
+    int from = at > 0 ? text.lastIndexOf(Newline, at - 1) : -1;
+    from = from < 0 ? 0 : from + 1;
+    *lead = text.mid(from, at - from);
+    for (const QChar c : *lead)
+        if (c != Space && c != QLatin1Char('\t')) return false;
+    return true;
+}
+
+BodyFormat readBodyFormat(const QString &text, const std::vector<StmtPtr> &stmts)
+{
+    BodyFormat f;
+    // A body whose lines do not all end the same way has no single answer, and
+    // there is nothing to gain from guessing carefully: the invented lines take
+    // whichever ending the body mostly uses, every line that came out of the
+    // source keeps its own, and the method is regenerated and compared against
+    // the text it was read from before any of it is accepted. A wrong answer
+    // therefore costs a conversion and never a byte of the author's file.
+    f.eol = nodefmt::eolOf(text);
+    // The first statement of the body sits at the top level, so what stands in
+    // front of it is the base every deeper level is measured from.
+    bool haveBase = false;
+    for (const StmtPtr &s : stmts) {
+        QString lead;
+        if (!s || s->srcStart < 0 || !leadBefore(text, s->srcStart, &lead)) continue;
+        f.base = lead;
+        haveBase = true;
+        break;
+    }
+    if (!haveBase) return f;
+
+    // One level in. Most real bodies never show a second level at all, in which
+    // case the unit is not observable and the default stands: it is only ever
+    // written out again if the user nests something new.
+    QString unit;
+    const auto consider = [&](const Stmt *inner) {
+        QString lead;
+        if (!inner || inner->srcStart < 0 || !leadBefore(text, inner->srcStart, &lead)) return;
+        if (!lead.startsWith(f.base) || lead.size() <= f.base.size()) return;
+        const QString step = lead.mid(f.base.size());
+        if (unit.isEmpty() || step.size() < unit.size()) unit = step;
+    };
+    for (const StmtPtr &s : stmts) {
+        if (!s) continue;
+        for (const StmtPtr &inner : s->body) consider(inner.get());
+        for (const StmtPtr &inner : s->elseBody) consider(inner.get());
+    }
+    if (!unit.isEmpty()) f.unit = unit;
+    return f;
+}
+
+// Writes the format onto the node that owns the method, and only where it
+// differs from what the generator would write anyway, so a project the user
+// authored keeps no keys it has no use for.
+void applyBodyFormat(GraphNode *n, const BodyFormat &f, const QString &endTrivia)
+{
+    if (!n) return;
+    if (f.base != QLatin1String("\t\t")) n->opts.insert(nodefmt::keyBase(), f.base);
+    if (f.unit != QLatin1String("\t")) n->opts.insert(nodefmt::keyUnit(), f.unit);
+    if (f.eol != QLatin1String("\n")) n->opts.insert(nodefmt::keyEol(), f.eol);
+    if (!endTrivia.isEmpty()) n->opts.insert(nodefmt::keyEnd(), endTrivia);
+}
+
 // The catalogue event this method overrides, or an empty key.
 QString eventKeyFor(const Catalog &cat, const QString &selfClass, const QString &name)
 {
@@ -786,9 +872,9 @@ struct LoweredBody {
 // than done here because the same statements are lowered more than once, as an
 // event and as a plain function, and parsing a file four times over is most of
 // what opening it costs.
-LoweredBody lowerBody(const ParseResult &parsed, const Catalog &cat, const Builtins &builtins,
-                      const Graph &shell, const Project &project, const QString &selfClass,
-                      const QHash<QString, QString> &locals)
+LoweredBody lowerBody(const ParseResult &parsed, const QString &text, const Catalog &cat,
+                      const Builtins &builtins, const Graph &shell, const Project &project,
+                      const QString &selfClass, const QHash<QString, QString> &locals)
 {
     LoweredBody out;
     // Unbalanced braces and the like: the text is the only thing that still
@@ -797,6 +883,9 @@ LoweredBody lowerBody(const ParseResult &parsed, const Catalog &cat, const Built
     LowerOptions opts;
     opts.selfClass = selfClass;
     opts.knownLocals = locals;
+    // The statements carry offsets into this, which is how the blank lines and
+    // the comments between them are read back.
+    opts.sourceText = text;
     out.result = lowerToNodes(parsed.statements, cat, builtins, shell, project, opts);
     out.usable = !out.result.nodes.isEmpty() && !out.result.entryNode.isEmpty();
     return out;
@@ -915,8 +1004,8 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
 
         // ---- the constructor, as the lifecycle node that owns that moment
         if (!tookNodes && fn.isCtor && ctorSlotOpen && fn.params.isEmpty()) {
-            const LoweredBody low = lowerBody(counted, cat, builtins, shell, project, selfClass,
-                                              locals);
+            const LoweredBody low = lowerBody(counted, body, cat, builtins, shell, project,
+                                              selfClass, locals);
             if (low.usable) {
                 MethodPlan plan;
                 GraphNode begin;
@@ -924,6 +1013,8 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
                 begin.kind = NodeKind::Builtin;
                 begin.ref = bi::Begin;
                 begin.opts.insert(QStringLiteral("when"), QStringLiteral("construct"));
+                applyBodyFormat(&begin, readBodyFormat(body, counted.statements),
+                                low.result.endTrivia);
                 plan.nodes.append(begin);
                 for (const GraphNode &n : low.result.nodes) plan.nodes.append(n);
                 for (const GraphEdge &e : low.result.edges) plan.edges.append(e);
@@ -970,8 +1061,9 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
                 QHash<QString, QString> eventLocals;
                 for (const MethodSig::Param &p : sig.params)
                     eventLocals.insert(p.name, p.type);
-                const LoweredBody low = lowerBody(parsed, cat, builtins, shell, project, selfClass,
-                                                  eventLocals);
+                const QString inner = callsSuper ? lines.join(Newline) : body;
+                const LoweredBody low = lowerBody(parsed, inner, cat, builtins, shell, project,
+                                                  selfClass, eventLocals);
 
                 MethodPlan plan;
                 GraphNode event;
@@ -979,6 +1071,11 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
                 event.kind = NodeKind::Event;
                 event.ref = eventKey;
                 if (!callsSuper) event.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+                // The super call the node writes for itself sits at the same
+                // indent as the rest of the body, so the format is read off the
+                // text the chain was lowered from either way.
+                applyBodyFormat(&event, readBodyFormat(inner, parsed.statements),
+                                low.result.endTrivia);
                 plan.nodes.append(event);
                 if (low.usable) {
                     for (const GraphNode &n : low.result.nodes) plan.nodes.append(n);
@@ -1005,8 +1102,8 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
 
         // ---- anything else, as a declared function with a body of nodes
         if (!tookNodes && !fn.isDtor) {
-            const LoweredBody low = lowerBody(counted, cat, builtins, shell, project, selfClass,
-                                              locals);
+            const LoweredBody low = lowerBody(counted, body, cat, builtins, shell, project,
+                                              selfClass, locals);
             if (low.usable) {
                 MethodPlan plan = asText;
                 plan.fn.rawBody.clear();
@@ -1015,6 +1112,8 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
                 entry.id = QStringLiteral("n_fn%1").arg(index);
                 entry.kind = NodeKind::Event;
                 entry.ref = QStringLiteral("fn.entry.") + plan.fn.id;
+                applyBodyFormat(&entry, readBodyFormat(body, counted.statements),
+                                low.result.endTrivia);
                 plan.nodes.append(entry);
                 for (const GraphNode &n : low.result.nodes) plan.nodes.append(n);
                 for (const GraphEdge &e : low.result.edges) plan.edges.append(e);

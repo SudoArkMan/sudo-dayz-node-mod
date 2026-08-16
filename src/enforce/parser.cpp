@@ -452,25 +452,41 @@ private:
         return s;
     }
 
+    // Character offsets of a statement, from the tokens it was built out of.
+    // The gap between one statement's end and the next one's start is the
+    // author's blank lines and comments, which is why they are recorded.
+    void markSpan(Stmt *s, int fromTok, int toTok) const
+    {
+        if (!s || fromTok < 0 || fromTok >= m_toks.size()) return;
+        const int last = qMin(toTok, m_toks.size()) - 1;
+        if (last < fromTok) return;
+        s->srcStart = m_toks.at(fromTok).start;
+        s->srcEnd = m_toks.at(last).start + m_toks.at(last).length;
+    }
+
     // One statement, with the whole recovery path attached. Returns null only
     // when the token was a stray `;`.
     StmtPtr parseStatementSafely()
     {
         if (accept(";")) return nullptr;
         const int start = m_pos;
+        StmtPtr made;
         try {
-            StmtPtr s = parseStatement();
-            if (s) return s;
+            made = parseStatement();
         } catch (const ParseFail &f) {
             m_pos = start;
             skipStatement();
             if (m_pos <= start) m_pos = start + 1; // never stall on one token
-            return makeRaw(start, m_pos, f.why);
+            made = makeRaw(start, m_pos, f.why);
         }
-        m_pos = start;
-        skipStatement();
-        if (m_pos <= start) m_pos = start + 1;
-        return makeRaw(start, m_pos, QStringLiteral("statement not recognised"));
+        if (!made) {
+            m_pos = start;
+            skipStatement();
+            if (m_pos <= start) m_pos = start + 1;
+            made = makeRaw(start, m_pos, QStringLiteral("statement not recognised"));
+        }
+        markSpan(made.get(), start, m_pos);
+        return made;
     }
 
     // Statements until `}` (when nested) or end of input.
@@ -498,10 +514,19 @@ private:
     // The body of an if/for/while/foreach. A braced body is spliced in
     // directly: wrapping it in a Block would add a brace level on every
     // parse-print round trip.
-    std::vector<StmtPtr> parseControlBody()
+    // `openAt` and `closeAt` come back as the inside edges of the braces, so a
+    // caller can read the gap above the first statement and the one under the
+    // last. A body written without braces has neither, and gets -1.
+    std::vector<StmtPtr> parseControlBody(int *openAt = nullptr, int *closeAt = nullptr)
     {
-        if (accept("{")) {
+        if (openAt) *openAt = -1;
+        if (closeAt) *closeAt = -1;
+        if (at("{")) {
+            const int afterOpen = cur().start + cur().length;
+            m_pos++;
             std::vector<StmtPtr> body = parseSequence(true);
+            if (openAt) *openAt = afterOpen;
+            if (closeAt && at("}")) *closeAt = cur().start;
             expect("}", "to close the block");
             return body;
         }
@@ -530,11 +555,14 @@ private:
         }
 
         if (at("{")) {
+            const int afterOpen = cur().start + cur().length;
             m_pos++;
             StmtPtr s = makeStmt(StmtKind::Block, ln);
+            s->bodyStart = afterOpen;
             m_depth++;
             s->body = parseSequence(true);
             m_depth--;
+            if (at("}")) s->bodyEnd = cur().start;
             expect("}", "to close the block");
             return s;
         }
@@ -597,9 +625,9 @@ private:
         s->expr = parseExpression();
         expect(")", "after the condition");
         m_depth++;
-        s->body = parseControlBody();
+        s->body = parseControlBody(&s->bodyStart, &s->bodyEnd);
         if (accept("else")) {
-            s->elseBody = parseControlBody();
+            s->elseBody = parseControlBody(&s->elseStart, &s->elseEnd);
             // An else whose body is empty still has to leave something behind,
             // or printing the tree drops the branch and changes the code.
             if (s->elseBody.empty()) s->elseBody.push_back(makeStmt(StmtKind::Block, line()));
@@ -617,7 +645,7 @@ private:
         s->expr = parseExpression();
         expect(")", "after the condition");
         m_depth++;
-        s->body = parseControlBody();
+        s->body = parseControlBody(&s->bodyStart, &s->bodyEnd);
         m_depth--;
         return s;
     }
@@ -645,7 +673,7 @@ private:
         expect(")", "after the loop step");
 
         m_depth++;
-        s->body = parseControlBody();
+        s->body = parseControlBody(&s->bodyStart, &s->bodyEnd);
         m_depth--;
         return s;
     }
@@ -683,7 +711,7 @@ private:
         s->eachCollection = parseExpression();
         expect(")", "after the collection");
         m_depth++;
-        s->body = parseControlBody();
+        s->body = parseControlBody(&s->bodyStart, &s->bodyEnd);
         m_depth--;
         return s;
     }

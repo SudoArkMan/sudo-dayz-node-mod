@@ -63,6 +63,10 @@ constexpr double kTagGap = 4.0;
 constexpr int kTagFillAlpha = 46;
 // A source marker, not a name field. Past this the header belongs to the title.
 constexpr int kTagChars = 5;
+// The strip above the header where a node shows the author's own comment. A
+// comment the graph holds and the canvas never draws would be the tool quietly
+// owning someone's words, so it is drawn wherever the node is.
+constexpr double kNoteHeight = 9.5;
 // How far outside a value field a press still counts, in SCREEN pixels. The
 // field is nine scene units tall, so measured in scene units the target shrinks
 // with the zoom and lands at three pixels by the time a long graph fits on
@@ -216,6 +220,25 @@ QFont smallFont() { return theme::uiFont(7); }
 // on the header as a pair rather than as one loud one and one quiet one.
 QFont tagFont() { return theme::uiFont(6, true); }
 
+// What this node carries of the author's own words, in one line. Blank lines
+// are left out: they are invisible in the file, and "2 blank lines" written on
+// a node is noise rather than information. The Details panel is where the whole
+// text is edited; this is the reminder that there is something to edit.
+QString noteOf(const GraphNode &n)
+{
+    QStringList comments;
+    const QStringList keys = {nodefmt::keyBefore(), nodefmt::keyEnd(),
+                              nodefmt::keyEndElse()};
+    for (const QString &key : keys)
+        for (const QString &l : nodefmt::lines(n.opts.value(key)))
+            if (!nodefmt::isIndentText(l)) comments << l.trimmed();
+    const QString trailing = n.opts.value(nodefmt::keyTrailing()).trimmed();
+    if (!trailing.isEmpty()) comments << trailing;
+    if (comments.isEmpty()) return {};
+    if (comments.size() == 1) return comments.first();
+    return comments.first() + QStringLiteral("   +%1 more").arg(comments.size() - 1);
+}
+
 Severity worstOf(const QVector<Diagnostic> &diags, bool *any)
 {
     Severity worst = Severity::Info;
@@ -301,10 +324,12 @@ void NodeItem::refresh()
         m_height = headerHeight + padding * 2;
         m_sourceTag.clear();
         m_sourceColor = QColor();
+        m_note.clear();
         update();
         return;
     }
 
+    m_note = noteOf(*n);
     resolveSource(*n);
     m_def = m_doc->defForNode(*n);
     if (m_def.valid) {
@@ -733,8 +758,11 @@ QRectF NodeItem::bodyRect() const
 QRectF NodeItem::boundingRect() const
 {
     // Pins straddle both edges and the selection outline sits outside the body.
-    // Wide enough to contain shape()'s pin caps, which Qt requires.
-    return QRectF(-kPinGrab - 1.0, -4.0, m_width + kPinGrab * 2.0 + 2.0, m_height + 8.0);
+    // Wide enough to contain shape()'s pin caps, which Qt requires. The note
+    // strip sits above the header, outside the body but inside the bounds.
+    const double above = 4.0 + (m_note.isEmpty() ? 0.0 : kNoteHeight);
+    return QRectF(-kPinGrab - 1.0, -above, m_width + kPinGrab * 2.0 + 2.0,
+                  m_height + above + 4.0);
 }
 
 QPainterPath NodeItem::shape() const
@@ -889,6 +917,16 @@ void NodeItem::paint(QPainter *p, const QStyleOptionGraphicsItem *opt, QWidget *
     const Graph *g = m_doc ? m_doc->activeGraph() : nullptr;
     const GraphNode *node = g ? g->node(m_nodeId) : nullptr;
     const QRectF body(0, 0, m_width, m_height);
+
+    if (!m_note.isEmpty()) {
+        const QFont nf = smallFont();
+        const QFontMetricsF nm(nf);
+        p->setFont(nf);
+        p->setPen(theme::syntax::comment());
+        const QRectF strip(0.0, -kNoteHeight, m_width, kNoteHeight);
+        p->drawText(strip, Qt::AlignLeft | Qt::AlignVCenter,
+                    nm.elidedText(m_note, Qt::ElideRight, m_width));
+    }
 
     QPainterPath bodyPath;
     bodyPath.addRoundedRect(body, radius, radius);

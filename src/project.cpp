@@ -46,6 +46,27 @@ void repairIds(QVector<T> &items, const QString &prefix, const char *what,
     }
 }
 
+// Layout fields hold indentation, blank lines and comments. The generator
+// writes what they hold straight into the user's .c, so a value that is not one
+// of those is script hiding in a field nothing looks at. The generator checks
+// again on the way out; this is the earlier and louder place, because the user
+// is still looking at the dialog that opened the file rather than at a mod that
+// has already been built.
+void scrubLayoutKeys(Graph &g, const QString &where)
+{
+    for (GraphNode &n : g.nodes) {
+        QStringList bad;
+        for (auto it = n.opts.constBegin(); it != n.opts.constEnd(); ++it)
+            if (!nodefmt::isValidValue(it.key(), it.value())) bad << it.key();
+        for (const QString &key : bad) {
+            qWarning("sdzn: node \"%s\" in %s carries something under \"%s\" that is not "
+                     "layout; it is dropped rather than written into the script",
+                     qPrintable(n.id), qPrintable(where), qPrintable(key));
+            n.opts.remove(key);
+        }
+    }
+}
+
 void repairGraph(Graph &g, const QString &where)
 {
     repairIds(g.nodes, QStringLiteral("n"), "a node", where);
@@ -73,6 +94,8 @@ void repairGraph(Graph &g, const QString &where)
                  qPrintable(endName(e.from)), qPrintable(endName(e.to)));
         g.edges.removeAt(i);
     }
+
+    scrubLayoutKeys(g, where);
 }
 
 // The .sdzn shape of one dependency. Only scriptRoot is rewritten on the way
@@ -214,6 +237,18 @@ bool loadProject(const QString &path, Project &out, QString *error)
     Project p;
     p.path = path;
     p.name = root.value("name").toString(QFileInfo(path).completeBaseName());
+    // No field means version 1: nothing written before this build wrote one,
+    // and a v1 file has no layout keys to misread. A number this build does not
+    // know is a file from a later one, which is the direction that loses work,
+    // so it is said out loud and the number is kept rather than overwritten.
+    const QJsonValue versionValue = root.value("formatVersion");
+    p.formatVersion = versionValue.isDouble() ? versionValue.toInt() : 1;
+    if (p.formatVersion < 1) p.formatVersion = 1;
+    if (p.formatVersion > kProjectFormatVersion)
+        qWarning("sdzn: %s was written by a newer build (format %d, this one reads %d). "
+                 "Anything it holds that this build has no field for is carried through "
+                 "untouched, but nothing here can act on it.",
+                 qPrintable(file), p.formatVersion, kProjectFormatVersion);
     for (const QJsonValue &v : root.value("folders").toArray())
         p.folders << v.toString();
     const QJsonArray scriptArray = scriptsValue.toArray();
@@ -288,8 +323,9 @@ bool loadProject(const QString &path, Project &out, QString *error)
     }
 
     for (auto it = root.begin(); it != root.end(); ++it) {
-        static const QStringList known = {"name", "folders", "scripts", "activeId",
-                                          "modRoot", "modPrefix", "dependencies"};
+        static const QStringList known = {"name",    "folders",   "scripts",      "activeId",
+                                          "modRoot", "modPrefix", "dependencies",
+                                          "formatVersion"};
         if (!known.contains(it.key())) p.extra.insert(it.key(), it.value());
     }
     if (p.scripts.isEmpty()) {
@@ -313,6 +349,12 @@ bool loadProject(const QString &path, Project &out, QString *error)
 bool saveProject(const Project &project, const QString &path, QString *error)
 {
     QJsonObject root;
+    // Written first so it is the first thing anyone reading the file sees, and
+    // never below what the file already claimed: this build has just written
+    // every v2 field, so a v1 file becomes v2, and a file from a later build
+    // keeps its own number rather than being relabelled as one this build could
+    // have produced.
+    root.insert("formatVersion", qMax(project.formatVersion, kProjectFormatVersion));
     root.insert("name", project.name);
     QJsonArray folders;
     for (const QString &f : project.folders) folders.append(f);

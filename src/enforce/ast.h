@@ -111,6 +111,21 @@ struct Stmt {
 
     QString text;          // Raw statements, verbatim
     int line = 0;
+
+    // Where this statement sits in the text it was parsed from: the first
+    // character of its first token, and one past its last. The gap between one
+    // statement's end and the next one's start is the author's blank lines and
+    // comments, and reading it here is what saves the parser from having to
+    // keep comment tokens.
+    int srcStart = -1;
+    int srcEnd = -1;
+    // The inside of a braced block: just after the `{`, and at the `}`. Both
+    // stay -1 when the body was written without braces, since there is then no
+    // gap to read.
+    int bodyStart = -1;
+    int bodyEnd = -1;
+    int elseStart = -1;
+    int elseEnd = -1;
 };
 
 // Result of parsing a block of statements.

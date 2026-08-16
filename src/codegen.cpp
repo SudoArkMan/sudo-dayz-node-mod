@@ -27,6 +27,19 @@ QString ind(int n) { return QString(n, QLatin1Char('\t')); }
 
 const QChar Tab = QLatin1Char('\t');
 
+// How a method body was indented. The generator writes two tabs in front of a
+// statement at the top of a body and one more for every level under it; an
+// imported method carries what its author wrote instead, or opening that file
+// and saving it reformats every line of it.
+struct BodyStyle {
+    QString base = QStringLiteral("\t\t");
+    QString unit = QStringLiteral("\t");
+    // The ending the author's own lines carry. The generator invents headers,
+    // braces and blank lines that have no source line behind them, so without
+    // this a body read out of a CRLF file comes back with both kinds in it.
+    bool crlf = false;
+};
+
 // Generated statements plus the node behind each one.
 //
 // Ownership has to be recorded while the text is built, not worked out from
@@ -77,6 +90,27 @@ void flatten(Emitted &e)
     e = out;
 }
 
+// The ending the author's own lines already carry, put on the lines the
+// generator invented for itself. A line that ends with a carriage return came
+// out of the source with one and is left alone, and nothing is ever taken off:
+// a body whose two endings disagree comes back as mixed as it went in, and the
+// comparison the caller runs against the source is what turns it down.
+//
+// Called on a method body only, since the class header and the braces around a
+// method are the file's own. The last line is left alone for the same reason:
+// what ends it is the line after it, which is the brace this method closes
+// with, and nothing inside the body says how that line was written. A body
+// whose source did end its last line with a carriage return carries it already,
+// because the run between the last statement and the closing brace is read back
+// as that statement's trailing text.
+void applyEol(Emitted &e, const BodyStyle &style)
+{
+    if (!style.crlf) return;
+    flatten(e);
+    for (int i = 0; i + 1 < e.lines.size(); ++i)
+        if (!e.lines.at(i).endsWith(QLatin1Char('\r'))) e.lines[i] += QLatin1Char('\r');
+}
+
 // Recursion and size limits. A graph is user data, so every walk over it has to
 // terminate on a malformed one: a data cycle, an exec cycle and plain nesting
 // depth all used to run the stack out and take the whole app down with the
@@ -125,7 +159,19 @@ struct Ctx {
     int tempReads = 0;
     // Diagnostics that must be reported once rather than once per traversal.
     QSet<QString> noted;
+
+    // Set for the length of one method, from the node that owns it.
+    BodyStyle style;
 };
+
+// Indentation for one level of nesting. Levels 0 and 1 are the file and the
+// class, which every shape writes the same way, so only what sits inside a
+// method body follows the style that body was written with.
+QString ind(const Ctx &ctx, int n)
+{
+    if (n < 2) return ind(n);
+    return ctx.style.base + ctx.style.unit.repeated(n - 2);
+}
 
 QString tempKey(const QString &nodeId, const QString &pinId)
 {
@@ -138,6 +184,72 @@ void note(Ctx &ctx, const QString &key, const QString &text)
     if (ctx.noted.contains(key)) return;
     ctx.noted.insert(key);
     ctx.warnings.append(text);
+}
+
+// The gate on everything the layout fields put into a .c file.
+//
+// The importer is not the only writer any more. A .sdzn is a file anyone can
+// hand you, and the mod browser has made opening someone else's work an
+// ordinary thing to do, so a trivia.before holding `GetGame().RequestExit(0);`
+// would be written into the user's own mod as code. The capture side already
+// refuses anything but blank lines and comments; this is the same rule applied
+// where the text leaves the graph.
+//
+// What an invalid value does: it is left out, and the reason goes in the
+// Warnings list under the node that carries it. Writing it is not an option and
+// stopping the whole file over it would take a working script away from
+// somebody whose only fault was opening a mod, so the file comes back looking
+// reformatted and says exactly why.
+bool layoutOk(Ctx &ctx, const GraphNode &n, const QString &key, const QString &value)
+{
+    if (nodefmt::isValidValue(key, value)) return true;
+    note(ctx, QStringLiteral("layout:") + n.id + QLatin1Char(':') + key,
+         QStringLiteral("Node %1 carries something under \"%2\" that is not layout: that field "
+                        "holds indentation, blank lines and comments, and nothing else is "
+                        "written into the script. Whatever wrote this project file put code "
+                        "there.")
+             .arg(n.id, key));
+    return false;
+}
+
+// The style a method-owning node carries: an event node, a function's entry
+// node, or the Begin node that stands for the constructor.
+BodyStyle styleOf(Ctx &ctx, const GraphNode *n)
+{
+    BodyStyle s;
+    if (!n) return s;
+    if (n->opts.contains(nodefmt::keyBase())) {
+        const QString base = n->opts.value(nodefmt::keyBase());
+        if (layoutOk(ctx, *n, nodefmt::keyBase(), base)) s.base = base;
+    }
+    // An empty unit would put every nesting level in the same column, which is
+    // not a body anyone can read once they start editing it.
+    const QString unit = n->opts.value(nodefmt::keyUnit());
+    if (!unit.isEmpty() && layoutOk(ctx, *n, nodefmt::keyUnit(), unit)) s.unit = unit;
+    const QString eol = n->opts.value(nodefmt::keyEol());
+    if (!eol.isEmpty() && layoutOk(ctx, *n, nodefmt::keyEol(), eol))
+        s.crlf = eol == QLatin1String("\r\n");
+    return s;
+}
+
+// The author's blank lines and comments, put back at the depth they belong to.
+// They are stored without the indentation of the block they sat in, so a node
+// that moves takes its note with it and the note lands in the right column.
+// A blank line is written as it stands: there is no indentation to speak of on
+// a line with nothing on it, and giving it some leaves trailing spaces behind.
+//
+// They carry no owner. firstLineOwnedBy returns the first line an id owns, so
+// tagging a comment with the node below it would make "reveal this node" land
+// on the comment instead of on the statement.
+QStringList triviaFor(Ctx &ctx, const GraphNode &n, const QString &key, int depth)
+{
+    QStringList out;
+    const QString stored = n.opts.value(key);
+    if (stored.isEmpty() || !layoutOk(ctx, n, key, stored)) return out;
+    const QString pad = ind(ctx, depth);
+    for (const QString &l : nodefmt::lines(stored))
+        out << (nodefmt::isBlankLine(l) ? l : pad + l);
+    return out;
 }
 
 // A graph can be wired so that the same tail is reachable along an exponential
@@ -391,18 +503,31 @@ Emitted emitChain(Ctx &ctx, const QVector<const GraphNode *> &chain, int depth)
                      + QStringLiteral("\" is part of an execution loop: the chain runs back "
                                       "into a node that is already running. The loop is cut in "
                                       "the generated code; use For Loop or While instead."));
-            out.add(ind(depth) + QStringLiteral("// cycle cut: ") + title
+            out.add(ind(ctx, depth) + QStringLiteral("// cycle cut: ") + title
                         + QStringLiteral(" already runs above this point"),
                     n->id);
             break;
         }
         ctx.emitting.insert(n->id);
-        const Emitted produced = emitNode(ctx, *n, depth);
+        Emitted produced = emitNode(ctx, *n, depth);
         ctx.emitting.remove(n->id);
-        out.add(produced);
+        // What the author wrote at the end of this statement's own line. A node
+        // that produced nothing has no line to put it back on, and the body it
+        // came from is then refused rather than regenerated without it. It goes
+        // through the same gate as the rest: this one lands behind code that is
+        // already on the line, so it is the easiest of them to read past.
+        const QString trailing = n->opts.value(nodefmt::keyTrailing());
+        if (!trailing.isEmpty() && !produced.lines.isEmpty()
+            && layoutOk(ctx, *n, nodefmt::keyTrailing(), trailing))
+            produced.lines[0] += trailing;
+        Emitted withNotes;
+        for (const QString &l : triviaFor(ctx, *n, nodefmt::keyBefore(), depth))
+            withNotes.add(l);
+        withNotes.add(produced);
+        out.add(withNotes);
         // Counted per level so the cost of copying a sub-chain into each of its
         // parents is what the budget actually measures.
-        ctx.lines += produced.size();
+        ctx.lines += withNotes.size();
         if (ctx.lines > kMaxEmittedLines && !ctx.aborted) {
             abortGeneration(ctx);
             break;
@@ -428,7 +553,7 @@ Emitted subChain(Ctx &ctx, const GraphNode &node, const QString &pin, int depth)
              QStringLiteral("The graph nests more than %1 levels deep, which the generator "
                             "cannot walk. Split the deepest part into a function and call it.")
                  .arg(kMaxEmitDepth));
-        return ownedBy(node.id, {ind(depth)
+        return ownedBy(node.id, {ind(ctx, depth)
                                  + QStringLiteral("// nesting is too deep to generate "
                                                   "(see Warnings)")});
     }
@@ -632,7 +757,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
         return {};
     }
 
-    const QString pad = ind(depth);
+    const QString pad = ind(ctx, depth);
 
     // If anything feeding this node could not be produced, emitting the call
     // would just be a null dereference dressed up as working code. Only values
@@ -683,11 +808,14 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
         lines.add(pad + QStringLiteral("if (") + cond + QLatin1Char(')'), node.id);
         lines.add(pad + QLatin1Char('{'), node.id);
         lines.add(t);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
         lines.add(pad + QLatin1Char('}'), node.id);
         if (!f.isEmpty()) {
             lines.add(pad + QStringLiteral("else"), node.id);
             lines.add(pad + QLatin1Char('{'), node.id);
             lines.add(f);
+            for (const QString &l : triviaFor(ctx, node, nodefmt::keyEndElse(), depth + 1))
+                lines.add(l);
             lines.add(pad + QLatin1Char('}'), node.id);
         }
         return lines;
@@ -734,6 +862,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                   node.id);
         lines.add(pad + QLatin1Char('{'), node.id);
         lines.add(body);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
         lines.add(pad + QLatin1Char('}'), node.id);
         lines.add(subChain(ctx, node, QStringLiteral("done"), depth));
         return lines;
@@ -767,6 +896,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                   node.id);
         lines.add(pad + QLatin1Char('{'), node.id);
         lines.add(body);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
         lines.add(pad + QLatin1Char('}'), node.id);
         lines.add(subChain(ctx, node, QStringLiteral("done"), depth));
         return lines;
@@ -780,6 +910,7 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                   node.id);
         lines.add(pad + QLatin1Char('{'), node.id);
         lines.add(body);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
         lines.add(pad + QLatin1Char('}'), node.id);
         lines.add(subChain(ctx, node, QStringLiteral("done"), depth));
         return lines;
@@ -830,7 +961,12 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
     if (node.ref == QLatin1String("bi.raw")) {
         const QString code = node.opts.value(QStringLiteral("code"));
         QStringList lines;
-        for (const QString &l : code.split(QLatin1Char('\n'))) lines << pad + l;
+        // A line with nothing on it takes no indent, the same rule the author's
+        // own blank lines follow. Padding one puts whitespace at the end of a
+        // line nobody typed any into, and it is the difference between a block
+        // that converts to nodes and one that comes back looking edited.
+        for (const QString &l : code.split(QLatin1Char('\n')))
+            lines << (nodefmt::isBlankLine(l) ? l : pad + l);
         return ownedBy(node.id, lines);
     }
 
@@ -862,11 +998,14 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
                   node.id);
         lines.add(pad + QLatin1Char('{'), node.id);
         lines.add(ok);
+        for (const QString &l : triviaFor(ctx, node, nodefmt::keyEnd(), depth + 1)) lines.add(l);
         lines.add(pad + QLatin1Char('}'), node.id);
         if (!bad.isEmpty()) {
             lines.add(pad + QStringLiteral("else"), node.id);
             lines.add(pad + QLatin1Char('{'), node.id);
             lines.add(bad);
+            for (const QString &l : triviaFor(ctx, node, nodefmt::keyEndElse(), depth + 1))
+                lines.add(l);
             lines.add(pad + QLatin1Char('}'), node.id);
         }
         return lines;
@@ -1475,13 +1614,13 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     const auto writeLines = [&](const QString &ctxName) {
         QStringList out;
         for (const GraphVariable *v : persisted)
-            out << ind(2) + ctxName + QStringLiteral(".Write(") + v->name + QStringLiteral(");");
+            out << ind(ctx, 2) + ctxName + QStringLiteral(".Write(") + v->name + QStringLiteral(");");
         return out;
     };
     const auto readLines = [&](const QString &ctxName) {
         QStringList out;
         for (const GraphVariable *v : persisted)
-            out << ind(2) + QStringLiteral("if (!") + ctxName + QStringLiteral(".Read(") + v->name
+            out << ind(ctx, 2) + QStringLiteral("if (!") + ctxName + QStringLiteral(".Read(") + v->name
                        + QStringLiteral(")) return false;");
         return out;
     };
@@ -1505,6 +1644,9 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     for (const GraphNode *ev : eventNodes) {
         ctx.temps.clear();
         ctx.chainCache.clear();
+        // The node that puts this method in the file is the one that carries
+        // how its body was written.
+        ctx.style = styleOf(ctx, ev);
         ctx.temps.insert(tempKey(ev->id, QStringLiteral("self")), QStringLiteral("this"));
 
         LifecycleSig life;
@@ -1541,10 +1683,23 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         ctx.retType = isLife && life.ctor ? QStringLiteral("void") : sigRet;
 
         const Emitted body = emitChain(ctx, execChain(graph, ev->id, QStringLiteral("exec")), 2);
+        // Blank lines and comments between the last statement and the brace
+        // this method closes with.
+        Emitted endLines;
+        for (const QString &l : triviaFor(ctx, *ev, nodefmt::keyEnd(), 2)) endLines.add(l);
 
         if (isLife && life.ctor) {
-            // merged into the constructor further down, after sync registration
-            ctorFromGraph.add(body);
+            // merged into the constructor further down, after sync registration.
+            // The end lines come with it: this node writes no brace of its own,
+            // so leaving them here would drop what the author put above the one
+            // the constructor closes with.
+            Emitted ctorPart;
+            ctorPart.add(body);
+            ctorPart.add(endLines);
+            // The style belongs to this node, and the constructor it merges into
+            // is assembled after the loop has moved on to another one.
+            applyEol(ctorPart, ctx.style);
+            ctorFromGraph.add(ctorPart);
             continue;
         }
 
@@ -1602,47 +1757,54 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         // stay unowned even when they are merged into an event's method.
         Emitted lines;
         if (mergeSave) {
-            if (callSuper) lines.add(ind(2) + superInvoke + QLatin1Char(';'), ev->id);
+            if (callSuper) lines.add(ind(ctx, 2) + superInvoke + QLatin1Char(';'), ev->id);
             for (const QString &l : writeLines(ctxName)) lines.add(l);
             lines.add(body);
+            lines.add(endLines);
             persistSaveEmitted = true;
         } else if (mergeLoad) {
             if (callSuper)
-                lines.add(ind(2) + QStringLiteral("if (!") + superInvoke
+                lines.add(ind(ctx, 2) + QStringLiteral("if (!") + superInvoke
                               + QStringLiteral(") return false;"),
                           ev->id);
             for (const QString &l : readLines(ctxName)) lines.add(l);
             lines.add(body);
-            lines.add(ind(2) + QStringLiteral("return true;"), ev->id);
+            lines.add(endLines);
+            lines.add(ind(ctx, 2) + QStringLiteral("return true;"), ev->id);
             persistLoadEmitted = true;
         } else if (!callSuper) {
             lines = body;
+            lines.add(endLines);
         } else if (sigRet == QLatin1String("void")) {
-            lines.add(ind(2) + superInvoke + QLatin1Char(';'), ev->id);
+            lines.add(ind(ctx, 2) + superInvoke + QLatin1Char(';'), ev->id);
             lines.add(body);
+            lines.add(endLines);
         } else if (m.name == QLatin1String("OnStoreLoad") && sigRet == QLatin1String("bool")) {
             // A read context is a sequential stream: reading your own bytes
             // before the base has taken its own desynchronises it, and in DayZ
             // that means the item fails to load and is deleted.
-            lines.add(ind(2) + QStringLiteral("if (!") + superInvoke
+            lines.add(ind(ctx, 2) + QStringLiteral("if (!") + superInvoke
                           + QStringLiteral(") return false;"),
                       ev->id);
             lines.add(body);
-            lines.add(ind(2) + QStringLiteral("return true;"), ev->id);
+            lines.add(endLines);
+            lines.add(ind(ctx, 2) + QStringLiteral("return true;"), ev->id);
         } else {
             // Any other value-returning event: the base still has to run first,
             // and its result is what this method returns unless the graph
             // returns something of its own.
-            lines.add(ind(2) + sigRet + QStringLiteral(" superRet = ") + superInvoke
+            lines.add(ind(ctx, 2) + sigRet + QStringLiteral(" superRet = ") + superInvoke
                           + QLatin1Char(';'),
                       ev->id);
             lines.add(body);
-            lines.add(ind(2) + QStringLiteral("return superRet;"), ev->id);
+            lines.add(endLines);
+            lines.add(ind(ctx, 2) + QStringLiteral("return superRet;"), ev->id);
         }
         // An event with nothing chained off it used to join an empty list
         // between two newlines, which is a blank line inside the braces. Keeping
         // that line keeps the generated text identical.
         if (lines.isEmpty()) lines.add(QString(), ev->id);
+        applyEol(lines, ctx.style);
 
         Emitted block;
         block.add(ind(1) + (isOverride ? QStringLiteral("override ") : QString()) + sigRet
@@ -1697,6 +1859,7 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
             entry = &n;
             break;
         }
+        ctx.style = styleOf(ctx, entry);
         if (entry) {
             ctx.temps.insert(tempKey(entry->id, QStringLiteral("self")), QStringLiteral("this"));
             for (int i = 0; i < f.params.size(); ++i)
@@ -1713,18 +1876,28 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         // A function's entry node is what puts the method in the file, so it
         // owns the signature the same way an event node owns its override.
         const QString owner = entry ? entry->id : QString();
-        Emitted block;
-        block.add(ind(1) + head, owner);
-        block.add(ind(1) + QLatin1Char('{'), owner);
+        Emitted inner;
         if (body.isEmpty())
-            block.add(ind(2) + QStringLiteral("// place a Function ") + f.name
+            inner.add(ind(ctx, 2) + QStringLiteral("// place a Function ") + f.name
                           + QStringLiteral(" node and chain from it"),
                       owner);
         else
-            block.add(body);
+            inner.add(body);
+        if (entry)
+            for (const QString &l : triviaFor(ctx, *entry, nodefmt::keyEnd(), 2)) inner.add(l);
+        applyEol(inner, ctx.style);
+
+        Emitted block;
+        block.add(ind(1) + head, owner);
+        block.add(ind(1) + QLatin1Char('{'), owner);
+        block.add(inner);
         block.add(ind(1) + QLatin1Char('}'), owner);
         bodies.append(block);
     }
+
+    // Nothing below here is a method any author wrote, so the rest of the file
+    // is assembled with the generator's own indentation.
+    ctx.style = BodyStyle();
 
     // ------------------------------------------------------------- members
     QStringList members;

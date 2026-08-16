@@ -293,6 +293,55 @@ QString dedent(const QString &code)
     return lines.join(QLatin1Char('\n')).trimmed();
 }
 
+// A body as the generator would write it back into the file, with the
+// indentation the importer would have read off it hung on the node that owns
+// the method. Nothing here is normalised: whitespace is what is under test.
+struct Rendered {
+    QString text;
+    int nodes = 0;
+    int lowered = 0;
+};
+
+Rendered renderBody(const QString &body, const QString &indentBase, const QString &indentUnit,
+                    const Catalog &cat, const Builtins &builtins, const Project &project,
+                    const Graph &shell)
+{
+    Rendered r;
+    LowerOptions opts;
+    opts.selfClass = shell.baseClass;
+    opts.sourceText = body;
+    const LowerResult low = lowerEnforceCode(body, cat, builtins, shell, project, opts);
+    r.nodes = low.nodes.size();
+    r.lowered = low.statementsLowered;
+    if (low.nodes.isEmpty() || low.entryNode.isEmpty()) return r;
+
+    Graph g = shell;
+    GraphNode begin;
+    begin.id = QStringLiteral("evt");
+    begin.kind = NodeKind::Builtin;
+    begin.ref = bi::Begin;
+    begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+    begin.opts.insert(nodefmt::keyBase(), indentBase);
+    begin.opts.insert(nodefmt::keyUnit(), indentUnit);
+    // What the importer reads off the same body. The generator has no source
+    // line behind the headers and braces it invents, so a CRLF body comes back
+    // with two kinds of ending in it unless this is carried with the indent.
+    begin.opts.insert(nodefmt::keyEol(), nodefmt::eolOf(body));
+    // The method's closing brace belongs to the caller, so what the author left
+    // above it comes back on the node that writes that brace.
+    if (!low.endTrivia.isEmpty()) begin.opts.insert(nodefmt::keyEnd(), low.endTrivia);
+    g.nodes.append(begin);
+    for (const GraphNode &n : low.nodes) g.nodes.append(n);
+    for (const GraphEdge &e : low.edges) g.edges.append(e);
+    for (const GraphVariable &v : low.variables) g.variables.append(v);
+    g.edges.append({QStringLiteral("e_entry"),
+                    {begin.id, QStringLiteral("exec")},
+                    {low.entryNode, QStringLiteral("exec")},
+                    {}});
+    r.text = bodyOf(generateEnforce(g, cat, builtins, project).code);
+    return r;
+}
+
 struct Outcome {
     Match match = Match::Different;
     int lowered = 0;
@@ -522,6 +571,408 @@ int main(int argc, char *argv[])
                 out << "         in:  " << QString(code).replace('\n', "\\n") << Qt::endl;
                 out << "         out: " << QString(got).replace('\n', "\\n") << Qt::endl;
             }
+        }
+    }
+
+    // ------------------------------------------ the author's own formatting
+    // A graph has no field for indentation, blank lines or comments, and most
+    // of the bodies this tool used to refuse were refused for that alone. Each
+    // case here is a shape out of the corpus, and the check is the whole body
+    // character for character: whitespace is precisely what is under test, so a
+    // token comparison would pass while the file on disk was being rewritten.
+    out << Qt::endl << "the author's own formatting" << Qt::endl;
+    {
+        struct Layout {
+            const char *name;
+            const char *body;  // between the braces, as the author wrote it
+            const char *base;  // the indent the importer reads off it
+            const char *unit;
+            bool identical;    // false: the loss is visible, so the body stays text
+        };
+        const QVector<Layout> layouts = {
+            // What the generator already wrote, so nothing may move.
+            {"a body indented with tabs", "\t\tm_Count = 3;", "\t\t", "\t", true},
+            // 187 of the 413 indent-only refusals in the installed mods.
+            {"a body indented with four spaces",
+             "        if (m_Ready)\n        {\n            SetQuantity(1);\n        }",
+             "        ", "    ", true},
+            // 325 of those 413: the whole method written on one line. The space
+            // in front of the statement and the one behind it are both the
+            // author's, and both have to come back.
+            {"a body the author wrote on one line", " SetQuantity(1); ", " ", "\t", true},
+            {"a blank line between two statements",
+             "\t\tm_Count = 3;\n\n\t\tSetQuantity(1);", "\t\t", "\t", true},
+            {"a comment on a line of its own",
+             "\t\t// why this runs first\n\t\tm_Count = 3;", "\t\t", "\t", true},
+            {"a comment at the end of a statement's line",
+             "\t\tm_Count = 3; // and this one after", "\t\t", "\t", true},
+            {"a blank line before the closing brace", "\t\tm_Count = 3;\n", "\t\t", "\t", true},
+            {"a comment over more than one line",
+             "\t\t/* why this runs\n\t\t   first of all */\n\t\tm_Count = 3;", "\t\t", "\t", true},
+            {"a comment inside a branch, and a blank line above its brace",
+             "\t\tif (m_Ready)\n\t\t{\n\t\t\t// keep the count\n\t\t\tSetQuantity(1);\n\n\t\t}",
+             "\t\t", "\t", true},
+            // The one the diagnosis named: a local written once and read once
+            // becomes a wire, so the statement stops existing and the comment on
+            // it has no node to hang from. The body comes back without it, which
+            // is what makes the importer keep the text instead.
+            {"a comment on a statement the lowering turns into a wire",
+             "\t\tint total = m_Count + 1; // the running total\n\t\tSetQuantity(total);",
+             "\t\t", "\t", false},
+            // A comment after a closing brace belongs to the brace, not to the
+            // header four lines above it. Moving it there would be worse than
+            // dropping it, so it is dropped and the body stays text.
+            {"a comment after the brace that closes a branch",
+             "\t\tif (m_Ready)\n\t\t{\n\t\t\tSetQuantity(1);\n\t\t} // done", "\t\t", "\t", false},
+            {"a blank line inside a branch with nothing in it",
+             "\t\tif (m_Ready)\n\t\t{\n\n\t\t}", "\t\t", "\t", true},
+            // Vanilla and CF both write `#ifdef` and the odd comment hard against
+            // column 0 inside an indented body. Nothing is stored relative to a
+            // column the code around it does not use, so those bodies stay text
+            // rather than coming back re-indented.
+            {"a comment standing at its own column",
+             "\t\tif (m_Ready)\n\t\t{\n// flush left\n\t\t\tSetQuantity(1);\n\t\t}",
+             "\t\t", "\t", false},
+        };
+
+        // Three quarters of the installed mods are written with CRLF endings,
+        // and the app hands the importer those bytes as they are. Both tests
+        // that measure the corpus strip the carriage return first, so every
+        // shape above is checked again with the endings the app really sees.
+        for (const Layout &c : layouts) {
+            QString body = QString::fromUtf8(c.body);
+            if (!body.contains(QLatin1Char('\n'))) continue;
+            body.replace(QLatin1String("\n"), QLatin1String("\r\n"));
+            const Rendered r = renderBody(body, QString::fromUtf8(c.base),
+                                          QString::fromUtf8(c.unit), cat, builtins, project,
+                                          base);
+            const bool same = r.text == body;
+            check(same == c.identical && r.nodes > 0,
+                  QStringLiteral("%1, written with CRLF endings").arg(QString::fromUtf8(c.name)));
+            if (same != c.identical || r.nodes == 0) {
+                out << "         in:  " << QString(body).replace('\n', "\\n")
+                                                        .replace('\r', "\\r") << Qt::endl;
+                out << "         out: " << QString(r.text).replace('\n', "\\n")
+                                                          .replace('\r', "\\r") << Qt::endl;
+            }
+        }
+
+        for (const Layout &c : layouts) {
+            const QString body = QString::fromUtf8(c.body);
+            const Rendered r = renderBody(body, QString::fromUtf8(c.base),
+                                          QString::fromUtf8(c.unit), cat, builtins, project,
+                                          base);
+            const bool same = r.text == body;
+            check(same == c.identical && r.nodes > 0, QString::fromUtf8(c.name));
+            if (same != c.identical || r.nodes == 0) {
+                out << "         in:  " << QString(body).replace('\n', "\\n") << Qt::endl;
+                out << "         out: " << QString(r.text).replace('\n', "\\n") << Qt::endl;
+            }
+        }
+
+        // Dropping the comment is the only acceptable failure: putting it back
+        // somewhere else would rewrite what the author said about their code.
+        const Rendered moved =
+            renderBody(QString::fromUtf8("\t\tif (m_Ready)\n\t\t{\n\t\t\tSetQuantity(1);"
+                                         "\n\t\t} // done"),
+                       QStringLiteral("\t\t"), QStringLiteral("\t"), cat, builtins, project,
+                       base);
+        check(!moved.text.contains(QLatin1String("// done")),
+              QStringLiteral("a comment that cannot be held is not moved somewhere else"));
+
+        // The loss the diagnosis demonstrated, and the reason the token
+        // comparison in this file could not see it: converting a raw block to
+        // nodes dropped every comment and every blank line in it.
+        {
+            Graph g = base;
+            GraphNode begin;
+            begin.id = QStringLiteral("evt");
+            begin.kind = NodeKind::Builtin;
+            begin.ref = bi::Begin;
+            begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+            GraphNode raw;
+            raw.id = QStringLiteral("raw1");
+            raw.kind = NodeKind::Builtin;
+            raw.ref = bi::Raw;
+            raw.opts.insert(QStringLiteral("code"),
+                            QStringLiteral("// why this runs first\nPrint(\"one\");\n\n"
+                                           "Print(\"two\"); // and this one after"));
+            g.nodes.append(begin);
+            g.nodes.append(raw);
+            g.edges.append({QStringLiteral("e1"),
+                            {begin.id, QStringLiteral("exec")},
+                            {raw.id, QStringLiteral("exec")},
+                            {}});
+            QStringList notes;
+            const bool exploded = explodeRawNode(g, raw.id, cat, builtins, project, &notes);
+            const QString after = bodyOf(generateEnforce(g, cat, builtins, project).code);
+            check(exploded
+                      && after == QStringLiteral("\t\t// why this runs first\n\t\tPrint(\"one\");"
+                                                 "\n\n\t\tPrint(\"two\"); // and this one after"),
+                  QStringLiteral("converting a raw block keeps its comments and its blank line"));
+            if (after != QStringLiteral("\t\t// why this runs first\n\t\tPrint(\"one\");"
+                                        "\n\n\t\tPrint(\"two\"); // and this one after"))
+                out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
+        }
+
+        // The other half of that loss, and the one the corpus finds: a raw node
+        // the importer left in the middle of a converted body carries the lines
+        // the author wrote above it. Converting that node removes it, and what
+        // it was carrying has to land on whatever now runs in its place.
+        // `P:\scripts\3_game\entities\dayzanimal.c` is the shape this comes
+        // from: `type = 0; // not used right now` stays raw because `type` is an
+        // out parameter, and one click on Convert to nodes used to take the
+        // comment out of the file.
+        {
+            const auto rawGraph = [&](bool withTrailing) {
+                Graph g = base;
+                GraphNode begin;
+                begin.id = QStringLiteral("evt");
+                begin.kind = NodeKind::Builtin;
+                begin.ref = bi::Begin;
+                begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+                GraphNode raw;
+                raw.id = QStringLiteral("raw1");
+                raw.kind = NodeKind::Builtin;
+                raw.ref = bi::Raw;
+                raw.opts.insert(QStringLiteral("code"), QStringLiteral("Print(\"one\");"));
+                raw.opts.insert(nodefmt::keyBefore(), QStringLiteral("// keep this note\n"));
+                if (withTrailing)
+                    raw.opts.insert(nodefmt::keyTrailing(), QStringLiteral(" // and this one"));
+                g.nodes.append(begin);
+                g.nodes.append(raw);
+                g.edges.append({QStringLiteral("e1"),
+                                {begin.id, QStringLiteral("exec")},
+                                {raw.id, QStringLiteral("exec")},
+                                {}});
+                return g;
+            };
+
+            Graph kept = rawGraph(false);
+            const QString wasKept = bodyOf(generateEnforce(kept, cat, builtins, project).code);
+            QStringList notes;
+            const bool did = explodeRawNode(kept, QStringLiteral("raw1"), cat, builtins,
+                                            project, &notes);
+            const QString nowKept = bodyOf(generateEnforce(kept, cat, builtins, project).code);
+            check(did && nowKept == wasKept,
+                  QStringLiteral("converting a raw node keeps the comment written above it"));
+            if (!did || nowKept != wasKept) {
+                out << "         was: " << QString(wasKept).replace('\n', "\\n") << Qt::endl;
+                out << "         out: " << QString(nowKept).replace('\n', "\\n") << Qt::endl;
+            }
+
+            // A comment at the end of the node's own line belongs at the end of
+            // the last line of whatever replaces it, and no node has a field
+            // that says that. Refusing keeps the author's words where they
+            // were; converting would move them to the first line instead.
+            Graph trailing = rawGraph(true);
+            const QString wasTrail =
+                bodyOf(generateEnforce(trailing, cat, builtins, project).code);
+            QStringList trailNotes;
+            const bool tookIt = explodeRawNode(trailing, QStringLiteral("raw1"), cat, builtins,
+                                               project, &trailNotes);
+            const QString nowTrail =
+                bodyOf(generateEnforce(trailing, cat, builtins, project).code);
+            check(!tookIt && nowTrail == wasTrail && !trailNotes.isEmpty(),
+                  QStringLiteral("and refuses rather than drop the one at the end of the line"));
+            if (tookIt || nowTrail != wasTrail)
+                out << "         out: " << QString(nowTrail).replace('\n', "\\n") << Qt::endl;
+        }
+
+        // The constructor writes no brace of its own inside the event loop: its
+        // body is set aside and merged further down. What the author left above
+        // the brace it closes with was being set aside with nothing, so it
+        // never reached the file.
+        {
+            Graph g = base;
+            GraphNode begin;
+            begin.id = QStringLiteral("ctor");
+            begin.kind = NodeKind::Builtin;
+            begin.ref = bi::Begin;
+            begin.opts.insert(QStringLiteral("when"), QStringLiteral("construct"));
+            begin.opts.insert(nodefmt::keyEnd(), QStringLiteral("// done setting up\n"));
+            GraphNode pr;
+            pr.id = QStringLiteral("p1");
+            pr.kind = NodeKind::Builtin;
+            pr.ref = bi::Print;
+            g.nodes.append(begin);
+            g.nodes.append(pr);
+            g.edges.append({QStringLiteral("e1"),
+                            {begin.id, QStringLiteral("exec")},
+                            {pr.id, QStringLiteral("exec")},
+                            {}});
+            const QString code = generateEnforce(g, cat, builtins, project).code;
+            check(code.contains(QStringLiteral("\t\t// done setting up\n\t}")),
+                  QStringLiteral("a constructor puts back what stood above its closing brace"));
+        }
+    }
+
+    // ---------------------------- converting a block must not edit what it says
+    //
+    // The importer is safe by construction: it generates the method back out and
+    // compares it with the text it read, so a body whose formatting the graph
+    // cannot hold keeps its text. "Convert to nodes" has no such gate. It writes
+    // straight into the graph the user is about to save, so every line the
+    // lowering could not carry is a line taken out of the author's own mod.
+    // Each case here is a block that converts and comes back missing something.
+    out << Qt::endl << "converting a block must not edit what it says" << Qt::endl;
+    {
+        // Converts `code` as a Raw node and reports the body that comes back.
+        const auto convert = [&](const QString &code, bool *ok) {
+            Graph g = base;
+            GraphNode begin;
+            begin.id = QStringLiteral("evt");
+            begin.kind = NodeKind::Builtin;
+            begin.ref = bi::Begin;
+            begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+            GraphNode raw;
+            raw.id = QStringLiteral("raw1");
+            raw.kind = NodeKind::Builtin;
+            raw.ref = bi::Raw;
+            raw.opts.insert(QStringLiteral("code"), code);
+            g.nodes.append(begin);
+            g.nodes.append(raw);
+            g.edges.append({QStringLiteral("e1"),
+                            {begin.id, QStringLiteral("exec")},
+                            {raw.id, QStringLiteral("exec")},
+                            {}});
+            QStringList notes;
+            *ok = explodeRawNode(g, raw.id, cat, builtins, project, &notes);
+            return bodyOf(generateEnforce(g, cat, builtins, project).code);
+        };
+
+        struct Kept {
+            const char *name;
+            const char *code;
+            const char *words; // what the author wrote and must still be there
+        };
+        const QVector<Kept> kept = {
+            // A comment standing at a column the block does not use cannot be
+            // stored relative to that block, so the gap holding it is turned
+            // down whole. Turning a gap down drops it.
+            {"a comment at its own column inside a branch",
+             "if (m_Ready)\n{\n// flush left\n\tSetQuantity(1);\n}", "// flush left"},
+            // The gap between the brace that closes a multi-line statement and
+            // the next one has no node whose first line it could trail.
+            {"a comment after the brace that closes a branch",
+             "if (m_Ready)\n{\n\tSetQuantity(1);\n} // done\nPrint(\"x\");", "// done"},
+            // A block comment opening on a statement's own line runs past the
+            // end of that line, and only the first line of a gap is a trailing.
+            {"a block comment opening at the end of a line",
+             "Print(\"one\"); /* why this\n   runs first */\nPrint(\"two\");", "why this"},
+            // A directive is not commentary, so the gap holding it is refused
+            // and dropped, and dropping a directive changes what compiles.
+            {"a preprocessor directive between two statements",
+             "Print(\"one\");\n#ifdef SERVER\nPrint(\"two\");\n#endif", "#ifdef SERVER"},
+        };
+
+        for (const Kept &c : kept) {
+            bool ok = false;
+            const QString after = convert(QString::fromUtf8(c.code), &ok);
+            const QString words = QString::fromUtf8(c.words);
+            check(!ok || after.contains(words),
+                  QStringLiteral("%1 is either kept or the block is left alone")
+                      .arg(QString::fromUtf8(c.name)));
+            if (ok && !after.contains(words)) {
+                out << "         in:  " << QString::fromUtf8(c.code).replace('\n', "\\n")
+                    << Qt::endl;
+                out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
+            }
+        }
+
+        // A statement the lowering turns into a wire stops existing, and the
+        // comment written on its line has no node left to hang from. The
+        // importer sees the loss and keeps the text; this path does not.
+        {
+            bool ok = false;
+            const QString after =
+                convert(QStringLiteral("int total = m_Count + 1; // the running total\n"
+                                       "SetQuantity(total);"),
+                        &ok);
+            check(!ok || after.contains(QLatin1String("// the running total")),
+                  QStringLiteral("a comment on a statement that becomes a wire is either kept "
+                                 "or the block is left alone"));
+            if (ok && !after.contains(QLatin1String("// the running total")))
+                out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
+        }
+
+        // A statement written on one line can still generate several, and the
+        // trailing comment goes on the first of them. On a loop or a branch
+        // written out on one line that first line is the header, so a comment
+        // written under the whole construct comes back sitting on top of it,
+        // saying something about the wrong code.
+        {
+            bool ok = false;
+            const QString after =
+                convert(QStringLiteral("for (int i = 0; i < 3; i++) { Print(i); } // counted\n"
+                                       "Print(\"x\");"),
+                        &ok);
+            const QStringList lines = after.split(QLatin1Char('\n'));
+            const bool onHeader = !lines.isEmpty()
+                                  && lines.first().contains(QLatin1String("// counted"));
+            check(!ok || !onHeader,
+                  QStringLiteral("a comment under a one-line loop is not moved onto its header"));
+            if (ok && onHeader)
+                out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
+        }
+
+        // Two gaps, one node. A bare block splices its statements into the
+        // block around it, so the first of them is also the block's own entry,
+        // and the note above the block is written over the note inside it.
+        {
+            bool ok = false;
+            const QString after = convert(QStringLiteral("// outer note\n{\n\t// inner note\n"
+                                                         "\tPrint(\"a\");\n}"),
+                                          &ok);
+            check(!ok || after.contains(QLatin1String("// inner note")),
+                  QStringLiteral("a note inside a block is not written over by the note above "
+                                 "it"));
+            if (ok && !after.contains(QLatin1String("// inner note")))
+                out << "         out: " << QString(after).replace('\n', "\\n") << Qt::endl;
+        }
+
+        // A file written on Windows reaches the lowering with the carriage
+        // return still on the end of every line. A blank line is then a line
+        // holding one CR, which is not indentation, so the generator indents it
+        // and the file gains whitespace the author never typed.
+        {
+            bool ok = false;
+            const QString after = convert(QStringLiteral("Print(\"one\");\r\n\r\nPrint(\"two\");"),
+                                          &ok);
+            // A line with nothing but the carriage return on it is the blank
+            // line as the author left it. One that also carries a tab or a
+            // space is a blank line the generator indented.
+            bool padded = false;
+            for (const QString &l : after.split(QLatin1Char('\n')))
+                if (nodefmt::isBlankLine(l)
+                    && (l.contains(QLatin1Char('\t')) || l.contains(QLatin1Char(' '))))
+                    padded = true;
+            check(!ok || !padded,
+                  QStringLiteral("a blank line in a file with CRLF endings gains no indentation"));
+            if (ok && padded)
+                out << "         out: " << QString(after).replace('\n', "\\n")
+                                                  .replace('\r', "\\r") << Qt::endl;
+        }
+
+        // The generator writes a header and its braces on lines of its own, and
+        // it has nowhere to read the ending the file uses. In a file written
+        // with CRLF the lines it makes up come back with a bare newline, so a
+        // block that converts leaves the file with two kinds of line ending in
+        // it. The importer never sees this, because both suites that measure
+        // the corpus take the carriage return off first.
+        {
+            bool ok = false;
+            const QString after =
+                convert(QStringLiteral("if (m_Ready)\r\n{\r\n\tSetQuantity(1);\r\n}"), &ok);
+            const QStringList lines = after.split(QLatin1Char('\n'));
+            int bare = 0;
+            for (int i = 0; i + 1 < lines.size(); ++i)
+                if (!lines.at(i).endsWith(QLatin1Char('\r'))) bare++;
+            check(!ok || bare == 0,
+                  QStringLiteral("a block converted out of a file with CRLF endings keeps them"));
+            if (ok && bare > 0)
+                out << "         out: " << QString(after).replace('\n', "\\n")
+                                                  .replace('\r', "\\r") << Qt::endl;
         }
     }
 
@@ -839,6 +1290,93 @@ int main(int argc, char *argv[])
             for (const QString &sample : drifted)
                 out << "       ---- " << sample << Qt::endl;
         }
+    }
+
+    // ------------------------------- the same walk again, forgiving nothing
+    //
+    // The walk above goes through compare(), which runs meaningfulTokens over
+    // both sides and drops every Comment and Whitespace token before it looks.
+    // It structurally cannot see a lost comment, which is how 17 conversions on
+    // the vanilla corpus took an author's words out of their own file while
+    // this suite read green. This one compares the two files as text, and
+    // counts the comments in each, so a conversion that edits what the code
+    // says is a failing number here rather than an invisible one.
+    out << Qt::endl << "every raw node again, byte for byte" << Qt::endl;
+    if (haveProject) {
+        // The comments in a file, in order, so one that goes missing is named
+        // rather than counted.
+        const auto commentsIn = [](const QString &code) {
+            QStringList out;
+            for (const Token &t : EnforceLexer::tokenizeAll(code))
+                if (t.kind == TokenKind::Comment) out << t.text;
+            return out;
+        };
+
+        int converted = 0;
+        int identical = 0;
+        int changed = 0;
+        int commentsLost = 0;
+        QStringList evidence;
+
+        for (const ScriptEntry &s : project.scripts) {
+            const QString before = generateEnforce(s.graph, cat, builtins, project).code;
+            const QStringList had = commentsIn(before);
+            QStringList ids;
+            for (const GraphNode &n : s.graph.nodes)
+                if (n.ref == bi::Raw
+                    && !n.opts.value(QStringLiteral("code")).trimmed().isEmpty())
+                    ids << n.id;
+
+            for (const QString &id : ids) {
+                Graph g = s.graph;
+                if (!explodeRawNode(g, id, cat, builtins, project)) continue;
+                converted++;
+                const QString after = generateEnforce(g, cat, builtins, project).code;
+                if (after == before) {
+                    identical++;
+                    continue;
+                }
+                changed++;
+
+                const QStringList now = commentsIn(after);
+                QStringList missing = had;
+                for (const QString &c : now) missing.removeOne(c);
+                if (!missing.isEmpty()) commentsLost++;
+                if (evidence.size() >= 8) continue;
+
+                const QStringList a = before.split(QLatin1Char('\n'));
+                const QStringList b = after.split(QLatin1Char('\n'));
+                QString line = QStringLiteral("(the two files are the same length)");
+                for (int i = 0; i < qMax(a.size(), b.size()); ++i) {
+                    const QString x = i < a.size() ? a.at(i) : QString();
+                    const QString y = i < b.size() ? b.at(i) : QString();
+                    if (x == y) continue;
+                    line = QStringLiteral("line %1\n            was: %2\n            now: %3")
+                               .arg(i + 1)
+                               .arg(x, y);
+                    break;
+                }
+                evidence << s.name + QStringLiteral(" / ") + id + QStringLiteral(" ") + line
+                                + (missing.isEmpty()
+                                       ? QString()
+                                       : QStringLiteral("\n            lost: ")
+                                             + missing.join(QStringLiteral(" | ")));
+            }
+        }
+
+        out << "       conversions:               " << converted << Qt::endl;
+        out << "       wrote the file back exactly:" << identical << Qt::endl;
+        out << "       changed the file:          " << changed << Qt::endl;
+        out << "       took out a comment:        " << commentsLost << Qt::endl;
+        for (const QString &e : evidence) out << "       ---- " << e << Qt::endl;
+
+        check(converted > 0, QStringLiteral("%1 raw nodes converted").arg(converted));
+        check(changed == 0,
+              QStringLiteral("%1 conversions changed the file, byte for byte").arg(changed));
+        check(commentsLost == 0,
+              QStringLiteral("%1 conversions took out a comment").arg(commentsLost));
+    } else {
+        out << "       (SUDO_Link.sdzn not present)" << Qt::endl;
     }
 
     // A Qt message in a run that has no GUI is the shape of a bug that used to

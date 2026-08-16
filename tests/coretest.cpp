@@ -128,6 +128,56 @@ int main(int argc, char *argv[])
               QStringLiteral("nodes/edges survive round-trip (%1/%2 vs %3/%4)")
                   .arg(nodes2).arg(edges2).arg(nodes).arg(edges));
 
+        // The author's own blank lines, comments and indentation ride in
+        // GraphNode::opts. A blank line is the value that breaks a naive
+        // encoding: "one blank line above this statement" is stored as a bare
+        // newline, and an empty string would be indistinguishable from a key
+        // that is not there at all.
+        {
+            Project fmt;
+            ScriptEntry entry;
+            entry.name = QStringLiteral("SUDO_Fmt");
+            entry.graph.className = QStringLiteral("SUDO_Fmt");
+            GraphNode n;
+            n.id = QStringLiteral("n1");
+            n.kind = NodeKind::Builtin;
+            n.ref = bi::Print;
+            n.opts.insert(nodefmt::keyBase(), QStringLiteral("    "));
+            n.opts.insert(nodefmt::keyUnit(), QStringLiteral("  "));
+            n.opts.insert(nodefmt::keyBefore(), QStringLiteral("\n\t\t// why this runs first\n"));
+            n.opts.insert(nodefmt::keyTrailing(), QStringLiteral(" // and this one after"));
+            n.opts.insert(nodefmt::keyEnd(), QStringLiteral("\n"));
+            entry.graph.nodes.append(n);
+            fmt.scripts.append(entry);
+
+            const QString path = tmp.filePath(QStringLiteral("fmt.sdzn"));
+            check(saveProject(fmt, path, &err),
+                  QStringLiteral("saves a project carrying the author's formatting (%1)").arg(err));
+            Project back;
+            check(loadProject(path, back, &err),
+                  QStringLiteral("reloads it (%1)").arg(err));
+            const GraphNode *got = back.scripts.isEmpty() ? nullptr
+                                                          : back.scripts.first().graph.node(
+                                                                QStringLiteral("n1"));
+            check(got && got->opts == n.opts,
+                  QStringLiteral("every formatting key comes back with the value it went in with"));
+            if (got)
+                check(got->opts.value(nodefmt::keyEnd()) == QStringLiteral("\n")
+                          && nodefmt::lines(got->opts.value(nodefmt::keyEnd())).size() == 1,
+                      QStringLiteral("one blank line survives as one blank line"));
+            check(nodefmt::lines(QString()).isEmpty()
+                      && nodefmt::store({QString()}) == QStringLiteral("\n")
+                      && nodefmt::lines(QStringLiteral("\n")) == QStringList{QString()},
+                  QStringLiteral("no lines and one blank line are told apart"));
+            check(nodefmt::isCommentaryOnly(QStringLiteral("\t// note"))
+                      && nodefmt::isCommentaryOnly(QStringLiteral("/* two\n   lines */"))
+                      && !nodefmt::isCommentaryOnly(QStringLiteral("Print(1);"))
+                      && !nodefmt::isCommentaryOnly(QStringLiteral("/* never closed")),
+                  QStringLiteral("only whitespace and comments are accepted as commentary"));
+        }
+    }
+
+    if (opened) {
         // Every node in a real project should resolve against the catalogue or
         // the builtins; unresolvable refs mean the two have drifted apart.
         int unresolved = 0;
@@ -160,6 +210,154 @@ int main(int argc, char *argv[])
         if (p.type.kind == PinKind::Exec) (p.dir == PinDir::In ? execIn : execOut)++;
     check(execIn == 1 && execOut >= 2,
           QStringLiteral("Branch has one exec in and both outputs"));
+
+    // ------------------------------------- layout fields are not a place for code
+    //
+    // graph.h states the invariant: the graph must not become a second place to
+    // hide script. It used to be enforced where a body was read and nowhere
+    // else, which was enough only while the importer was the sole writer. A
+    // .sdzn is a file anyone can hand you and the mod browser has made opening
+    // other people's work an ordinary thing to do, so the same rule is checked
+    // where the text leaves the graph for the user's own .c.
+    out << "layout fields" << Qt::endl;
+    {
+        check(nodefmt::isValidValue(nodefmt::keyBase(), QStringLiteral("\t\t"))
+                  && !nodefmt::isValidValue(nodefmt::keyBase(), QStringLiteral("x")),
+              QStringLiteral("an indent field takes whitespace and nothing else"));
+        check(nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral("\r\n"))
+                  && nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral("\n"))
+                  && !nodefmt::isValidValue(nodefmt::keyEol(), QStringLiteral(" ")),
+              QStringLiteral("a line ending is one of the two that exist"));
+        check(nodefmt::isValidValue(nodefmt::keyBefore(), QStringLiteral("// note\n"))
+                  && !nodefmt::isValidValue(nodefmt::keyBefore(),
+                                            QStringLiteral("GetGame().RequestExit(0);\n")),
+              QStringLiteral("lines above a node are commentary or nothing"));
+        // A trailing sits behind code already on the line, so a newline in it
+        // would put what follows on a line of its own, past the statement.
+        check(nodefmt::isValidValue(nodefmt::keyTrailing(), QStringLiteral(" // done"))
+                  && !nodefmt::isValidValue(nodefmt::keyTrailing(),
+                                            QStringLiteral(" // done\n\t\tRequestExit(0);")),
+              QStringLiteral("a trailing comment stays on one line"));
+        check(nodefmt::isValidValue(QStringLiteral("code"), QStringLiteral("Print(1);")),
+              QStringLiteral("a key that is not a layout key is left to its owner"));
+
+        // The whole point, end to end: a hostile project file generates a
+        // script with none of its code in it, and says why.
+        Graph g;
+        g.className = QStringLiteral("SUDO_Hostile");
+        g.baseClass = QStringLiteral("ItemBase");
+        GraphNode begin;
+        begin.id = QStringLiteral("evt");
+        begin.kind = NodeKind::Builtin;
+        begin.ref = bi::Begin;
+        begin.opts.insert(QStringLiteral("noSuper"), QStringLiteral("1"));
+        begin.opts.insert(nodefmt::keyEnd(), QStringLiteral("DeleteSafe();\n"));
+        GraphNode pr;
+        pr.id = QStringLiteral("p1");
+        pr.kind = NodeKind::Builtin;
+        pr.ref = bi::Print;
+        pr.inputs.insert(QStringLiteral("value"), QStringLiteral("hello"));
+        pr.opts.insert(nodefmt::keyBefore(), QStringLiteral("GetGame().RequestExit(0);\n"));
+        pr.opts.insert(nodefmt::keyTrailing(), QStringLiteral(" // fine\n\t\tDestroy();"));
+        g.nodes << begin << pr;
+        g.edges.append({QStringLiteral("e1"),
+                        {begin.id, QStringLiteral("exec")},
+                        {pr.id, QStringLiteral("exec")},
+                        {}});
+
+        const GenResult hostile = generateEnforce(g, cat, builtins, p);
+        check(!hostile.code.contains(QStringLiteral("RequestExit"))
+                  && !hostile.code.contains(QStringLiteral("DeleteSafe"))
+                  && !hostile.code.contains(QStringLiteral("Destroy()")),
+              QStringLiteral("code hidden in a layout field is not written into the script"));
+        check(hostile.code.contains(QStringLiteral("Print(")),
+              QStringLiteral("the rest of the method is still generated"));
+        int said = 0;
+        for (const QString &w : hostile.warnings)
+            if (w.contains(QStringLiteral("layout"))) said++;
+        check(said >= 3,
+              QStringLiteral("each field that was refused is reported (%1 warnings)").arg(said));
+    }
+
+    // A file anyone can hand you is checked when it is opened, not only when it
+    // is generated: the user is still looking at the dialog that opened it
+    // rather than at a mod that has already been built.
+    out << "opening a .sdzn" << Qt::endl;
+    {
+        QTemporaryDir tmp;
+        Project hostile;
+        ScriptEntry entry;
+        entry.id = QStringLiteral("s1");
+        entry.name = QStringLiteral("SUDO_Hostile");
+        entry.graph.className = QStringLiteral("SUDO_Hostile");
+        GraphNode n;
+        n.id = QStringLiteral("n1");
+        n.kind = NodeKind::Builtin;
+        n.ref = bi::Print;
+        n.opts.insert(nodefmt::keyBefore(), QStringLiteral("GetGame().RequestExit(0);\n"));
+        n.opts.insert(nodefmt::keyEnd(), QStringLiteral("// a real note\n"));
+        n.opts.insert(nodefmt::keyUnit(), QStringLiteral("nope"));
+        entry.graph.nodes.append(n);
+        hostile.scripts.append(entry);
+
+        const QString path = tmp.filePath(QStringLiteral("hostile.sdzn"));
+        QString e2;
+        check(saveProject(hostile, path, &e2), QStringLiteral("writes the file (%1)").arg(e2));
+        Project back;
+        check(loadProject(path, back, &e2), QStringLiteral("opens it (%1)").arg(e2));
+        const GraphNode *got = back.scripts.isEmpty()
+                                   ? nullptr
+                                   : back.scripts.first().graph.node(QStringLiteral("n1"));
+        check(got && !got->opts.contains(nodefmt::keyBefore())
+                  && !got->opts.contains(nodefmt::keyUnit()),
+              QStringLiteral("a layout field holding code is dropped as the file opens"));
+        check(got && got->opts.value(nodefmt::keyEnd()) == QStringLiteral("// a real note\n"),
+              QStringLiteral("and the fields beside it are left alone"));
+
+        // The version field. Every build before this one wrote no field at all,
+        // so a file without one is version 1; saving it makes it a v2 file,
+        // because this build has just written every v2 field into it. A file
+        // claiming a version this build does not know keeps its own number
+        // rather than being relabelled as one this build could have produced.
+        QFile written(path);
+        check(written.open(QIODevice::ReadOnly), QStringLiteral("reads the saved file back"));
+        QJsonObject root = QJsonDocument::fromJson(written.readAll()).object();
+        written.close();
+        check(root.value(QStringLiteral("formatVersion")).toInt() == kProjectFormatVersion,
+              QStringLiteral("saving writes the version this build produces (%1)")
+                  .arg(kProjectFormatVersion));
+
+        // What an older build left behind: the same file with no field at all.
+        root.remove(QStringLiteral("formatVersion"));
+        const QString older = tmp.filePath(QStringLiteral("older.sdzn"));
+        QFile out1(older);
+        check(out1.open(QIODevice::WriteOnly), QStringLiteral("writes a file with no version"));
+        out1.write(QJsonDocument(root).toJson());
+        out1.close();
+        Project old;
+        // Loaded on its own line: the order the arguments of a call are
+        // evaluated in is not fixed, so a message built in the same expression
+        // reports whatever the field held before the load.
+        const bool openedOld = loadProject(older, old, &e2);
+        check(openedOld && old.formatVersion == 1,
+              QStringLiteral("a file with no version field reads as version 1 (%1)")
+                  .arg(old.formatVersion));
+        const QString upgraded = tmp.filePath(QStringLiteral("upgraded.sdzn"));
+        check(saveProject(old, upgraded, &e2), QStringLiteral("saves it again (%1)").arg(e2));
+        Project after;
+        check(loadProject(upgraded, after, &e2) && after.formatVersion == kProjectFormatVersion,
+              QStringLiteral("and saving it with this build makes it a v%1 file")
+                  .arg(kProjectFormatVersion));
+
+        Project fromTheFuture = back;
+        fromTheFuture.formatVersion = kProjectFormatVersion + 7;
+        const QString later = tmp.filePath(QStringLiteral("later.sdzn"));
+        check(saveProject(fromTheFuture, later, &e2),
+              QStringLiteral("saves a project that claims a later version (%1)").arg(e2));
+        Project reread;
+        check(loadProject(later, reread, &e2) && reread.formatVersion == kProjectFormatVersion + 7,
+              QStringLiteral("a version this build does not know is kept, not overwritten"));
+    }
 
     out << "codegen" << Qt::endl;
     if (opened) {

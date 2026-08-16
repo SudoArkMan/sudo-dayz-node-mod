@@ -126,6 +126,9 @@ private:
     double m_height = 0;
     QString m_title;
     QString m_subtitle;
+    // The author's own comment, drawn above the header. Empty on a node that
+    // carries none, which is every node placed from the palette.
+    QString m_note;
 
     QVector<CodeLine> m_code;    // empty on every node that is not a code node
     int m_codeHidden = 0;        // lines past the cap, counted in the footer

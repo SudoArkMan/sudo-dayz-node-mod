@@ -55,6 +55,115 @@ const GraphVariable *Graph::variable(const QString &name) const
     return nullptr;
 }
 
+QString nodefmt::keyBase() { return QStringLiteral("fmt.base"); }
+QString nodefmt::keyUnit() { return QStringLiteral("fmt.unit"); }
+QString nodefmt::keyEol() { return QStringLiteral("fmt.eol"); }
+QString nodefmt::keyBefore() { return QStringLiteral("trivia.before"); }
+QString nodefmt::keyTrailing() { return QStringLiteral("trivia.trailing"); }
+QString nodefmt::keyEnd() { return QStringLiteral("trivia.end"); }
+QString nodefmt::keyEndElse() { return QStringLiteral("trivia.endElse"); }
+
+QStringList nodefmt::lines(const QString &stored)
+{
+    if (stored.isEmpty()) return {};
+    QStringList out = stored.split(QLatin1Char('\n'));
+    // The stored form always ends with a newline, so the split leaves one empty
+    // element behind that stands for no line at all.
+    if (!out.isEmpty() && out.last().isEmpty()) out.removeLast();
+    return out;
+}
+
+QString nodefmt::store(const QStringList &lines)
+{
+    if (lines.isEmpty()) return {};
+    return lines.join(QLatin1Char('\n')) + QLatin1Char('\n');
+}
+
+bool nodefmt::isCommentaryOnly(const QString &text)
+{
+    bool inBlock = false;
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar c = text.at(i);
+        if (inBlock) {
+            if (c == QLatin1Char('*') && i + 1 < text.size()
+                && text.at(i + 1) == QLatin1Char('/')) {
+                inBlock = false;
+                i++;
+            }
+            continue;
+        }
+        if (c.isSpace()) continue;
+        if (c != QLatin1Char('/') || i + 1 >= text.size()) return false;
+        const QChar next = text.at(i + 1);
+        if (next == QLatin1Char('/')) {
+            while (i < text.size() && text.at(i) != QLatin1Char('\n')) i++;
+            continue;
+        }
+        if (next != QLatin1Char('*')) return false;
+        inBlock = true;
+        i++;
+    }
+    // A block comment nobody closed would swallow whatever is generated after
+    // it, so text that ends inside one is not commentary this can keep.
+    return !inBlock;
+}
+
+bool nodefmt::isValidValue(const QString &key, const QString &value)
+{
+    if (key == keyBase() || key == keyUnit()) return isIndentText(value);
+    // Two endings exist. Anything else here would be written at the end of
+    // every line of the method.
+    if (key == keyEol())
+        return value == QLatin1String("\n") || value == QLatin1String("\r\n");
+    // A trailing sits behind code that is already on the line, so a newline in
+    // it would put whatever follows on a line of its own, past the statement
+    // the reader can see.
+    if (key == keyTrailing())
+        return !value.contains(QLatin1Char('\n')) && isCommentaryOnly(value);
+    if (key == keyBefore() || key == keyEnd() || key == keyEndElse())
+        return isCommentaryOnly(value);
+    return true;
+}
+
+bool nodefmt::isIndentText(const QString &text)
+{
+    for (const QChar c : text)
+        if (c != QLatin1Char(' ') && c != QLatin1Char('\t')) return false;
+    return true;
+}
+
+bool nodefmt::isBlankLine(const QString &line)
+{
+    for (const QChar c : line)
+        if (!c.isSpace()) return false;
+    return true;
+}
+
+namespace {
+
+// Line breaks of each kind. A lone carriage return is not a break Enforce
+// source uses, so nothing here looks for one.
+void countBreaks(const QString &text, int *crlf, int *lf)
+{
+    *crlf = 0;
+    *lf = 0;
+    for (int i = 0; i < text.size(); ++i) {
+        if (text.at(i) != QLatin1Char('\n')) continue;
+        if (i > 0 && text.at(i - 1) == QLatin1Char('\r')) (*crlf)++;
+        else (*lf)++;
+    }
+}
+
+} // namespace
+
+QString nodefmt::eolOf(const QString &text)
+{
+    int crlf = 0;
+    int lf = 0;
+    countBreaks(text, &crlf, &lf);
+    return crlf > lf ? QStringLiteral("\r\n") : QStringLiteral("\n");
+}
+
 QString nextId(const QString &prefix)
 {
     // The counter alone keeps ids apart inside one run, but it restarts at zero
