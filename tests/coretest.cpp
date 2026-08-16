@@ -783,6 +783,33 @@ int main(int argc, char *argv[])
         check(!clashed.warnings.isEmpty(),
               QStringLiteral("and the duplicate is reported"));
 
+        // A name the class already uses would declare the same method or the
+        // same member twice, which is a compile error a long way from the node.
+        Graph fnClash = g;
+        GraphFunction fn;
+        fn.id = QStringLiteral("f1");
+        fn.name = QStringLiteral("ReloadElapsed");
+        fn.returns = QStringLiteral("void");
+        fn.hasRawBody = true;
+        fnClash.functions.append(fn);
+        const GenResult fnOut = generateEnforce(fnClash, cat, builtins, p);
+        check(fnOut.code.count(QStringLiteral("void ReloadElapsed()")) == 1,
+              QStringLiteral("a callback clashing with a function is declared once"));
+        check(!fnOut.warnings.isEmpty(),
+              QStringLiteral("and the clash is reported"));
+
+        Graph varClash = g;
+        GraphVariable mine;
+        mine.id = QStringLiteral("v1");
+        mine.name = QStringLiteral("m_Reload");
+        mine.type = QStringLiteral("int");
+        varClash.variables.append(mine);
+        const GenResult varOut = generateEnforce(varClash, cat, builtins, p);
+        check(!varOut.code.contains(QStringLiteral("ref Timer m_Reload;")),
+              QStringLiteral("a member clashing with a variable is not declared twice"));
+        check(!varOut.warnings.isEmpty(),
+              QStringLiteral("and that clash is reported too"));
+
         // Stop Timer, and the mismatch that used to be silent.
         Graph stopping = g;
         GraphNode stop;
@@ -1019,6 +1046,60 @@ int main(int argc, char *argv[])
               QStringLiteral("an unwired callback pin is reported"));
         check(!rules(bare).contains(QStringLiteral("DZ205")),
               QStringLiteral("and not also called a branch that decides nothing"));
+
+        // Two nodes claiming one name. The generator writes the method once, so
+        // the second node's chain is dropped from the file with nothing on the
+        // canvas to say which one lost. The name is the member, the string and
+        // the method all at once, which is what makes it unshareable.
+        check(!rules(cancelled).contains(QStringLiteral("DZ320")),
+              QStringLiteral("one name used once is not reported"));
+        Graph twice = cancelled;
+        GraphNode second = later;
+        second.id = QStringLiteral("c2");
+        twice.nodes << second;
+        twice.edges.append({QStringLiteral("e4"), {cancel.id, QStringLiteral("exec")},
+                            {second.id, QStringLiteral("exec")}, {}});
+        twice.edges.append({QStringLiteral("e5"), {second.id, QStringLiteral("then")},
+                            {pr.id, QStringLiteral("exec")}, {}});
+        check(rules(twice).contains(QStringLiteral("DZ320")),
+              QStringLiteral("two Call Later nodes sharing a name are reported"));
+        twice.nodes.last().opts.insert(QStringLiteral("name"), QStringLiteral("Other"));
+        check(!rules(twice).contains(QStringLiteral("DZ320")),
+              QStringLiteral("renaming one of them clears it"));
+
+        // And the same collision against something the class already spells,
+        // where the generator refuses to write the timer at all.
+        Graph clash;
+        clash.className = QStringLiteral("SUDO_Timing");
+        clash.baseClass = QStringLiteral("ItemBase");
+        GraphNode timer = later;
+        timer.id = QStringLiteral("t1");
+        timer.ref = bi::SetTimer;
+        timer.opts.insert(QStringLiteral("name"), QStringLiteral("Reload"));
+        clash.nodes << begin << timer << pr;
+        clash.edges.append({QStringLiteral("e1"), {begin.id, QStringLiteral("exec")},
+                            {timer.id, QStringLiteral("exec")}, {}});
+        clash.edges.append({QStringLiteral("e2"), {timer.id, QStringLiteral("elapsed")},
+                            {pr.id, QStringLiteral("exec")}, {}});
+        check(!rules(clash).contains(QStringLiteral("DZ320")),
+              QStringLiteral("a timer whose name nothing else uses is not reported"));
+
+        Graph clashFn = clash;
+        GraphFunction fn;
+        fn.id = QStringLiteral("f1");
+        fn.name = QStringLiteral("ReloadElapsed");
+        fn.returns = QStringLiteral("void");
+        clashFn.functions << fn;
+        check(rules(clashFn).contains(QStringLiteral("DZ320")),
+              QStringLiteral("a timer landing on a declared function is reported"));
+
+        Graph clashVar = clash;
+        GraphVariable var;
+        var.name = QStringLiteral("m_Reload");
+        var.type = QStringLiteral("int");
+        clashVar.variables << var;
+        check(rules(clashVar).contains(QStringLiteral("DZ320")),
+              QStringLiteral("a timer landing on a declared variable is reported"));
     }
 
     out << Qt::endl << (failures == 0 ? "ALL CORE TESTS PASSED"

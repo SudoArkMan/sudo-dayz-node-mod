@@ -10,6 +10,7 @@
 #include "enforce/import.h"
 #include "modlibrary.h"
 #include "modtemplate.h"
+#include "nodeindex.h"
 #include "panels/codeviewpanel.h"
 #include "panels/eventspanel.h"
 #include "panels/explorerpanel.h"
@@ -70,13 +71,15 @@
 namespace {
 
 constexpr int kKeyRole = Qt::UserRole;
+constexpr int kDocRole = Qt::UserRole + 1; // the line the popup's footer shows
 
 // The row that turns the dragged value into a member instead of looking for a
 // node to take it. Not a node key, so it can never collide with one.
 const QLatin1String kPromoteKey("promote.variable");
 
-// The row that hands the search over to the events list. Also not a node key.
-const QLatin1String kAddEventKey("add.event");
+// The row that hands the search over to the events list. Also not a node key,
+// and shared with the palette so one string names it everywhere.
+const QLatin1String kAddEventKey = nodeindex::BrowseEventsKey;
 
 // Ranked catalogue hits to test against the dragged pin, and how many survivors
 // are worth listing. The catalogue holds 29k entries; testing them all would
@@ -125,6 +128,34 @@ void raiseDockTab(QMainWindow *window, QDockWidget *dock)
             return;
         }
     }
+}
+
+// True when a dock is the one in front of its tab group, or is not tabbed at
+// all. QDockWidget::isVisible() answers true for a dock sitting behind another
+// in the same group, so it cannot be asked which tab the user is looking at:
+// the bottom row was sized at the Mod Browser's share on every window that
+// opened on the generated file, and the left column paid about 120 pixels for
+// it on a 950 tall screen. Measured, not reasoned: the probe printed
+// browsing=1 with the Generated Code tab in front on all three calls.
+//
+// Matched on the dock's address, which is Qt's own key for the tab, and on the
+// title as well, because that data is an implementation detail.
+bool dockIsInFront(QMainWindow *window, QDockWidget *dock)
+{
+    if (!window || !dock || !dock->isVisible()) return false;
+    if (window->tabifiedDockWidgets(dock).isEmpty()) return true;
+    const auto address = quintptr(dock);
+    for (QTabBar *bar : window->findChildren<QTabBar *>()) {
+        for (int i = 0; i < bar->count(); ++i) {
+            const bool byData = bar->tabData(i).canConvert<quintptr>()
+                                && bar->tabData(i).value<quintptr>() == address;
+            if (!byData && bar->tabText(i) != dock->windowTitle()) continue;
+            return bar->currentIndex() == i;
+        }
+    }
+    // Tabified with no bar built yet, which is the state during the first
+    // layout. The old reading stands rather than guessing the other way.
+    return true;
 }
 
 // One way in for every surface that says "this node". Clicking a node on the
@@ -197,6 +228,32 @@ QString countOf(int n, const QString &one, const QString &many)
     return QStringLiteral("%1 %2").arg(n).arg(n == 1 ? one : many);
 }
 
+// A real output pin on the open graph, for the headless picture of the drag-out
+// menu. An object pin is preferred over a primitive because the class filter is
+// the half of that menu worth looking at, and a primitive is preferred over
+// nothing. Invalid when the graph has no output pin at all, which is a graph
+// with no nodes.
+PinRef dragSourceForScreenshot(Document *doc, bool exec)
+{
+    PinRef best;
+    int bestRank = -1;
+    const Graph *g = doc ? doc->activeGraph() : nullptr;
+    if (!g) return best;
+    for (const GraphNode &node : g->nodes) {
+        const NodeDef def = doc->defForNode(node);
+        for (const Pin &pin : def.pins) {
+            if (pin.dir != PinDir::Out) continue;
+            const bool isExec = pin.type.kind == PinKind::Exec;
+            if (isExec != exec) continue;
+            const int rank = pin.type.kind == PinKind::Object ? 2 : 1;
+            if (rank <= bestRank) continue;
+            bestRank = rank;
+            best = {node.id, pin.id, PinDir::Out, true};
+        }
+    }
+    return best;
+}
+
 // Where a class starts in a file already on disk, or -1.
 int classHeaderAt(const QString &file, const QString &className)
 {
@@ -254,10 +311,17 @@ void setSeverity(QWidget *w, const char *value)
     w->update();
 }
 
-// The add-node search the canvas right-click opens: a search box over a result
-// list, at the cursor, keyboard-driven from the first keystroke. This is the
-// primary way nodes get added, so it carries the graph's own variables as well
-// as the builtins and the catalogue.
+// The add-node search the canvas right-click opens, and the menu a wire dropped
+// on empty canvas opens too: a search box over a result list, at the cursor,
+// keyboard-driven from the first keystroke. This is the primary way nodes get
+// added, so it carries the graph's own variables as well as the task index and
+// the catalogue.
+//
+// Two things it has to teach, because neither is discoverable by looking. That
+// dropping a wire here narrows the list to what fits, which is a better way in
+// than any name search: the footer says so on every open. And, once narrowed,
+// what it narrowed to, because a short list with no explanation reads as a
+// broken one.
 //
 // Deliberately not a Q_OBJECT: it lives in this file, so a callback is cheaper
 // than a signal and does not need moc to see the class.
@@ -266,7 +330,8 @@ public:
     AddNodePopup(Document *doc, std::function<void(const QString &)> onPick,
                  QWidget *parent)
         : QWidget(parent, Qt::Popup), m_doc(doc), m_onPick(std::move(onPick)),
-          m_search(new QLineEdit(this)), m_list(new QTreeWidget(this))
+          m_search(new QLineEdit(this)), m_list(new QTreeWidget(this)),
+          m_mode(new QLabel(this)), m_footer(new QLabel(this))
     {
         setAttribute(Qt::WA_DeleteOnClose, true);
         setAttribute(Qt::WA_StyledBackground, true);
@@ -282,9 +347,21 @@ public:
         m_search->setPlaceholderText(tr("Add node: type to search"));
         layout->addWidget(m_search);
 
+        // Above the list, not below it, and never replaced by anything: in
+        // connect mode this is the only thing on screen that says why the list
+        // is short, and the rest of the time it is the only thing that says the
+        // gesture exists. Putting it in the footer meant it was covered by the
+        // selected row's own line the instant the popup opened.
+        m_mode->setTextFormat(Qt::PlainText);
+        m_mode->setWordWrap(true);
+        m_mode->setFont(theme::uiFont(8));
+        m_mode->setStyleSheet(QStringLiteral("color: %1;").arg(theme::textDim().name()));
+        layout->addWidget(m_mode);
+
         m_list->setColumnCount(2);
         m_list->setHeaderHidden(true);
         m_list->setRootIsDecorated(false);
+        m_list->setIndentation(10);
         m_list->setUniformRowHeights(true);
         m_list->setTextElideMode(Qt::ElideRight);
         m_list->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -292,17 +369,35 @@ public:
         m_list->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
         layout->addWidget(m_list, 1);
 
+        m_footer->setTextFormat(Qt::PlainText);
+        m_footer->setWordWrap(true);
+        m_footer->setFont(theme::uiFont(8));
+        m_footer->setStyleSheet(QStringLiteral("color: %1;").arg(theme::textDim().name()));
+        m_footer->setMinimumHeight(QFontMetrics(theme::uiFont(8)).lineSpacing() * 2 + 2);
+        layout->addWidget(m_footer);
+
         connect(m_search, &QLineEdit::textChanged, this,
                 [this](const QString &text) { populate(text); });
         connect(m_list, &QTreeWidget::itemActivated, this,
                 [this](QTreeWidgetItem *item, int) { pick(item); });
         connect(m_list, &QTreeWidget::itemClicked, this,
                 [this](QTreeWidgetItem *item, int) { pick(item); });
+        connect(m_list, &QTreeWidget::currentItemChanged, this,
+                [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateFooter(); });
+
+        // Once, not per keystroke: building the index resolves two dozen method
+        // names through a search over 29k rows apiece, and the only thing it
+        // depends on is the class, which cannot change while a popup is open.
+        if (m_doc) {
+            const Graph *g = m_doc->activeGraph();
+            m_index = nodeIndex(m_doc->catalog(), m_doc->builtins(),
+                                g ? selfClassOf(*g) : QString());
+        }
 
         // The caret stays in the search box the whole time; the arrow keys and
         // Return are handed to the list from here so a pick never needs a Tab.
         m_search->installEventFilter(this);
-        resize(400, 320);
+        resize(440, 400);
         populate(QString());
     }
 
@@ -371,13 +466,32 @@ private:
         if (m_onPick) m_onPick(key);
     }
 
-    void addRow(const QString &title, const QString &key, const QString &detail)
+    // A heading, or nullptr when the group turned out empty. Headings are not
+    // pickable and carry the group's reason for existing, so the footer says
+    // why the group is where it is when the arrow keys land on one.
+    QTreeWidgetItem *addHeading(const QString &title, const QString &doc)
     {
         auto *item = new QTreeWidgetItem(m_list);
         item->setText(0, title);
+        item->setFlags(Qt::ItemIsEnabled);
+        item->setFirstColumnSpanned(true);
+        item->setFont(0, theme::uiFont(8, true));
+        item->setForeground(0, theme::textDim());
+        item->setData(0, kDocRole, doc);
+        if (!doc.isEmpty()) item->setToolTip(0, doc);
+        return item;
+    }
+
+    void addRow(const QString &title, const QString &key, const QString &detail,
+                const QString &doc = QString(), QTreeWidgetItem *under = nullptr)
+    {
+        auto *item = under ? new QTreeWidgetItem(under) : new QTreeWidgetItem(m_list);
+        item->setText(0, title);
         item->setData(0, kKeyRole, key);
+        item->setData(0, kDocRole, doc);
         item->setText(1, detail);
         item->setForeground(1, theme::textDim());
+        if (!doc.isEmpty()) item->setToolTip(0, doc);
     }
 
     // True when a wire from the dragged pin has somewhere to land on this node.
@@ -391,92 +505,237 @@ private:
         return false;
     }
 
+    bool keyFits(const QString &key) const
+    {
+        if (!m_fitting) return true;
+        if (!m_doc) return false;
+        // An action row places nothing, so there is no pin for a wire to reach.
+        if (key == kPromoteKey || key == kAddEventKey) return false;
+        // defFor is memoised, so walking a ranking costs one def build per
+        // entry per session and nothing after that.
+        return defFits(key.startsWith(QLatin1String("bi."))
+                           ? m_doc->builtins().def(key)
+                           : m_doc->catalog().defFor(key));
+    }
+
+    // What the dragged pin carries, in the words the canvas paints on it.
+    QString draggedTypeWord() const
+    {
+        if (m_fitType.kind == PinKind::Object || m_fitType.kind == PinKind::Enum)
+            return m_fitType.cls.isEmpty() ? pinKindName(m_fitType.kind) : m_fitType.cls;
+        return pinKindName(m_fitType.kind);
+    }
+
+    // The line under the list. In connect mode it says what the list was
+    // narrowed to, because a short list is otherwise indistinguishable from a
+    // broken one. Otherwise it teaches the gesture that does the narrowing,
+    // which nothing on screen would otherwise mention.
+    QString standingLine() const
+    {
+        if (!m_fitting) {
+            return tr("Tip: drag a wire off any pin and let go on empty canvas. This "
+                      "menu then lists only the nodes that fit it.");
+        }
+        const QString word = draggedTypeWord();
+        if (m_fitType.kind == PinKind::Exec) {
+            return m_fitDir == PinDir::Out
+                       ? tr("Showing nodes that can run next.")
+                       : tr("Showing nodes that can run before this one.");
+        }
+        return m_fitDir == PinDir::Out
+                   ? tr("Showing nodes with an input that takes %1.").arg(word)
+                   : tr("Showing nodes with an output that gives %1.").arg(word);
+    }
+
+    void updateFooter()
+    {
+        m_mode->setText(standingLine());
+        const QTreeWidgetItem *item = m_list->currentItem();
+        // The empty state's first line is not selectable, so nothing is current
+        // when it is showing and its explanation would never be read.
+        if (!item) item = m_list->topLevelItem(0);
+        const QString doc = item ? item->data(0, kDocRole).toString() : QString();
+        m_footer->setText(doc.isEmpty()
+                              ? tr("Pick a row to see what it does before you place it.")
+                              : doc);
+    }
+
     void populate(const QString &query)
     {
         m_list->setUpdatesEnabled(false);
         m_list->clear();
         const QString q = query.trimmed();
+        // The same reading the catalogue search takes, so typing two words does
+        // not empty the half of this list that is not the catalogue.
         const auto matches = [&q](const QString &a, const QString &b) {
-            return q.isEmpty() || a.contains(q, Qt::CaseInsensitive)
-                   || b.contains(q, Qt::CaseInsensitive);
+            return matchesQuery(q, {a, b});
         };
 
         // The value the wire is carrying has no member behind it yet, and this
         // is where it gets one. First row because it is the answer whenever the
         // catalogue has nothing that fits. Exec pins carry no value to store.
+        //
+        // The type word is dropped in rather than the article being chosen for
+        // it: "a EntityAI" is what picking one gives you.
         if (m_fitting && m_fitType.kind != PinKind::Exec
             && matches(tr("Promote to variable"), QString()))
-            addRow(tr("Promote to variable"), kPromoteKey, tr("new member"));
-
-        // Where a graph starts. Searching for a node by name is no use to
-        // someone who does not know EEItemAttached exists, so the way into the
-        // ranked event list sits on the canvas menu, above everything a name
-        // search can find. A wire looking for a pin is not asking this.
-        if (!m_fitting && matches(tr("Add event..."), tr("override")))
-            addRow(tr("Add event..."), kAddEventKey, tr("what this class can hook"));
+            addRow(tr("Promote to variable"), kPromoteKey, tr("new member"),
+                   tr("Declares a member shaped like the %1 pin you dragged, and wires "
+                      "it up. The answer when nothing in the catalogue fits.")
+                       .arg(draggedTypeWord()));
 
         // Variables lead: they are the one node family that exists only in this
         // graph, so no amount of catalogue searching would turn them up.
         const Graph *g = m_doc ? m_doc->activeGraph() : nullptr;
-        if (g) {
+        QTreeWidgetItem *varHead = nullptr;
+        if (g && !g->variables.isEmpty()) {
             for (const GraphVariable &v : g->variables) {
                 if (!matches(v.name, v.type)) continue;
                 // Get has only an output and Set takes the value on an input,
                 // so which of the two is offered follows the drag's direction.
                 // The defs are only built when there is a pin to test them
                 // against; outside connect mode both rows always show.
-                if (!m_fitting
-                    || defFits(m_doc->builtins().variableDef(v, false, m_doc->catalog())))
+                const bool get =
+                    !m_fitting
+                    || defFits(m_doc->builtins().variableDef(v, false, m_doc->catalog()));
+                const bool set =
+                    !m_fitting
+                    || defFits(m_doc->builtins().variableDef(v, true, m_doc->catalog()));
+                if (!get && !set) continue;
+                if (!varHead)
+                    varHead = addHeading(tr("This graph's members"),
+                                         tr("Declared on this class in the Variable "
+                                            "Manager. Nothing outside this graph has "
+                                            "them, so no search would find them."));
+                if (get)
                     addRow(tr("Get %1").arg(v.name),
-                           QStringLiteral("var.get.%1").arg(v.id), v.type);
-                if (!m_fitting
-                    || defFits(m_doc->builtins().variableDef(v, true, m_doc->catalog())))
+                           QStringLiteral("var.get.%1").arg(v.id), v.type,
+                           tr("Reads the member %1.").arg(v.name), varHead);
+                if (set)
                     addRow(tr("Set %1").arg(v.name),
-                           QStringLiteral("var.set.%1").arg(v.id), v.type);
+                           QStringLiteral("var.set.%1").arg(v.id), v.type,
+                           tr("Writes a new value into the member %1.").arg(v.name),
+                           varHead);
             }
         }
 
+        // The task index, which is where the answer is when the question is
+        // "how do I do X" rather than "what is it called". It leads with the
+        // way into the ranked event list, because searching for a node by name
+        // is no use to someone who does not know EEItemAttached exists.
+        QSet<QString> shown;
         if (m_doc) {
-            for (const NodeDef &def : m_doc->builtins().all())
-                if (matches(def.title, def.subtitle + ' ' + def.category) && defFits(def))
-                    addRow(def.title, def.key,
-                           def.subtitle.isEmpty() ? def.category : def.subtitle);
+            for (const IndexGroup &group : m_index) {
+                QTreeWidgetItem *head = nullptr;
+                for (const IndexRow &row : group.rows) {
+                    if (!rowMatches(q, row, group.title)) continue;
+                    if (!keyFits(row.key)) continue;
+                    if (!head) head = addHeading(group.title, group.doc);
+                    addRow(row.title, row.key, row.detail, row.doc, head);
+                    shown.insert(row.key);
+                }
+            }
         }
 
         if (!q.isEmpty() && m_doc) {
             SearchOptions opts;
             opts.limit = m_fitting ? kFitScan : 60;
+            const QString self = g ? selfClassOf(*g) : QString();
+            // The palette withholds what the generated script could not call
+            // and so does this: a node picked here lands on the same graph.
+            opts.selfClass = self;
+            opts.respectAccess = true;
+            QTreeWidgetItem *head = nullptr;
             int kept = 0;
             for (const SearchHit &hit : m_doc->catalog().search(q, opts)) {
+                if (shown.contains(hit.key)) continue;
+                // The same rule the dock applies: an event this class does not
+                // inherit is a method with the right name on the wrong class.
+                if (!eventFitsClass(m_doc->catalog(), hit.category, hit.subtitle, self))
+                    continue;
                 if (m_fitting) {
                     if (kept >= kFitKeep) break;
-                    // defFor is memoised, so walking the ranking costs one def
-                    // build per entry per session and nothing after that.
-                    if (!defFits(m_doc->catalog().defFor(hit.key))) continue;
+                    if (!keyFits(hit.key)) continue;
                     ++kept;
                 }
+                if (!head) head = addHeading(tr("Everything named like that"), QString());
                 addRow(hit.title, hit.key,
-                       hit.subtitle.isEmpty() ? hit.category : hit.subtitle);
+                       hit.subtitle.isEmpty() ? hit.category : hit.subtitle,
+                       nodeSummary(m_doc->catalog(), m_doc->builtins(), hit.key), head);
             }
         }
 
-        if (m_list->topLevelItemCount() == 0) {
-            auto *empty = new QTreeWidgetItem(m_list);
-            empty->setText(0, m_fitting
-                                  ? tr("Nothing here takes that pin.")
-                                  : tr("No match. Try a shorter term."));
-            empty->setFlags(Qt::NoItemFlags);
-            empty->setForeground(0, theme::textDim());
-        } else {
-            m_list->setCurrentItem(m_list->topLevelItem(0));
-        }
+        if (m_list->topLevelItemCount() == 0) addEmptyState(q);
+        m_list->expandAll();
+
+        if (QTreeWidgetItem *first = m_list->topLevelItem(0))
+            m_list->setCurrentItem(first->childCount() > 0 ? first->child(0) : first);
         m_list->setUpdatesEnabled(true);
+        updateFooter();
+    }
+
+    // What to say when nothing survived. Naming the pin rather than the query
+    // is what makes a narrowed list readable: the reason there are no rows is
+    // the pin, and the two rows that follow are the real ways out of it.
+    void addEmptyState(const QString &query)
+    {
+        auto *empty = new QTreeWidgetItem(m_list);
+        empty->setFlags(Qt::NoItemFlags);
+        empty->setForeground(0, theme::textDim());
+        empty->setFirstColumnSpanned(true);
+        if (m_fitting) {
+            const QString word = draggedTypeWord();
+            const bool exec = m_fitType.kind == PinKind::Exec;
+            QString said;
+            if (exec)
+                said = m_fitDir == PinDir::Out ? tr("No node can run next from there.")
+                                               : tr("No node can run before that one.");
+            else
+                said = m_fitDir == PinDir::Out
+                           ? tr("No node takes %1 as an input.").arg(word)
+                           : tr("No node gives %1 as an output.").arg(word);
+            if (!query.isEmpty())
+                said = tr("Nothing named \"%1\" fits that pin.").arg(query);
+            empty->setText(0, said);
+            empty->setData(0, kDocRole,
+                           exec ? tr("A Raw Enforce node takes the flow and keeps the "
+                                     "statement as text.")
+                                : tr("Promote to variable stores the value on the class "
+                                     "instead, and a Raw Expression writes it as "
+                                     "Enforce."));
+            // An exec pin has no value to write as an expression, and a value
+            // pin has no flow for a statement node to take.
+            if (exec)
+                addRow(tr("Raw Enforce"), QStringLiteral("bi.raw"), tr("inline code"),
+                       tr("Keeps the statement as text and still generates."));
+            else
+                addRow(tr("Raw Expression"), QStringLiteral("bi.rawExpr"),
+                       tr("inline value"),
+                       tr("Writes the value as Enforce text. Still generates, and the "
+                          "importer can read some of it back into nodes later."));
+            return;
+        }
+        empty->setText(0, tr("No node is named \"%1\".").arg(query));
+        empty->setData(0, kDocRole,
+                       tr("The search reads names, owning classes and signatures. Every "
+                          "term has to land somewhere on the row."));
+        addRow(tr("Browse events instead"), kAddEventKey,
+               tr("what this class can hook"),
+               tr("A hook is found by the moment it fires, not by its name. That list "
+                  "is ranked and grouped; this search is not."));
+        addRow(tr("Raw Enforce"), QStringLiteral("bi.raw"), tr("inline code"),
+               tr("Keeps the line as text and still generates. Refusing to guess is "
+                  "why the importer never rewrites code it did not understand."));
     }
 
     Document *m_doc;
     std::function<void(const QString &)> m_onPick;
     QLineEdit *m_search;
     QTreeWidget *m_list;
+    QLabel *m_mode;
+    QLabel *m_footer;
+    // The task index for the class this popup opened on, built once.
+    QVector<IndexGroup> m_index;
     bool m_picked = false;
     // Connect mode: the pin a wire was dragged off, and the direction it left
     // in. Unset means the plain add-node search.
@@ -586,6 +845,18 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     connect(m_tabs, &QTabBar::currentChanged, this, &MainWindow::onTabChanged);
     connect(m_palette, &PalettePanel::nodeRequested,
             this, &MainWindow::onPaletteNodeRequested);
+    // The palette's index leads with the row that hands over to the events
+    // list, because a hook is found by the moment it fires and not by its name.
+    // The dock is raised and its search focused, so the handover lands on a
+    // list that is ready to be typed into rather than on a tab behind another.
+    connect(m_palette, &PalettePanel::eventsRequested, this, [this] {
+        if (QDockWidget *dock = dockOf(m_events)) {
+            if (!dock->toggleViewAction()->isChecked()) dock->toggleViewAction()->trigger();
+            dock->raise();
+            raiseDockTab(this, dock);
+        }
+        m_events->focusSearch();
+    });
     connect(m_events, &EventsPanel::eventRequested, this, &MainWindow::placeEventNode);
     connect(m_events, &EventsPanel::customEventRequested,
             this, &MainWindow::addCustomEvent);
@@ -1106,13 +1377,13 @@ void MainWindow::applyDockSizes()
 {
     applyBottomRowSize();
 
-    // Three slices for the left column, near enough to even that no list is
-    // starved to feed another. The last slice keeps a little more because it is
-    // shared by the Events list and the Mod Explorer tree. The old 380 there
-    // left the outliner and the palette under four rows on a short window, which
-    // is the same defect the Events dock used to have when it owned the share.
+    // Three slices for the left column, still near enough to even that no list
+    // is starved to feed another. The palette takes the extra because it is now
+    // the index the other two are reached through: its first row opens the
+    // Events list, and its browse view is twelve groups rather than eight
+    // categories, so an even third opened it on three rows and no heading.
     resizeDocks({dockOf(m_outliner), dockOf(m_palette), dockOf(m_events)},
-                {220, 210, 240}, Qt::Vertical);
+                {210, 260, 220}, Qt::Vertical);
 
     // The variable table is the panel; the inspector and the minimap both read
     // fine at their own minimum, so the table is what the spare height goes to.
@@ -1142,7 +1413,7 @@ void MainWindow::applyBottomRowSize()
     // tab group has one height whichever tab is up, so the share has to follow
     // the tab rather than be picked once.
     QDockWidget *browser = dockOf(m_modBrowser);
-    const bool browsing = browser && browser->isVisible();
+    const bool browsing = dockIsInFront(this, browser);
     if (browsing) {
         wanted = qMax(wanted, usable * 2 / 5);
         // And no further. Two fifths of a 950 tall window is 380, and taking all
@@ -1178,8 +1449,19 @@ void MainWindow::showEvent(QShowEvent *event)
         resize(wh.at(0).toInt(), wh.at(1).toInt());
 
     applyDockSizes();
+    // The palette's search results and its empty state cannot be photographed
+    // without a query in the box, and nothing types one in a headless run.
+    if (m_palette) {
+        const QString query = qEnvironmentVariable("SUDO_UI_SEARCH");
+        if (!query.isEmpty()) m_palette->search(query);
+    }
+    // A panel that only fills in for a selected node cannot be photographed at
+    // all without one, and nothing clicks the canvas in a headless run.
+    const QString pick = qEnvironmentVariable("SUDO_UI_SELECT").trimmed();
+    if (!pick.isEmpty() && m_doc) m_doc->setSelection({pick});
     browseForScreenshot();
     openMenuForScreenshot();
+    openPopupForScreenshot();
 
     // The canvas only gets its real width once the docks have taken theirs, and
     // a graph framed against the window's first guess sits off to one side of
@@ -1262,6 +1544,56 @@ void MainWindow::openMenuForScreenshot()
         menuBar()->setActiveAction(action);
         const QRect where = menuBar()->actionGeometry(action);
         menu->popup(menuBar()->mapToGlobal(where.bottomLeft()));
+        return;
+    }
+}
+
+void MainWindow::openPopupForScreenshot()
+{
+    const QString wanted = qEnvironmentVariable("SUDO_UI_POPUP").trimmed().toLower();
+    if (wanted.isEmpty() || !m_view) return;
+
+    // Left of centre and high, so the popup sits over canvas rather than over
+    // the docks it is being judged beside.
+    const QPoint at = m_view->viewport()->mapToGlobal(
+        QPoint(m_view->viewport()->width() / 3, m_view->viewport()->height() / 5));
+    const QPointF scenePos = m_view->mapToScene(m_view->mapFromGlobal(at));
+
+    if (wanted == QLatin1String("event")) {
+        showEventSearch(scenePos);
+    } else if (wanted.startsWith(QLatin1String("connect"))) {
+        // Opened through showConnectSearch rather than by building the popup
+        // here, so the picture is of the path a wire drag really takes.
+        const PinRef from =
+            dragSourceForScreenshot(m_doc, wanted.endsWith(QLatin1String("exec")));
+        if (!from.valid) return;
+        showConnectSearch(from, scenePos);
+    } else {
+        showAddNodeSearch(scenePos);
+    }
+
+    // Both of those defer the popup by one turn of the event loop so it goes up
+    // after the gesture that opened it. There is no gesture here, so the turn
+    // has to be taken by hand.
+    QCoreApplication::processEvents();
+    QCoreApplication::processEvents();
+
+    for (QWidget *top : QApplication::topLevelWidgets()) {
+        if (!top->isVisible() || !top->isWindow()) continue;
+        const QString name = top->objectName();
+        if (name != QLatin1String("addNodePopup") && name != QLatin1String("eventPopup"))
+            continue;
+        // The pixmap is the popup's own rendering at its own size and position.
+        // Painted into a child of the window because that is what win.grab()
+        // reaches; the popup itself is then closed rather than left holding the
+        // mouse grab.
+        auto *overlay = new QLabel(this);
+        overlay->setPixmap(top->grab());
+        overlay->setFixedSize(top->size());
+        overlay->move(mapFromGlobal(top->mapToGlobal(QPoint(0, 0))));
+        overlay->raise();
+        overlay->show();
+        top->close();
         return;
     }
 }

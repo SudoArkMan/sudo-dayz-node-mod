@@ -209,6 +209,12 @@ private:
     // the way a user meets it. Same deal as browseForScreenshot: unset in every
     // normal run, and then this returns at once.
     void openMenuForScreenshot();
+    // Opens the canvas popup named by SUDO_UI_POPUP (add, connect, connect-exec
+    // or event) through the code path a user reaches it by, then paints it into
+    // the window so a grab of the window shows it. main.cpp composites QMenu
+    // windows and these are not menus, and the drag-out menu is the one surface
+    // that cannot be photographed any other way. Unset in every normal run.
+    void openPopupForScreenshot();
     // The read only bar over the canvas, and the dim tab text that goes with it.
     void updateReadOnlyBar();
     // True when the active script came out of another author's mod, in which

@@ -1806,10 +1806,25 @@ void timingNodeIssues(const Ctx &ctx, QVector<Diagnostic> &out)
     // Every callback this graph declares, and which node declared it.
     QHash<QString, const GraphNode *> timers;    // timer name -> Set Timer node
     QHash<QString, const GraphNode *> deferred;  // call name  -> Call Later node
+    // How many nodes want each name. The maps above keep one node per name, so
+    // they cannot answer this, and one name claimed twice is the mistake the
+    // whole design exists to remove: the two nodes share a member and a
+    // callback, and the generator writes the method once.
+    QHash<QString, int> claims;
     for (const GraphNode &n : ctx.graph.nodes) {
         if (n.ref == bi::SetTimer) timers.insert(bi::timingName(n), &n);
         else if (n.ref == bi::CallLater) deferred.insert(bi::timingName(n), &n);
+        else continue;
+        claims[bi::timingName(n)]++;
     }
+    // What the class already spells, so a timer that lands on a hand-written
+    // method or member is caught here rather than in the generated file.
+    QSet<QString> declaredMethods;
+    for (const GraphFunction &f : ctx.graph.functions)
+        declaredMethods.insert(f.name.trimmed());
+    QSet<QString> declaredMembers;
+    for (const GraphVariable &v : ctx.graph.variables)
+        declaredMembers.insert(v.name.trimmed());
 
     for (const GraphNode &n : ctx.graph.nodes) {
         if (!ctx.reachable.contains(n.id)) continue;
@@ -1834,6 +1849,43 @@ void timingNodeIssues(const Ctx &ctx, QVector<Diagnostic> &out)
                                                "that pin. The exec pin beside it is the flow "
                                                "carrying on now, which is not the same thing."),
                                 n.id, pin));
+
+            // The name is the member, the string the engine dispatches on and
+            // the method it lands in, all three. Two nodes claiming one name
+            // therefore generate one method, and whichever chain lost runs
+            // never. The engine has nothing to report: the call is valid and
+            // the method exists.
+            const QString what = isTimer ? QStringLiteral("Set Timer")
+                                         : QStringLiteral("Call Later");
+            const QString method = isTimer ? bi::timerCallback(name) : name;
+            if (claims.value(name) > 1)
+                out.append(diag(Severity::Warning, QStringLiteral("DZ320"),
+                                QStringLiteral("Another %1 node is also named \"%2\", so both "
+                                               "of them run %3() and only one of the two "
+                                               "chains is generated.")
+                                    .arg(what, name, method),
+                                QStringLiteral("Name each one for what it does, in Details. "
+                                               "The name becomes the method, so two of them "
+                                               "cannot share it."),
+                                n.id));
+            else if (declaredMethods.contains(method))
+                out.append(diag(Severity::Warning, QStringLiteral("DZ320"),
+                                QStringLiteral("This node generates %1(), and the script "
+                                               "already declares a function with that name, "
+                                               "so the node is not generated.")
+                                    .arg(method),
+                                QStringLiteral("Rename the node in Details, or rename the "
+                                               "function in the Variable Manager."),
+                                n.id));
+            else if (isTimer && declaredMembers.contains(bi::timerMember(name)))
+                out.append(diag(Severity::Warning, QStringLiteral("DZ320"),
+                                QStringLiteral("This node declares %1, and the script already "
+                                               "has a variable of that name, so the timer is "
+                                               "not generated.")
+                                    .arg(bi::timerMember(name)),
+                                QStringLiteral("Rename the node in Details, or rename the "
+                                               "variable in the Variable Manager."),
+                                n.id));
         }
 
         // A Stop or a Cancel is matched to its partner by name and by nothing

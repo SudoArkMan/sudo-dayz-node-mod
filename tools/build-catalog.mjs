@@ -92,6 +92,32 @@ const isEditorPath = (p) => /^editor[\\/]/i.test(p)
 const CALLBACK_NAME = /^(EE|EOn|On)[A-Z]/
 
 /**
+ * Hooks that neither rule above can see, named by the class that declares them.
+ *
+ * The two rules read vanilla: a descendant that overrides the method, or a name
+ * following the engine's own convention. Both miss a hook that vanilla declares
+ * on a leaf class, never overrides itself, and does not name `On*`. That is not
+ * hypothetical, it is the two methods a real mod reopens `PlayerBase` for most
+ * often. Counted over the unpacked DayZ Expansion tree: `SetActions` is
+ * overridden 97 times and `Init` 92, and inside `modded class PlayerBase`
+ * blocks specifically they are the top two at 9 and 7, ahead of `EEKilled` at 6
+ * and `EEHitBy` at 4, both of which the rules do find.
+ *
+ * `ItemBase::SetActions` is already an event, because ItemBase has subclasses
+ * that override it, so without this the same method is a hook on an item and a
+ * plain call on a player.
+ *
+ * Keyed on `Class|Method` rather than on the name alone: a bare name would
+ * catch every `Init` in the tree, which is what the rule this replaced did.
+ * Every entry needs a count behind it, from the mod corpus rather than from
+ * memory.
+ */
+const MOD_HOOKS = new Set([
+  'PlayerBase|Init',
+  'PlayerBase|SetActions',
+])
+
+/**
  * Doc comments are doxygen. Strip the markup that only makes sense rendered,
  * drop `@code` blocks (often dozens of lines), and cap the length: the node
  * inspector wants a paragraph, not a manual page.
@@ -291,6 +317,7 @@ for (const f of idx.files) {
         : hooked.has(`${c.name}|${m.name}`)
           || mods.includes('event')
           || CALLBACK_NAME.test(m.name)
+          || MOD_HOOKS.has(`${c.name}|${m.name}`)
       // The `event` keyword marks a declaration that is never itself an
       // override, so the !override test still holds for both rules.
       const nativeBody = !LEGACY_EVENTS && mods.includes('native')

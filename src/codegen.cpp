@@ -1909,6 +1909,15 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
     // the table.
     QStringList timingMembers;
     QSet<QString> timingMethods;
+    // Everything the class already declares. A generated name that lands on one
+    // of these produces a file with two of the same member or two of the same
+    // method in it, which is a compile error a long way from the node that
+    // caused it.
+    QSet<QString> takenMethods = QSet<QString>(seenMethods.keyBegin(), seenMethods.keyEnd());
+    for (const GraphFunction &f : graph.functions) takenMethods.insert(f.name.trimmed());
+    QSet<QString> takenMembers;
+    for (const GraphVariable &v : graph.variables) takenMembers.insert(v.name.trimmed());
+
     for (const GraphNode &n : graph.nodes) {
         const bool isTimer = n.ref == bi::SetTimer;
         if (!isTimer && n.ref != bi::CallLater) continue;
@@ -1917,13 +1926,21 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         const QString method = isTimer ? bi::timerCallback(name) : name;
         const QString what = isTimer ? QStringLiteral("Set Timer")
                                      : QStringLiteral("Call Later");
-        if (timingMethods.contains(method) || seenMethods.contains(method)) {
+        if (timingMethods.contains(method) || takenMethods.contains(method)) {
             ctx.warnings.append(
                 what + QStringLiteral(" node \"") + name
                 + QStringLiteral("\" wants to generate ") + method
                 + QStringLiteral("(), which this class already has. Only the first is "
                                  "generated, so the rest of them run the wrong chain. Give "
                                  "each one its own name."));
+            continue;
+        }
+        if (isTimer && takenMembers.contains(bi::timerMember(name))) {
+            ctx.warnings.append(
+                what + QStringLiteral(" node \"") + name
+                + QStringLiteral("\" wants to declare ") + bi::timerMember(name)
+                + QStringLiteral(", and this class already has a variable of that name. "
+                                 "The timer is not generated. Rename one of them."));
             continue;
         }
         timingMethods.insert(method);

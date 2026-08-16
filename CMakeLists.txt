@@ -72,6 +72,7 @@ add_library(nodemod_model OBJECT
   src/codegen.h     src/codegen.cpp
   src/analysis.h    src/analysis.cpp
   src/events.h      src/events.cpp
+  src/nodeindex.h   src/nodeindex.cpp
   src/document.h    src/document.cpp
   src/recentprojects.h src/recentprojects.cpp
 )

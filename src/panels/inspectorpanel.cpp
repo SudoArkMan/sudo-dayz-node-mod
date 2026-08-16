@@ -469,8 +469,51 @@ InspectorPanel::InspectorPanel(Document *doc, QWidget *parent)
     classBox->setVisible(false);
     layout->addWidget(classBox);
 
+    auto *timingBox = new QWidget(this);
+    auto *timingLayout = new QVBoxLayout(timingBox);
+    timingLayout->setContentsMargins(0, 6, 0, 0);
+    timingLayout->setSpacing(3);
+    auto *timingLabel = new QLabel(tr("What is this one called?"), timingBox);
+    timingLabel->setFont(theme::uiFont(8, true));
+    timingLayout->addWidget(timingLabel);
+    m_timingName = new QLineEdit(timingBox);
+    m_timingName->setPlaceholderText(tr("Reload"));
+    timingLayout->addWidget(m_timingName);
+    auto *timingNote = new QLabel(
+        tr("It becomes the member and the method, so two cannot share one. Stop Timer "
+           "and Cancel Call Later find their partner by it."),
+        timingBox);
+    timingNote->setObjectName(QStringLiteral("note"));
+    timingNote->setWordWrap(true);
+    timingNote->setStyleSheet(QStringLiteral("color: %1").arg(theme::textDim().name()));
+    timingLayout->addWidget(timingNote);
+    // The queue lives in a box of its own so the label goes with the combo:
+    // Stop Timer and Cancel Call Later take the queue from the node they are
+    // named after, and a control they must not touch is worse than none.
+    auto *queueBox = new QWidget(timingBox);
+    auto *queueLayout = new QVBoxLayout(queueBox);
+    queueLayout->setContentsMargins(0, 6, 0, 0);
+    queueLayout->setSpacing(3);
+    auto *queueLabel = new QLabel(tr("Which queue?"), queueBox);
+    queueLabel->setFont(theme::uiFont(8, true));
+    queueLayout->addWidget(queueLabel);
+    m_timingQueue = new QComboBox(queueBox);
+    for (const QString &key : Builtins::callCategories())
+        m_timingQueue->addItem(Builtins::callCategoryLabel(key), key);
+    queueLayout->addWidget(m_timingQueue);
+    timingLayout->addWidget(queueBox);
+    timingBox->setVisible(false);
+    layout->addWidget(timingBox);
+
     connect(m_beginMode, &QComboBox::currentIndexChanged,
             this, &InspectorPanel::onBeginModeChanged);
+    // editingFinished rather than textChanged: the name reaches the generated
+    // file, and a keystroke at a time would put one undo step on the stack per
+    // letter and rewrite the script between them.
+    connect(m_timingName, &QLineEdit::editingFinished,
+            this, &InspectorPanel::onTimingNameCommitted);
+    connect(m_timingQueue, &QComboBox::activated,
+            this, &InspectorPanel::onTimingQueueChanged);
     connect(m_callSuper, &QCheckBox::toggled, this, &InspectorPanel::onSuperToggled);
     // activated fires on a pick, editingFinished on a typed name plus Enter or
     // focus leaving. currentIndexChanged would also fire while the box is being
@@ -827,6 +870,33 @@ void InspectorPanel::refresh()
         m_classNodeId = node->id;
     }
 
+    QWidget *timingBox = optionBox(m_timingName);
+    const bool isTiming = node->ref == bi::SetTimer || node->ref == bi::StopTimer
+                          || node->ref == bi::CallLater
+                          || node->ref == bi::CancelCallLater;
+    if (timingBox) timingBox->setVisible(isTiming);
+    if (!isTiming) {
+        m_timingNodeId.clear();
+    } else if (!isBusy(m_timingName)) {
+        const QSignalBlocker nameBlock(m_timingName);
+        const QSignalBlocker queueBlock(m_timingQueue);
+        // What the node carries, not what it generates: bi::timingName fills a
+        // blank in from the node id, and showing that would turn the fallback
+        // into a name the moment the box lost focus.
+        m_timingName->setText(node->opts.value(QStringLiteral("name")));
+        const QString queue = node->opts.value(QStringLiteral("category"),
+                                               QStringLiteral("system"));
+        int at = m_timingQueue->findData(queue);
+        if (at < 0) at = m_timingQueue->findData(QStringLiteral("system"));
+        m_timingQueue->setCurrentIndex(qMax(0, at));
+        // Only the two that schedule pick a queue. Stop and Cancel have to ask
+        // the queue their partner used, so a second control for it is a way to
+        // get it wrong, and the analyser reports the mismatch as DZ318.
+        const bool schedules = node->ref == bi::SetTimer || node->ref == bi::CallLater;
+        if (QWidget *box = m_timingQueue->parentWidget()) box->setVisible(schedules);
+        m_timingNodeId = node->id;
+    }
+
     QWidget *superBox = optionBox(m_callSuper);
     // Begin and End are Builtin-kind, not Event-kind, but codegen and analysis
     // both honour noSuper on them, so gating on kind alone left the flag set
@@ -857,6 +927,7 @@ void InspectorPanel::showEmpty()
     if (QWidget *box = optionBox(m_beginMode)) box->setVisible(false);
     if (QWidget *box = optionBox(m_callSuper)) box->setVisible(false);
     if (QWidget *box = optionBox(m_classPick)) box->setVisible(false);
+    if (QWidget *box = optionBox(m_timingName)) box->setVisible(false);
 }
 
 void InspectorPanel::showVariable(const QString &variableId)
@@ -899,6 +970,7 @@ void InspectorPanel::setVariableMode(bool on)
     if (QWidget *box = optionBox(m_beginMode)) box->setVisible(false);
     if (QWidget *box = optionBox(m_callSuper)) box->setVisible(false);
     if (QWidget *box = optionBox(m_classPick)) box->setVisible(false);
+    if (QWidget *box = optionBox(m_timingName)) box->setVisible(false);
 }
 
 void InspectorPanel::fillVariable(const GraphVariable &var)
@@ -1188,6 +1260,49 @@ void InspectorPanel::onClassCommitted()
         // the older one, so leaving it behind would quietly win.
         live->opts.remove(QStringLiteral("class"));
     }
+    m_doc->commitEdit();
+}
+
+void InspectorPanel::onTimingNameCommitted()
+{
+    // The box has to still be showing the node it is about to write to:
+    // editingFinished also fires on focus leaving, and clicking straight from
+    // one timer to another delivers it after the selection has moved.
+    if (m_nodeId.isEmpty() || m_timingNodeId != m_nodeId) return;
+    if (!m_doc || !m_doc->activeGraph()) return;
+    const GraphNode *node = m_doc->activeGraph()->node(m_nodeId);
+    if (!node) return;
+
+    const QString name = m_timingName->text().trimmed();
+    if (node->opts.value(QStringLiteral("name")) == name) return;
+
+    // The name decides the member, the callback method and the string in the
+    // Run call, so it is a graph edit and belongs on the undo stack.
+    m_doc->beginEdit(tr("Rename timer"));
+    if (GraphNode *live = m_doc->activeGraph()->node(m_nodeId)) {
+        // Removed rather than stored empty, so the node falls back to being
+        // named after itself instead of generating `m_` and a bare `Elapsed`.
+        if (name.isEmpty()) live->opts.remove(QStringLiteral("name"));
+        else live->opts.insert(QStringLiteral("name"), name);
+    }
+    m_doc->commitEdit();
+}
+
+void InspectorPanel::onTimingQueueChanged(int index)
+{
+    if (m_nodeId.isEmpty() || m_timingNodeId != m_nodeId || index < 0) return;
+    if (!m_doc || !m_doc->activeGraph()) return;
+    const QString key = m_timingQueue->itemData(index).toString();
+    if (key.isEmpty()) return;
+
+    const GraphNode *node = m_doc->activeGraph()->node(m_nodeId);
+    if (!node
+        || node->opts.value(QStringLiteral("category"), QStringLiteral("system")) == key)
+        return;
+
+    m_doc->beginEdit(tr("Change call queue"));
+    if (GraphNode *live = m_doc->activeGraph()->node(m_nodeId))
+        live->opts.insert(QStringLiteral("category"), key);
     m_doc->commitEdit();
 }
 

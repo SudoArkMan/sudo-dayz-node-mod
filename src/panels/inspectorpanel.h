@@ -49,6 +49,8 @@ private slots:
     void onBeginModeChanged(int index);
     void onSuperToggled(bool checked);
     void onClassCommitted();
+    void onTimingNameCommitted();
+    void onTimingQueueChanged(int index);
     void onNodeSelectionChanged();
     void onNameCommitted();
     void onTypeCommitted();
@@ -73,6 +75,15 @@ private:
     // that after the selection has already moved, which would write the old
     // node's class onto the new one.
     QString m_classNodeId;
+    // The four timing nodes are driven entirely by a name: it becomes the
+    // member, the string the engine dispatches on and the method it lands in,
+    // and it is how Stop Timer finds the Set Timer it stops. Without these two
+    // the name could only be set by hand-editing the .sdzn, so every Stop Timer
+    // placed from the palette stopped nothing and the node's own help pointed
+    // at a control that did not exist.
+    QLineEdit *m_timingName;
+    QComboBox *m_timingQueue;
+    QString m_timingNodeId;
     QString m_nodeId;
 
     // Variable details. Empty id means the panel is on a node, or on nothing.
