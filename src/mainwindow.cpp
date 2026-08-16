@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "analysis.h"
+#include "branding.h"
 #include "canvas/minimapwidget.h"
 #include "canvas/nodescene.h"
 #include "canvas/nodeview.h"
@@ -14,6 +15,7 @@
 #include "panels/inspectorpanel.h"
 #include "panels/outlinerpanel.h"
 #include "panels/palettepanel.h"
+#include "panels/testpanel.h"
 #include "panels/variablespanel.h"
 #include "theme.h"
 #include "widgets/codedialog.h"
@@ -33,12 +35,14 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <QSaveFile>
 #include <QScreen>
 #include <QSet>
@@ -636,6 +640,10 @@ void MainWindow::buildMenus()
                       .arg(m_analysis.errors).arg(m_analysis.warnings));
     });
 
+    // Between Tools and Preferences, because running the mod is the step after
+    // generating it. Filled in buildTestMenu once the Test dock exists.
+    m_testMenu = menuBar()->addMenu(QStringLiteral("&Test"));
+
     QMenu *prefs = menuBar()->addMenu(QStringLiteral("&Preferences"));
     prefs->addAction(QStringLiteral("About"), this, [this]() {
         const auto totals = m_doc->catalog().totals();
@@ -669,6 +677,53 @@ void MainWindow::buildToolBar()
     // of the promised set.
     bar->addAction(QStringLiteral("Fit"), this, [this]() { m_view->zoomToFit(); });
     bar->addAction(QStringLiteral("100%"), this, [this]() { m_view->resetZoom(); });
+
+    m_toolBar = bar;
+    // An expanding blank widget is what pins the mark to the right: a toolbar
+    // lays its items out left to right and has no alignment of its own.
+    m_toolBarGap = new QWidget(bar);
+    m_toolBarGap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_toolBarGap->setAttribute(Qt::WA_TransparentForMouseEvents);
+    bar->addWidget(m_toolBarGap);
+    m_cornerMark = new QLabel(bar);
+    m_cornerMark->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_cornerMark->setContentsMargins(0, 0, 6, 0);
+    bar->addWidget(m_cornerMark);
+    updateCornerMark();
+}
+
+void MainWindow::updateCornerMark()
+{
+    if (!m_toolBar || !m_cornerMark) return;
+
+    // Cut to the bar rather than to a constant: the bar's height follows the
+    // user's font size, and a fixed pixmap would either float in it or push it
+    // taller. The guard matters because this runs on every resize.
+    const int height = qBound(14, m_toolBar->height() - 8, 32);
+    if (height != m_cornerHeight) {
+        m_cornerHeight = height;
+        m_cornerMark->setPixmap(branding::cornerMark(height, devicePixelRatioF()));
+    }
+
+    // The mark is decoration and the actions are the toolbar's job, so a narrow
+    // window loses the mark rather than pushing Fit and 100% behind the
+    // overflow arrow.
+    const QLayout *layout = m_toolBar->layout();
+    const int spacing = layout ? qMax(0, layout->spacing()) : 0;
+    int actions = 0;
+    for (QAction *action : m_toolBar->actions()) {
+        const QWidget *w = m_toolBar->widgetForAction(action);
+        if (!w || w == m_toolBarGap || w == m_cornerMark) continue;
+        actions += w->sizeHint().width() + spacing;
+    }
+    const int room = actions + m_cornerMark->sizeHint().width() + 24;
+    m_cornerMark->setVisible(m_toolBar->width() >= room);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    updateCornerMark();
 }
 
 void MainWindow::buildLayoutActions(QMenu *menu, QToolBar *bar)
@@ -780,6 +835,7 @@ void MainWindow::buildDocks()
     m_minimap = new MiniMapWidget(m_scene, m_view, this);
     m_codeView = new CodeViewPanel(m_doc, this);
     m_explorer = new ExplorerPanel(m_doc, this);
+    m_testRun = new TestPanel(m_doc, this);
 
     QDockWidget *outlinerDock =
         makeDock(QStringLiteral("Graph Outliner"), m_outliner, Qt::LeftDockWidgetArea);
@@ -800,6 +856,13 @@ void MainWindow::buildDocks()
     QDockWidget *codeDock =
         makeDock(QStringLiteral("Generated Code"), m_codeView, Qt::BottomDockWidgetArea,
                  Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    // Behind the generated file rather than beside it: both want the full width
+    // and only one of them is worth watching at a time.
+    QDockWidget *testDock =
+        makeDock(QStringLiteral("Test"), m_testRun, Qt::BottomDockWidgetArea,
+                 Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    tabifyDockWidget(codeDock, testDock);
+    codeDock->raise();
 
     splitDockWidget(outlinerDock, paletteDock, Qt::Vertical);
     // Events sits under the palette, not under the explorer: the two node
@@ -843,15 +906,35 @@ void MainWindow::buildDocks()
     connect(m_explorer, &ExplorerPanel::configActivated, this, &MainWindow::openModConfig);
     connect(m_explorer, &ExplorerPanel::projectActivated,
             this, &MainWindow::openProjectPath);
+    // A failed build is worth seeing with the dock tabbed behind the code view.
+    connect(m_testRun, &TestPanel::statusMessage, this, &MainWindow::flashStatus);
+    buildTestMenu();
     syncExplorerRoot();
 
     // Dock toggles go under View, which buildMenus left open for them.
     for (QAction *a : menuBar()->actions()) {
         if (a->text() != QLatin1String("&View") || !a->menu()) continue;
         for (QDockWidget *d : {outlinerDock, paletteDock, eventsDock, explorerDock,
-                               varsDock, inspectorDock, minimapDock, codeDock})
+                               varsDock, inspectorDock, minimapDock, codeDock,
+                               testDock})
             a->menu()->addAction(d->toggleViewAction());
     }
+}
+
+void MainWindow::buildTestMenu()
+{
+    if (!m_testMenu || !m_testRun) return;
+    // The panel owns the actions, so a shortcut pressed with the dock closed
+    // does the same thing the button does. Adding them here is also what puts
+    // the shortcuts on the window: an action nothing has added is never heard.
+    m_testMenu->addAction(m_testRun->linkAction());
+    m_testMenu->addAction(m_testRun->buildAction());
+    m_testMenu->addSeparator();
+    m_testMenu->addAction(m_testRun->launchAction());
+    m_testMenu->addAction(m_testRun->stopAction());
+    m_testMenu->addSeparator();
+    m_testMenu->addAction(m_testRun->recheckAction());
+    m_testMenu->addAction(m_testRun->toolsAction());
 }
 
 void MainWindow::refreshTabs()
@@ -900,6 +983,9 @@ void MainWindow::onProjectChanged()
 
 void MainWindow::syncExplorerRoot()
 {
+    // Called from every place the mod folder can change, which is exactly when
+    // the Test dock's paths and checklist stop being true.
+    if (m_testRun) m_testRun->refresh();
     if (!m_explorer) return;
     m_explorer->setModRoot(m_doc->project().modRoot);
 }

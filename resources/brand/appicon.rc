@@ -1,0 +1,4 @@
+// The executable's own icon, so Explorer, the task bar and alt-tab show the
+// mark before Qt is running. Id 1 because Windows shows the lowest-numbered
+// icon resource as the file icon.
+1 ICON "app-icon/sudo-appicon.ico"

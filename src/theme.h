@@ -1,8 +1,10 @@
 // Dark theme shared by every widget and the canvas.
 //
 // One source of truth for colours and metrics: the canvas paints with these
-// directly, the docks get them through the stylesheet. Matches the reference
-// look: near-black chrome, subtle panel separation, no pure black or white.
+// directly, the docks get them through the stylesheet. The palette is the brand
+// pack's, from resources/brand/README.txt by way of branding.h, so the app and
+// the artwork are the same six colours: near-black chrome, subtle panel
+// separation, no pure black or white.
 #pragma once
 
 #include <QColor>

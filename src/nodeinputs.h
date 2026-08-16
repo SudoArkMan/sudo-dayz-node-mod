@@ -20,6 +20,14 @@
 class Catalog;
 class Document;
 
+// Which field a pin gets on the canvas. Print and the catalogue's `void var`
+// parameters are Any pins: they accept a literal, so they need somewhere to
+// type it. inlineEditorFor says None for Any deliberately, because it also
+// decides whether a pin carries a DEFAULT, and a default is emitted code. Both
+// the painter and the click handler must agree, or the field draws and cannot
+// be typed into.
+InlineEditor fieldEditorFor(const PinType &type);
+
 struct NodeInput {
     QString pinId;
     QString label;           // the pin's label, falling back to its id

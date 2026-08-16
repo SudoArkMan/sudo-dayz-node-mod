@@ -99,19 +99,6 @@ const QLatin1String kCut("...");
 
 QFont codeFont() { return theme::monoFont(kCodeFontSize); }
 
-// Which field a pin gets on the node. Print and the catalogue's `void var`
-// parameters are Any pins: they accept a literal, so they deserve somewhere to
-// type it. inlineEditorFor says None for Any on purpose, because it also
-// decides whether a pin carries a DEFAULT, and a default is emitted code. An
-// Any pin with a default would change what every unwired Print generates, so
-// the field is decided here and the default is left alone.
-InlineEditor fieldFor(const PinType &t)
-{
-    const InlineEditor e = inlineEditorFor(t);
-    if (e != InlineEditor::None) return e;
-    return (!t.isArray && t.kind == PinKind::Any) ? InlineEditor::Text
-                                                  : InlineEditor::None;
-}
 
 // Refs whose real content lives in opts rather than on pins.
 bool carriesCode(const QString &ref)
@@ -506,7 +493,7 @@ double NodeItem::contentWidth(const QVector<Pin> &dataIn,
             row += sm.horizontalAdvance(p.label);
             // An unconnected literal gets a field on the same row, and the
             // field has to hold its own text rather than eliding it too.
-            if (fieldFor(p.type) != InlineEditor::None) {
+            if (fieldEditorFor(p.type) != InlineEditor::None) {
                 const QString value = p.def.isEmpty() ? QStringLiteral("unset") : p.def;
                 row += padding + qMax(kMinFieldWidth, vm.horizontalAdvance(value) + padding * 2.0);
             }
@@ -564,7 +551,7 @@ void NodeItem::layoutPins()
             }
             const bool editable = left && pl.pin.type.kind != PinKind::Exec
                                   && !pl.connected
-                                  && fieldFor(pl.pin.type) != InlineEditor::None;
+                                  && fieldEditorFor(pl.pin.type) != InlineEditor::None;
             if (editable) {
                 const double h = pinRow - 4.0;
                 pl.editor = QRectF(m_width * 0.46, y - h / 2.0, m_width * 0.48, h);

@@ -19,6 +19,7 @@ class InspectorPanel;
 class MiniMapWidget;
 class CodeViewPanel;
 class ExplorerPanel;
+class TestPanel;
 class QTabBar;
 class QLabel;
 class QMenu;
@@ -30,6 +31,9 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(Document *doc, QWidget *parent = nullptr);
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
 public slots:
     void openProject();
@@ -93,12 +97,24 @@ private:
     MiniMapWidget *m_minimap;
     CodeViewPanel *m_codeView;
     ExplorerPanel *m_explorer;
+    // Null until buildDocks runs. syncExplorerRoot is called from in there, and
+    // it refreshes this panel too.
+    TestPanel *m_testRun = nullptr;
+    // Opened by buildMenus so the bar keeps its order, filled by buildDocks
+    // once the panel that owns the actions exists.
+    QMenu *m_testMenu = nullptr;
     // The counts are the contracted status line and keep their own label, so a
     // transient note can never sit where the diagnostics summary should be.
     QLabel *m_status;
     QLabel *m_message;
     QTimer *m_statusResetTimer;
     AnalysisResult m_analysis;
+    // The brand mark on the right of the toolbar, the flexible gap that holds
+    // it there, and the height its pixmap was last cut for.
+    QToolBar *m_toolBar = nullptr;
+    QWidget *m_toolBarGap = nullptr;
+    QLabel *m_cornerMark = nullptr;
+    int m_cornerHeight = 0;
     // Where the next node lands. Set by the canvas right-click, consumed by
     // whichever surface the user picks a node from; unset means the view centre.
     QPointF m_pendingAddPos;
@@ -107,8 +123,12 @@ private:
     void buildMenus();
     void buildToolBar();
     void buildDocks();
+    void buildTestMenu();
     void buildStatusBar();
     void buildLayoutActions(QMenu *menu, QToolBar *bar);
+    // Recuts the corner mark for the current toolbar height and hides it when
+    // the bar has no room for it beside the actions.
+    void updateCornerMark();
     void refreshTabs();
     void runAnalysis();
     void updateStatusCounts();

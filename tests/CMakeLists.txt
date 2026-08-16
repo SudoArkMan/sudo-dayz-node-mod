@@ -248,3 +248,27 @@ target_include_directories(deprulestest PRIVATE ../src)
 target_link_libraries(deprulestest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )
+
+# Running the mod: prerequisite detection against the real machine, a junction
+# made and removed under a temporary name, the project.cfg rewrite line by line,
+# and the build and launch command lines printed rather than executed. Starts no
+# game and packs no PBO:
+#   ./tests/testruntest ../resources
+add_executable(testruntest
+  testruntest.cpp
+  ../src/testrun.cpp
+  ../src/modtemplate.cpp
+  ../src/moddeps.cpp
+  ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
+  ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
+  ../src/config/configtree.cpp
+  ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
+  ../src/enforce/layout.cpp ../src/enforce/import.cpp
+  ../src/codegen.cpp ../src/theme.cpp
+)
+target_include_directories(testruntest PRIVATE ../src)
+# Widgets arrives through theme.cpp, which moddeps pulls in for badge colours.
+# No QApplication is built here and no widget is touched.
+target_link_libraries(testruntest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)

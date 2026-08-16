@@ -3,16 +3,23 @@
 // Every vanilla class, method, enum, global and constant is a node; the graph
 // generates compilable Enforce Script. The catalogue is generated from the
 // dayz-script-api index and loaded at startup from resources/catalog.json.
+#include "branding.h"
 #include "document.h"
 #include "mainwindow.h"
 #include "theme.h"
+#include "widgets/splashscreen.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QThread>
 #include <QTimer>
+
+#include <memory>
+#include <utility>
 
 namespace {
 
@@ -31,6 +38,38 @@ QString findResource(const QString &name)
     for (const QString &c : candidates)
         if (QFileInfo::exists(c)) return QDir::cleanPath(c);
     return {};
+}
+
+// The catalogue parse and its search index are one call and take a second or
+// more, which is long enough that a splash frozen through it reads as a hang.
+// Nothing else touches the Document until the thread has been joined, so the
+// handoff is the join and there is no shared state to guard.
+class CatalogLoader : public QThread {
+public:
+    CatalogLoader(Document *doc, QString path)
+        : m_doc(doc), m_path(std::move(path)) {}
+    bool ok = false;
+
+protected:
+    void run() override { ok = m_doc->loadCatalog(m_path); }
+
+private:
+    Document *m_doc;
+    QString m_path;
+};
+
+bool loadCatalogue(Document &doc, const QString &path, SplashScreen *splash)
+{
+    if (path.isEmpty()) return false;
+    if (!splash) return doc.loadCatalog(path);
+
+    CatalogLoader loader(&doc, path);
+    QEventLoop wait;
+    QObject::connect(&loader, &QThread::finished, &wait, &QEventLoop::quit);
+    loader.start();
+    wait.exec();
+    loader.wait();
+    return loader.ok;
 }
 
 } // namespace
@@ -62,12 +101,29 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     theme::apply(app);
+    app.setWindowIcon(branding::appIcon());
+
+    // No splash for a screenshot run: it would be a second window in front of
+    // the one being grabbed, and the shot has to work with no display at all.
+    std::unique_ptr<SplashScreen> splash;
+    if (!parser.isSet(shotOpt)) {
+        splash = std::make_unique<SplashScreen>();
+        splash->show();
+    }
 
     Document doc;
     const QString catalogPath = parser.isSet(catalogOpt)
                                     ? parser.value(catalogOpt)
                                     : findResource(QStringLiteral("catalog.json"));
-    if (catalogPath.isEmpty() || !doc.loadCatalog(catalogPath)) {
+    if (splash)
+        splash->beginStage(QStringLiteral("Loading node catalogue"), 0.62);
+    const bool loaded = loadCatalogue(doc, catalogPath, splash.get());
+    if (splash) splash->endStage();
+
+    if (!loaded) {
+        // Ahead of the box, or the splash sits over the one thing the user has
+        // to read before the app gives up.
+        splash.reset();
         QMessageBox::critical(
             nullptr, QStringLiteral("SUDO DayZ Node Mod"),
             QStringLiteral("Could not load the node catalogue.\n\n%1\n\nBuild it with "
@@ -79,12 +135,23 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    if (splash)
+        splash->beginStage(QStringLiteral("Building the editor window"), 0.88);
     MainWindow win(&doc);
     win.resize(1600, 950);
-    win.show();
+    if (splash) splash->endStage();
 
     const QStringList args = parser.positionalArguments();
+    if (splash)
+        splash->beginStage(args.isEmpty() ? QStringLiteral("Opening the editor")
+                                          : QStringLiteral("Restoring project"),
+                           1.0);
     if (!args.isEmpty()) win.openProjectPath(args.first());
+    win.show();
+    if (splash) {
+        splash->endStage();
+        splash->finish(&win);
+    }
 
     if (parser.isSet(shotOpt)) {
         const QString out = parser.value(shotOpt);

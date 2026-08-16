@@ -12,8 +12,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets)
 
+# The .qrc carries the icon and artwork inside the binary; this carries the icon
+# on the binary, which is a separate thing Windows reads without running it.
+if(WIN32)
+  enable_language(RC)
+  set(APP_ICON_RESOURCE_WINDOWS
+      "${CMAKE_CURRENT_SOURCE_DIR}/resources/brand/appicon.rc")
+endif()
+
 add_executable(DAYZSUDONodeMod
   main.cpp
+  resources/brand.qrc
+  ${APP_ICON_RESOURCE_WINDOWS}
+  src/branding.h    src/branding.cpp
+  src/widgets/splashscreen.h src/widgets/splashscreen.cpp
   src/pins.h        src/pins.cpp
   src/nodeinputs.h  src/nodeinputs.cpp
   src/catalog.h     src/catalog.cpp
@@ -26,6 +38,7 @@ add_executable(DAYZSUDONodeMod
   src/templates.h   src/templates.cpp
   src/document.h    src/document.cpp
   src/modtemplate.h src/modtemplate.cpp
+  src/testrun.h     src/testrun.cpp
   src/widgets/newmoddialog.h src/widgets/newmoddialog.cpp
   src/codegen.h     src/codegen.cpp
   src/analysis.h    src/analysis.cpp
@@ -56,6 +69,7 @@ add_executable(DAYZSUDONodeMod
   src/panels/inspectorpanel.h  src/panels/inspectorpanel.cpp
   src/panels/codeviewpanel.h   src/panels/codeviewpanel.cpp
   src/panels/explorerpanel.h   src/panels/explorerpanel.cpp
+  src/panels/testpanel.h       src/panels/testpanel.cpp
   src/mainwindow.h  src/mainwindow.cpp
 )
 

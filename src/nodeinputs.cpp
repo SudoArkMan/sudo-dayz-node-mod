@@ -61,7 +61,7 @@ QVector<NodeInput> nodeInputsOf(const Document &doc, const QString &nodeId)
         const auto stored = node->inputs.constFind(pin.id);
         in.overridden = stored != node->inputs.constEnd();
         in.value = in.overridden ? stored.value() : pin.def;
-        in.editor = inlineEditorFor(pin.type);
+        in.editor = fieldEditorFor(pin.type);
         // Enum members come from the catalogue rather than the pin, because the
         // pin carries only the enum's name.
         if (in.type.kind == PinKind::Enum && !in.type.isArray)
@@ -69,6 +69,15 @@ QVector<NodeInput> nodeInputsOf(const Document &doc, const QString &nodeId)
         out.append(in);
     }
     return out;
+}
+
+
+InlineEditor fieldEditorFor(const PinType &type)
+{
+    const InlineEditor e = inlineEditorFor(type);
+    if (e != InlineEditor::None) return e;
+    return (!type.isArray && type.kind == PinKind::Any) ? InlineEditor::Text
+                                                        : InlineEditor::None;
 }
 
 NodeInput nodeInputOf(const Document &doc, const QString &nodeId,
