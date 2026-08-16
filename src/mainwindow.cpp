@@ -551,6 +551,14 @@ MainWindow::MainWindow(Document *doc, QWidget *parent)
     m_recent.load();
     m_editor = central;
     m_startPage = new StartPage(&m_recent, this);
+    // Asks for no height of its own. A stack is as tall as the tallest page it
+    // holds whichever one is showing, and the start page's three columns wanted
+    // 547 of it, so the page nobody is looking at while the editor is up was
+    // setting the floor under every dock in it: a window asked for 800 tall came
+    // back 814, and the bottom row could not be given more than 186 however hard
+    // it asked, which is three rows in each of the Mod Browser's two lists. The
+    // page's own columns scroll, so it gives up nothing by shrinking.
+    m_startPage->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Ignored);
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_editor);
     m_stack->addWidget(m_startPage);
@@ -711,7 +719,11 @@ void MainWindow::buildMenus()
     file->addAction(QStringLiteral("Edit mod config..."), this,
                     &MainWindow::editModConfig);
     file->addSeparator();
-    file->addAction(QStringLiteral("Exit"), QKeySequence::Quit, this, &QWidget::close);
+    // No shortcut. QKeySequence::Quit has no chord on Windows and resolves to
+    // the soft key spelled Exit, so asking for it put the word Exit in the
+    // shortcut column and the row read as its own label twice. Alt+F4 is the
+    // platform's own way out and the window manager already serves it.
+    file->addAction(QStringLiteral("Exit"), this, &QWidget::close);
 
     QMenu *edit = menuBar()->addMenu(QStringLiteral("&Edit"));
     edit->addAction(QStringLiteral("Undo"), QKeySequence::Undo, m_doc, &Document::undo);
@@ -1131,7 +1143,16 @@ void MainWindow::applyBottomRowSize()
     // the tab rather than be picked once.
     QDockWidget *browser = dockOf(m_modBrowser);
     const bool browsing = browser && browser->isVisible();
-    if (browsing) wanted = qMax(wanted, usable * 2 / 5);
+    if (browsing) {
+        wanted = qMax(wanted, usable * 2 / 5);
+        // And no further. Two fifths of a 950 tall window is 380, and taking all
+        // of it left the Node Palette and the Events list on three rows each to
+        // put twelve in the browser. The cap is what the left column needs for
+        // four rows in each of its three, and it only bites where there is room
+        // to share: on a short window the floor below wins and the panel the
+        // user just asked for keeps its share.
+        wanted = qMin(wanted, qMax(250, usable - 500 - 90));
+    }
 
     // Named by whichever tab is up. resizeDocks brings the dock it is given to
     // the front of its tab group, so naming the code view here while the
@@ -1158,6 +1179,7 @@ void MainWindow::showEvent(QShowEvent *event)
 
     applyDockSizes();
     browseForScreenshot();
+    openMenuForScreenshot();
 
     // The canvas only gets its real width once the docks have taken theirs, and
     // a graph framed against the window's first guess sits off to one side of
@@ -1222,6 +1244,26 @@ void MainWindow::browseForScreenshot()
     settle([browser]() { return browser->isOpening(); }, 60000);
     if (!m_modBrowser->openClassAt(row)) m_modBrowser->openClassAt(0);
     QCoreApplication::processEvents();
+}
+
+void MainWindow::openMenuForScreenshot()
+{
+    // A menu is its own top level window, so a picture of the main window alone
+    // never shows one. main.cpp paints any open popup into the grab; this is the
+    // half that opens it, matched on the title with the & accelerator taken out.
+    const QString wanted = qEnvironmentVariable("SUDO_UI_MENU").trimmed();
+    if (wanted.isEmpty()) return;
+    for (QAction *action : menuBar()->actions()) {
+        QMenu *menu = action->menu();
+        if (!menu) continue;
+        QString title = action->text();
+        title.remove(QLatin1Char('&'));
+        if (title.compare(wanted, Qt::CaseInsensitive) != 0) continue;
+        menuBar()->setActiveAction(action);
+        const QRect where = menuBar()->actionGeometry(action);
+        menu->popup(menuBar()->mapToGlobal(where.bottomLeft()));
+        return;
+    }
 }
 
 void MainWindow::buildTestMenu()
@@ -1290,23 +1332,38 @@ void MainWindow::updateReadOnlyBar()
                                            : origin;
     m_readOnlyBar->setToolTip(head + where + tail);
 
-    // Three lines for three widths, and the order they are given up in is the
-    // order they are worth. The pbo path goes first, then where it came from at
-    // all; the rule itself is the last thing to go, because a bar that has room
-    // for the file name and not for what the file may not do is the wrong half.
-    // The tooltip keeps all of it whatever is shown.
+    // Three whole sentences for three widths, and the order they are given up in
+    // is the order they are worth. The pbo path goes first, then the file it was
+    // in; the rule itself is the last thing to go, because a bar with room for
+    // the file name and not for what the file may not do is the wrong half. The
+    // tooltip keeps all of it whatever is shown.
+    //
+    // Written out rather than elided. Left eliding the origin cut it inside the
+    // archive's own name and put the cut mark straight in front of the suffix,
+    // so the bar read "was read out of ....pbo/Scripts/4_World": four dots and a
+    // path starting nowhere. The file and the mod are the two parts of an origin
+    // worth keeping, and dropping the second half of the tail with them is what
+    // makes the line fit rather than fall through to the shortest one.
+    const int colon = origin.indexOf(QLatin1String(": "));
+    const QString modName = colon > 0 ? origin.left(colon) : QString();
+    const QString fileName = origin.section(QLatin1Char('/'), -1);
+    const QString middle =
+        modName.isEmpty() || fileName.isEmpty()
+            ? QString()
+            : QStringLiteral("Read only. %1 was read out of %2 in %3. Export leaves "
+                             "it out.")
+                  .arg(g->className, fileName, modName);
     const QString shorter =
         QStringLiteral("Read only. %1 came out of another mod, and export leaves it out.")
             .arg(g->className);
     const QFontMetrics metrics(m_readOnlyBar->font());
     const int avail = qMax(120, m_readOnlyBar->width() - 16);
-    const int room = avail - metrics.horizontalAdvance(head + tail);
 
     QString shown;
     if (metrics.horizontalAdvance(head + where + tail) <= avail)
         shown = head + where + tail;
-    else if (room >= 80)
-        shown = head + metrics.elidedText(where, Qt::ElideLeft, room) + tail;
+    else if (!middle.isEmpty() && metrics.horizontalAdvance(middle) <= avail)
+        shown = middle;
     else
         shown = metrics.elidedText(shorter, Qt::ElideRight, avail);
     m_readOnlyBar->setText(shown);

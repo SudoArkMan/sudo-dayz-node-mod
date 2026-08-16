@@ -21,10 +21,67 @@ const QString Cast     = QStringLiteral("bi.cast");
 const QString Literal  = QStringLiteral("bi.literal");
 const QString Print    = QStringLiteral("bi.print");
 
+const QString SetTimer        = QStringLiteral("bi.setTimer");
+const QString StopTimer       = QStringLiteral("bi.stopTimer");
+const QString CallLater       = QStringLiteral("bi.callLater");
+const QString CancelCallLater = QStringLiteral("bi.cancelCallLater");
+
 QString castClass(const GraphNode &node)
 {
     const QString cls = node.opts.value(QStringLiteral("cls"));
     return cls.isEmpty() ? node.opts.value(QStringLiteral("class")) : cls;
+}
+
+QString timingName(const GraphNode &node)
+{
+    QString out;
+    bool capitalise = true; // "reload delay" and "reload-delay" -> ReloadDelay
+    for (const QChar c : node.opts.value(QStringLiteral("name"))) {
+        if (!c.isLetterOrNumber() && c != QLatin1Char('_')) {
+            capitalise = true;
+            continue;
+        }
+        out.append(capitalise ? c.toUpper() : c);
+        capitalise = false;
+    }
+    // A leading digit is not an identifier, and neither is nothing at all.
+    while (!out.isEmpty() && out.at(0).isDigit()) out.remove(0, 1);
+    if (!out.isEmpty()) {
+        out[0] = out.at(0).toUpper();
+        return out;
+    }
+    // Untouched nodes still have to differ from each other, or two timers on
+    // one class declare the same member twice and the file stops compiling.
+    // The node id is the only thing that is already unique and already stable
+    // across a save, which is what makes regeneration reproducible.
+    QString fromId;
+    for (const QChar c : node.id)
+        if (c.isLetterOrNumber() || c == QLatin1Char('_')) fromId.append(c);
+    if (fromId.isEmpty()) fromId = QStringLiteral("1");
+    fromId[0] = fromId.at(0).toUpper();
+    return QStringLiteral("Timer") + fromId;
+}
+
+QString timerMember(const QString &name)
+{
+    return QStringLiteral("m_") + name;
+}
+
+QString timerCallback(const QString &name)
+{
+    return name + QStringLiteral("Elapsed");
+}
+
+QString callCategoryConstant(const GraphNode &node)
+{
+    const QString key = node.opts.value(QStringLiteral("category"));
+    if (key == QLatin1String("gameplay")) return QStringLiteral("CALL_CATEGORY_GAMEPLAY");
+    if (key == QLatin1String("gui")) return QStringLiteral("CALL_CATEGORY_GUI");
+    // SYSTEM is the default here for the same reason it is the default on
+    // `Timer(int category = CALL_CATEGORY_SYSTEM)`: it is the queue that keeps
+    // running whatever the player has open, which is what server-side work
+    // needs. GAMEPLAY stops while the in-game menu is up.
+    return QStringLiteral("CALL_CATEGORY_SYSTEM");
 }
 } // namespace bi
 
@@ -58,6 +115,7 @@ const QString CatVariables = QStringLiteral("Variables");
 const QString CatOperators = QStringLiteral("Operators");
 const QString CatLiterals  = QStringLiteral("Literals");
 const QString CatCasting   = QStringLiteral("Casting");
+const QString CatTiming    = QStringLiteral("Timing");
 const QString CatUtility   = QStringLiteral("Utility");
 
 // The escape-hatch nodes get their own accent rather than one of the roles in
@@ -226,6 +284,24 @@ const QStringList &Builtins::literalTypes()
 bool Builtins::operatorYieldsBool(const QString &op)
 {
     return isLogicalOp(op) || isComparisonOp(op);
+}
+
+// The three queues, in the order a picker should show them: the one to reach
+// for first, then the two with a condition attached.
+const QStringList &Builtins::callCategories()
+{
+    static const QStringList keys = {QStringLiteral("system"), QStringLiteral("gameplay"),
+                                     QStringLiteral("gui")};
+    return keys;
+}
+
+QString Builtins::callCategoryLabel(const QString &key)
+{
+    if (key == QLatin1String("gameplay"))
+        return QStringLiteral("Gameplay: pauses while the in-game menu is open");
+    if (key == QLatin1String("gui"))
+        return QStringLiteral("GUI: client side, for interface work");
+    return QStringLiteral("System: runs always, including on a server");
 }
 
 Builtins::Builtins()
@@ -668,6 +744,122 @@ Builtins::Builtins()
                         "script class. The two are usually but not always the same.")});
     add(spawn);
 
+    // ---------------------------------------------------------------- timing
+    //
+    // A five second timer used to cost seven steps: a `ref Timer` member, a New
+    // Object node whose class had to be set by hand, a Set, a Get, a Run call
+    // that could not be reached from a Timer pin at all, a callback named by a
+    // string nothing checked, and a separate function node to receive it. These
+    // four nodes replace all of that, and they are the only nodes that write
+    // more than statements: the member and the callback method come out of the
+    // same name the call is built from, so the string and the method it
+    // dispatches to cannot drift apart.
+    NodeDef setTimer = makeDef(bi::SetTimer, QStringLiteral("Set Timer"),
+                               QStringLiteral("run something after N seconds"),
+                               CatTiming, accents::event(),
+                               {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                dataPin(QStringLiteral("seconds"), QStringLiteral("seconds"),
+                                        PinDir::In, prim(PinKind::Float)),
+                                dataPin(QStringLiteral("repeat"), QStringLiteral("repeat"),
+                                        PinDir::In, prim(PinKind::Bool)),
+                                execPin(QStringLiteral("elapsed"), QStringLiteral("elapsed"),
+                                        PinDir::Out)});
+    // 5 seconds rather than 0: a timer that fires on the next tick is not what
+    // anybody drops this node to build, and 0 reads as "unset".
+    for (Pin &p : setTimer.pins) {
+        if (p.id == QLatin1String("seconds")) { p.def = QStringLiteral("5.0"); p.hasDef = true; }
+        if (p.id == QLatin1String("repeat")) { p.def = QStringLiteral("false"); p.hasDef = true; }
+    }
+    setTimer.doc = help(
+        QStringLiteral("Runs the chain on its `elapsed` pin after a delay. The flow carries "
+                       "straight on out of the exec pin; `elapsed` is a separate method that "
+                       "runs later."),
+        {QStringLiteral("Writes the member, the construction and the call for you: "
+                        "`ref Timer m_Reload;`, `m_Reload = new Timer(CALL_CATEGORY_SYSTEM);` "
+                        "and `m_Reload.Run(5.0, this, \"ReloadElapsed\", null, false);`, plus "
+                        "the `ReloadElapsed()` method that holds the chain."),
+         QStringLiteral("The delay is in seconds and is a decimal. Call Later takes "
+                        "milliseconds as a whole number, which is the pair that is easiest to "
+                        "get the wrong way round."),
+         QStringLiteral("Name it in Details to name the member and the method after it. An "
+                        "unnamed one is named after the node, so two of them never collide."),
+         QStringLiteral("The member is always written `ref`. Without it the Timer is collected "
+                        "the moment the call returns and never fires, because the timer queue "
+                        "does not own what you put in it."),
+         QStringLiteral("Turn `repeat` on and it fires every N seconds until something stops "
+                        "it. Use Stop Timer for that.")},
+        {QStringLiteral("The queue matters. System runs always; Gameplay stops while the "
+                        "player has the in-game menu open, which is wrong for anything "
+                        "authoritative. System is the default."),
+         QStringLiteral("Destroying the object stops the timer on its own, because releasing "
+                        "the `ref` runs the destructor and that takes it off the queue. "
+                        "Call Later is the one that needs cancelling by hand.")});
+    add(setTimer);
+
+    NodeDef stopTimer = makeDef(bi::StopTimer, QStringLiteral("Stop Timer"),
+                                QStringLiteral("Timer.Stop()"), CatTiming, accents::call(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out)});
+    stopTimer.doc = help(
+        QStringLiteral("Stops a timer that a Set Timer node started."),
+        {QStringLiteral("Name the same timer in Details. Emits "
+                        "`if (m_Reload) m_Reload.Stop();`, guarded because the timer does not "
+                        "exist until the Set Timer node has run."),
+         QStringLiteral("Stop resets the countdown. There is no Continue after it; start it "
+                        "again with the Set Timer node.")},
+        {QStringLiteral("A repeating timer runs until something stops it. This is that "
+                        "something.")});
+    add(stopTimer);
+
+    NodeDef callLater = makeDef(bi::CallLater, QStringLiteral("Call Later"),
+                                QStringLiteral("run something after N ms"),
+                                CatTiming, accents::event(),
+                                {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                 execPin(QStringLiteral("exec"), QString(), PinDir::Out),
+                                 dataPin(QStringLiteral("ms"), QStringLiteral("milliseconds"),
+                                         PinDir::In, prim(PinKind::Int)),
+                                 dataPin(QStringLiteral("repeat"), QStringLiteral("repeat"),
+                                         PinDir::In, prim(PinKind::Bool)),
+                                 execPin(QStringLiteral("then"), QStringLiteral("then"),
+                                         PinDir::Out)});
+    for (Pin &p : callLater.pins) {
+        if (p.id == QLatin1String("ms")) { p.def = QStringLiteral("250"); p.hasDef = true; }
+        if (p.id == QLatin1String("repeat")) { p.def = QStringLiteral("false"); p.hasDef = true; }
+    }
+    callLater.doc = help(
+        QStringLiteral("Defers the chain on its `then` pin to the call queue. The usual answer "
+                       "to a DayZ trap that only goes away if you wait a frame."),
+        {QStringLiteral("Emits `GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM)"
+                        ".CallLater(RefreshHud, 250, false);` and writes the `RefreshHud()` "
+                        "method the chain goes into."),
+         QStringLiteral("The delay is in milliseconds and is a whole number. Set Timer takes "
+                        "seconds as a decimal."),
+         QStringLiteral("The engine takes a reference to the method, not its name. That is why "
+                        "the node writes both ends: the quoted spelling is a different call "
+                        "(`CallLaterByName`) and passing a name here does not convert.")},
+        {QStringLiteral("An entry stays in the queue until it is removed or it stops "
+                        "repeating. Not removing one in your cleanup path is a bug vanilla "
+                        "itself has shipped. Use Cancel Call Later."),
+         QStringLiteral("Leaving the delay at 0 still defers to the next tick, which is the "
+                        "point when the fix is 'do this one frame later'.")});
+    add(callLater);
+
+    NodeDef cancelLater = makeDef(bi::CancelCallLater, QStringLiteral("Cancel Call Later"),
+                                  QStringLiteral("CallQueue.Remove()"),
+                                  CatTiming, accents::call(),
+                                  {execPin(QStringLiteral("exec"), QString(), PinDir::In),
+                                   execPin(QStringLiteral("exec"), QString(), PinDir::Out)});
+    cancelLater.doc = help(
+        QStringLiteral("Takes a deferred call back off the queue."),
+        {QStringLiteral("Name the same call in Details, and use the same queue. Emits "
+                        "`GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).Remove(RefreshHud);`."),
+         QStringLiteral("Removing one that is not queued does nothing, so it is safe in a "
+                        "cleanup path that may run twice.")},
+        {QStringLiteral("The queue is part of the identity. Removing from the System queue "
+                        "does not cancel something scheduled on Gameplay.")});
+    add(cancelLater);
+
     // --------------------------------------------------------------- utility
     NodeDef print = makeDef(bi::Print, QStringLiteral("Print"),
                             QStringLiteral("Print(value)"), CatUtility, accents::call(),
@@ -767,7 +959,7 @@ NodeDef Builtins::def(const QString &id) const
 QStringList Builtins::categories() const
 {
     return {CatLifecycle, CatFlow, CatVariables, CatOperators,
-            CatLiterals, CatCasting, CatUtility};
+            CatLiterals, CatCasting, CatTiming, CatUtility};
 }
 
 LifecycleSig Builtins::beginMode(const QString &key) const
@@ -821,6 +1013,25 @@ NodeDef Builtins::defForNode(const GraphNode &node, const Catalog &cat) const
     if (base.key == bi::End) {
         NodeDef d = base;
         d.subtitle = QStringLiteral("%1()").arg(endSignature().method);
+        return d;
+    }
+
+    // Which timer, and which queue, decided before the empty-opts shortcut
+    // below: an untouched timing node still has a name, derived from its own
+    // id, and the canvas has to show the one the file will carry.
+    if (base.key == bi::SetTimer || base.key == bi::StopTimer
+        || base.key == bi::CallLater || base.key == bi::CancelCallLater) {
+        const QString name = bi::timingName(node);
+        const QString queue = bi::callCategoryConstant(node);
+        NodeDef d = base;
+        if (base.key == bi::SetTimer)
+            d.subtitle = QStringLiteral("%1, %2").arg(bi::timerMember(name), queue);
+        else if (base.key == bi::StopTimer)
+            d.subtitle = QStringLiteral("%1.Stop()").arg(bi::timerMember(name));
+        else if (base.key == bi::CallLater)
+            d.subtitle = QStringLiteral("%1(), %2").arg(name, queue);
+        else
+            d.subtitle = QStringLiteral("Remove(%1), %2").arg(name, queue);
         return d;
     }
 

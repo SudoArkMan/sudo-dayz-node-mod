@@ -939,6 +939,24 @@ ImportedScript buildScript(const ClassSpan &cls, const QString &src, const QStri
     bool ctorSlotOpen = true;
     bool eventSlotOpen = true;
 
+    // Not tried here: the Set Timer and Call Later shapes.
+    //
+    // Those two nodes generate a `ref` member, two statements inside one method,
+    // and a second method elsewhere in the class, tied together by a string
+    // literal that has to equal the second method's name. Every shape below is
+    // chosen by rewriting one method and comparing the result to the text that
+    // method came in as, which is what makes a wrong guess impossible: the file
+    // is the oracle. That test cannot be run on a shape spanning three
+    // declarations, because rewriting one of them does not reproduce the other
+    // two, so the comparison would have to be replaced by a pattern match that
+    // is right most of the time.
+    //
+    // Most of the time is the wrong bar for this. A near miss would take a
+    // callback the author wrote by hand and hide it inside a node that owns it,
+    // and the next regenerate would rewrite their method for them. So the
+    // pattern is imported as its parts: a Timer variable, the calls, and a
+    // declared function. It round trips byte for byte that way, and lowertest
+    // pins both halves of that, including the part that does not happen.
     double originY = 0;
     for (int index = 0; index < methodSpans.size(); ++index) {
         const MethodSpan &span = methodSpans.at(index);

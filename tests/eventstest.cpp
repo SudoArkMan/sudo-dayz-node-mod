@@ -31,6 +31,28 @@ static bool hasName(const QVector<EventInfo> &events, const QString &name)
     return indexOfName(events, name) >= 0;
 }
 
+// The catalogue key for one declaration, named by the class that declares it.
+// Search alone is not enough: it ranks over the whole ancestor chain, so asking
+// Timer for "Run" can answer with a Run declared further up.
+static QString keyOf(const Catalog &cat, const QString &owner, const QString &name)
+{
+    SearchOptions opts;
+    opts.limit = 200;
+    opts.ofClass = owner;
+    for (const SearchHit &h : cat.search(name, opts)) {
+        const MethodSig sig = cat.method(h.key);
+        if (sig.valid && sig.owner == owner && sig.name == name) return h.key;
+    }
+    return {};
+}
+
+static bool hasPin(const NodeDef &def, const QString &id, PinDir dir)
+{
+    for (const Pin &p : def.pins)
+        if (p.id == id && p.dir == dir) return true;
+    return false;
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -53,8 +75,14 @@ int main(int argc, char *argv[])
     opts.ofClass = QStringLiteral("ItemBase");
     opts.limit = 8192;
     const int rawCount = cat.search(QString(), opts).size();
-    check(item.size() == 227,
-          QStringLiteral("ItemBase yields 227 events, got %1").arg(item.size()));
+    // 227 before event-ness was decided per class rather than per method name.
+    // The number moved in both directions: `SetTemperature` and `DebugBBoxDraw`
+    // left, because their only overriders are on Hud and Component and neither
+    // is an ancestor of anything here, and `OnInventoryInit`, `EEInventoryIn`
+    // and 36 more arrived, because they are hooks nothing in vanilla happens to
+    // override and the old rule could not see them.
+    check(item.size() == 263,
+          QStringLiteral("ItemBase yields 263 events, got %1").arg(item.size()));
     check(item.size() == rawCount,
           QStringLiteral("nothing dropped: %1 ranked vs %2 in the catalogue")
               .arg(item.size()).arg(rawCount));
@@ -103,6 +131,57 @@ int main(int argc, char *argv[])
                                 QStringLiteral("OnPlacementComplete"),
                                 QStringLiteral("EOnFrame")})
         check(hasName(item, name), QStringLiteral("ItemBase has %1").arg(name));
+
+    out << "what counts as an event" << Qt::endl;
+    // Event-ness belongs to one declaration on one class. Deciding it by method
+    // name made every `Run` in the tree an event because `WorkbenchPlugin`
+    // declares `event void Run()`, and an event node has no input pins at all,
+    // so `Timer::Run` could not be reached from a Timer pin and a five second
+    // timer needed a raw text node to write.
+    const QString timerRun = keyOf(cat, QStringLiteral("Timer"), QStringLiteral("Run"));
+    check(!timerRun.isEmpty(), QStringLiteral("Timer::Run is in the catalogue"));
+    if (!timerRun.isEmpty()) {
+        check(!(cat.method(timerRun).flags & flag::Event),
+              QStringLiteral("Timer::Run is a call, not an event"));
+        const NodeDef def = cat.defFor(timerRun);
+        check(hasPin(def, QStringLiteral("exec"), PinDir::In),
+              QStringLiteral("Timer::Run takes an exec input"));
+        check(hasPin(def, QStringLiteral("target"), PinDir::In),
+              QStringLiteral("Timer::Run can be reached from a Timer pin"));
+    }
+
+    struct Case { const char *owner; const char *name; bool event; const char *why; };
+    static const Case cases[] = {
+        {"WorkbenchPlugin", "Run", true,
+         "declared with the `event` keyword, which the language settles"},
+        {"PlayerBase", "OnReconnect", true,
+         "a hook on a leaf class: nothing in vanilla extends PlayerBase, so no "
+         "override exists to point at it"},
+        {"EntityAI", "OnInventoryInit", true,
+         "a hook the old name-global rule missed outright"},
+        {"EntityAI", "SetTemperature", false,
+         "its only overrider is IngameHud, which descends from Hud, not EntityAI"},
+        {"EntityAI", "DebugBBoxDraw", false,
+         "its only overrider descends from Component"},
+        {"IEntity", "SetName", false, "a setter, overridden only on unrelated classes"},
+        {"IEntity", "Update", false, "proto native: an override of it does not compile"},
+        {"ItemBase", "SplitItem", true,
+         "Magazine overrides it through the InventoryItemSuper typedef"},
+    };
+    for (const Case &c : cases) {
+        const QString key = keyOf(cat, QLatin1String(c.owner), QLatin1String(c.name));
+        if (key.isEmpty()) {
+            check(false, QStringLiteral("%1::%2 is in the catalogue")
+                             .arg(QLatin1String(c.owner), QLatin1String(c.name)));
+            continue;
+        }
+        const bool isEvent = cat.method(key).flags & flag::Event;
+        check(isEvent == c.event,
+              QStringLiteral("%1::%2 is %3an event: %4")
+                  .arg(QLatin1String(c.owner), QLatin1String(c.name),
+                       c.event ? QString() : QStringLiteral("not "),
+                       QLatin1String(c.why)));
+    }
 
     out << "catalogue keys" << Qt::endl;
     // A curated row that names an event the catalogue spells differently would
@@ -188,8 +267,8 @@ int main(int argc, char *argv[])
     check(debugCount > 0, QStringLiteral("%1 debug entries kept, not hidden").arg(debugCount));
     check(deprecatedCount > 0,
           QStringLiteral("%1 deprecated entries kept, not hidden").arg(deprecatedCount));
-    check(hasName(item, QStringLiteral("DebugBBoxDraw")),
-          QStringLiteral("DebugBBoxDraw is still reachable"));
+    check(hasName(item, QStringLiteral("OnDebugSpawn")),
+          QStringLiteral("OnDebugSpawn is still reachable"));
     check(eeInit >= 0 && firstDebug > eeInit,
           QStringLiteral("EEInit (%1) sorts above the first debug entry (%2)")
               .arg(eeInit).arg(firstDebug));
@@ -200,11 +279,15 @@ int main(int argc, char *argv[])
           QStringLiteral("deprecated sorts below debug (%1 vs %2)")
               .arg(firstDeprecated).arg(firstDebug));
 
-    // The catalogue documents this one "not really deprecated, but missing
-    // context info". A case-insensitive match on the word would bury it.
-    const int setTemp = indexOfName(item, QStringLiteral("SetTemperature"));
-    check(setTemp >= 0 && !item.at(setTemp).deprecated,
-          QStringLiteral("SetTemperature is not read as deprecated"));
+    // Only a capitalised DEPRECATED marks an entry. This one's doc ends "timeout
+    // paramter is deprecated", which is about an argument, not the hook, and a
+    // case-insensitive match would bury a live event on the strength of it.
+    // EntityAI::SetTemperature used to be the witness here and is a plain call
+    // now, so the check moved to the class that still carries one.
+    const QVector<EventInfo> trigger = eventsForClass(cat, QStringLiteral("Trigger"));
+    const int insiders = indexOfName(trigger, QStringLiteral("UpdateInsiders"));
+    check(insiders >= 0 && !trigger.at(insiders).deprecated,
+          QStringLiteral("UpdateInsiders is not read as deprecated"));
 
     // Both ConvertNonlethalDamage overloads survive; only the documented one
     // is marked, and it goes to the bottom while the live one keeps its group.

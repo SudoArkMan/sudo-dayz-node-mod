@@ -59,6 +59,41 @@ int main(int argc, char *argv[])
         check(hits.first().title.contains(QStringLiteral("EEInit")),
               QStringLiteral("top hit is EEInit, got '%1'").arg(hits.first().title));
 
+    // Two words. The box used to match the whole trimmed string with one
+    // contains(), and nothing in the catalogue holds a space, so every query
+    // anyone types the way they say it came back empty.
+    {
+        const auto topOf = [&cat](const QString &query) {
+            const QVector<SearchHit> h = cat.search(query);
+            return h.isEmpty() ? QString() : h.first().title;
+        };
+        check(cat.search(QStringLiteral("set health")).size() > 0,
+              QStringLiteral("'set health' finds something"));
+        check(topOf(QStringLiteral("set health")) == QStringLiteral("SetHealth"),
+              QStringLiteral("'set health' puts SetHealth on top, got '%1'")
+                  .arg(topOf(QStringLiteral("set health"))));
+        // Spacing and case are how a person types, not how a name is spelled.
+        check(topOf(QStringLiteral("  Set   Health  ")) == QStringLiteral("SetHealth"),
+              QStringLiteral("extra spaces and capitals do not change the answer"));
+        // Words spread across the name and the class that declares it.
+        bool timerRun = false;
+        for (const SearchHit &h : cat.search(QStringLiteral("timer run")))
+            if (h.subtitle == QLatin1String("Timer") && h.title == QLatin1String("Run"))
+                timerRun = true;
+        check(timerRun, QStringLiteral("'timer run' finds Timer::Run"));
+        // A word that is nowhere on the row takes the row out, so two words are
+        // narrower than one rather than wider.
+        check(cat.search(QStringLiteral("set health")).size()
+                  < cat.search(QStringLiteral("set")).size(),
+              QStringLiteral("adding a word narrows the result"));
+        check(cat.search(QStringLiteral("set nosuchwordanywhere")).isEmpty(),
+              QStringLiteral("every word has to match, not just one"));
+        // A single word must still take the original path, because the importer
+        // and the lowering resolve every method name through here.
+        check(topOf(QStringLiteral("EEInit")) == QStringLiteral("Event EEInit"),
+              QStringLiteral("one word still ranks the way it did"));
+    }
+
     // Every hit must resolve to a usable node.
     int built = 0;
     for (const SearchHit &h : cat.search(QStringLiteral("Get"), {40, {}, {}})) {
@@ -124,11 +159,10 @@ int main(int argc, char *argv[])
         check(!privateFound, QStringLiteral("a private method is not in the catalogue"));
 
         // An event row is titled "Event <name>", the same two spellings
-        // codegen's ancestryDeclares has to accept. Timer::Run is one of them,
-        // because the catalogue derives Event from a name declared `override`
-        // anywhere at all and six Workbench plugins declare `override void
-        // Run()`. That is a separate defect; what matters here is that Run is
-        // public and stays offered.
+        // codegen's ancestryDeclares has to accept. Timer::Run was one of them
+        // until event-ness stopped being decided by method name; eventstest
+        // covers that directly. What matters here is that Run is public and
+        // stays offered.
         const auto titleMatches = [](const QString &title, const QString &name) {
             return title == name || title == QStringLiteral("Event ") + name;
         };
@@ -647,6 +681,194 @@ int main(int argc, char *argv[])
         out << "       (Showcase.sdzn not present, skipped)" << Qt::endl;
     }
 
+    // The thing the user sat down to build: a five second timer. It used to
+    // take a ref member, a New Object node whose class could not be set, a Set,
+    // a Get, a Run call that no pin could reach, a callback named by a string
+    // nothing checked, and a separate function node.
+    out << "codegen - timers and deferred calls" << Qt::endl;
+    {
+        const auto timerGraph = [](const QString &name, bool repeat) {
+            Graph g;
+            g.className = QStringLiteral("SUDO_Timed");
+            g.baseClass = QStringLiteral("ItemBase");
+            GraphNode begin;
+            begin.id = QStringLiteral("evt");
+            begin.kind = NodeKind::Builtin;
+            begin.ref = bi::Begin;
+            GraphNode timer;
+            timer.id = QStringLiteral("t1");
+            timer.kind = NodeKind::Builtin;
+            timer.ref = bi::SetTimer;
+            if (!name.isEmpty()) timer.opts.insert(QStringLiteral("name"), name);
+            timer.inputs.insert(QStringLiteral("seconds"), QStringLiteral("5.0"));
+            timer.inputs.insert(QStringLiteral("repeat"),
+                                repeat ? QStringLiteral("true") : QStringLiteral("false"));
+            GraphNode pr;
+            pr.id = QStringLiteral("p1");
+            pr.kind = NodeKind::Builtin;
+            pr.ref = bi::Print;
+            pr.inputs.insert(QStringLiteral("value"), QStringLiteral("\"tick\""));
+            g.nodes << begin << timer << pr;
+            g.edges.append({QStringLiteral("e1"), {begin.id, QStringLiteral("exec")},
+                            {timer.id, QStringLiteral("exec")}, {}});
+            // The callback pin, not the exec pin: the work runs later.
+            g.edges.append({QStringLiteral("e2"), {timer.id, QStringLiteral("elapsed")},
+                            {pr.id, QStringLiteral("exec")}, {}});
+            return g;
+        };
+
+        const Graph g = timerGraph(QStringLiteral("Reload"), false);
+        const GenResult gen = generateEnforce(g, cat, builtins, p);
+        check(gen.code.contains(QStringLiteral("\tref Timer m_Reload;")),
+              QStringLiteral("the member is declared, and declared ref"));
+        check(gen.code.contains(
+                  QStringLiteral("m_Reload = new Timer(CALL_CATEGORY_SYSTEM);")),
+              QStringLiteral("the timer is constructed on the system queue"));
+        check(gen.code.contains(QStringLiteral(
+                  "m_Reload.Run(5.0, this, \"ReloadElapsed\", null, false);")),
+              QStringLiteral("the call names the callback"));
+        check(gen.code.contains(QStringLiteral("\tvoid ReloadElapsed()")),
+              QStringLiteral("the callback method is written"));
+        check(gen.code.contains(QStringLiteral("Print(")),
+              QStringLiteral("the elapsed chain lands inside it"));
+        // The string and the method are one decision, so no graph can produce a
+        // Run() whose callback does not exist. That was the magic string.
+        const int quoted = gen.code.indexOf(QStringLiteral("\"ReloadElapsed\""));
+        const int declared = gen.code.indexOf(QStringLiteral("void ReloadElapsed()"));
+        check(quoted >= 0 && declared >= 0,
+              QStringLiteral("the name in the call and the method declared are the same"));
+        check(gen.warnings.isEmpty(),
+              QStringLiteral("a complete timer generates no warnings (%1)")
+                  .arg(gen.warnings.join(QStringLiteral("; "))));
+
+        // Regenerating the same graph has to produce the same file, or a node
+        // that writes a member and a method is not finished.
+        check(generateEnforce(g, cat, builtins, p).code == gen.code,
+              QStringLiteral("the graph regenerates its own file byte for byte"));
+
+        // The queue is a real choice and it has to reach the file.
+        Graph gameplay = g;
+        gameplay.nodes[1].opts.insert(QStringLiteral("category"),
+                                      QStringLiteral("gameplay"));
+        check(generateEnforce(gameplay, cat, builtins, p).code.contains(
+                  QStringLiteral("new Timer(CALL_CATEGORY_GAMEPLAY);")),
+              QStringLiteral("the gameplay queue reaches the constructor"));
+
+        // Repeating reaches the last argument of Run.
+        check(generateEnforce(timerGraph(QStringLiteral("Reload"), true), cat, builtins, p)
+                  .code.contains(QStringLiteral("\"ReloadElapsed\", null, true);")),
+              QStringLiteral("a repeating timer says so in the call"));
+
+        // An untouched node still compiles: unique member, unique method.
+        const GenResult unnamed =
+            generateEnforce(timerGraph(QString(), false), cat, builtins, p);
+        check(unnamed.code.contains(QStringLiteral("ref Timer m_TimerT1;"))
+                  && unnamed.code.contains(QStringLiteral("void TimerT1Elapsed()")),
+              QStringLiteral("an unnamed timer is named after its node"));
+        // The name is an identifier whatever is typed into it.
+        Graph messy = timerGraph(QStringLiteral("reload delay!"), false);
+        check(generateEnforce(messy, cat, builtins, p).code.contains(
+                  QStringLiteral("ref Timer m_ReloadDelay;")),
+              QStringLiteral("a typed name is reduced to an identifier"));
+
+        // Two timers sharing a name would declare one member twice and one
+        // method twice. The file has to say so rather than not compile.
+        Graph clash = g;
+        GraphNode second = clash.nodes.at(1);
+        second.id = QStringLiteral("t2");
+        clash.nodes << second;
+        const GenResult clashed = generateEnforce(clash, cat, builtins, p);
+        check(clashed.code.count(QStringLiteral("void ReloadElapsed()")) == 1,
+              QStringLiteral("a duplicated name declares the method once"));
+        check(!clashed.warnings.isEmpty(),
+              QStringLiteral("and the duplicate is reported"));
+
+        // Stop Timer, and the mismatch that used to be silent.
+        Graph stopping = g;
+        GraphNode stop;
+        stop.id = QStringLiteral("s1");
+        stop.kind = NodeKind::Builtin;
+        stop.ref = bi::StopTimer;
+        stop.opts.insert(QStringLiteral("name"), QStringLiteral("Reload"));
+        stopping.nodes << stop;
+        stopping.edges.append({QStringLiteral("e3"), {QStringLiteral("t1"), QStringLiteral("exec")},
+                               {stop.id, QStringLiteral("exec")}, {}});
+        const GenResult stopped = generateEnforce(stopping, cat, builtins, p);
+        check(stopped.code.contains(QStringLiteral("if (m_Reload) m_Reload.Stop();")),
+              QStringLiteral("Stop Timer guards the member it stops"));
+        check(stopped.warnings.isEmpty(),
+              QStringLiteral("a Stop that matches a Set is not reported (%1)")
+                  .arg(stopped.warnings.join(QStringLiteral("; "))));
+
+        Graph orphan = stopping;
+        orphan.nodes.last().opts.insert(QStringLiteral("name"), QStringLiteral("Nothing"));
+        bool said = false;
+        for (const QString &w : generateEnforce(orphan, cat, builtins, p).warnings)
+            if (w.contains(QStringLiteral("stops nothing"))) said = true;
+        check(said, QStringLiteral("a Stop naming no timer is reported"));
+
+        // Call Later: milliseconds as a whole number, a function reference
+        // rather than a name, and the method written for it.
+        Graph later;
+        later.className = QStringLiteral("SUDO_Deferred");
+        later.baseClass = QStringLiteral("ItemBase");
+        GraphNode lb;
+        lb.id = QStringLiteral("evt");
+        lb.kind = NodeKind::Builtin;
+        lb.ref = bi::Begin;
+        GraphNode cl;
+        cl.id = QStringLiteral("c1");
+        cl.kind = NodeKind::Builtin;
+        cl.ref = bi::CallLater;
+        cl.opts.insert(QStringLiteral("name"), QStringLiteral("RefreshHud"));
+        cl.inputs.insert(QStringLiteral("ms"), QStringLiteral("250"));
+        cl.inputs.insert(QStringLiteral("repeat"), QStringLiteral("false"));
+        GraphNode lp;
+        lp.id = QStringLiteral("p1");
+        lp.kind = NodeKind::Builtin;
+        lp.ref = bi::Print;
+        lp.inputs.insert(QStringLiteral("value"), QStringLiteral("\"late\""));
+        later.nodes << lb << cl << lp;
+        later.edges.append({QStringLiteral("e1"), {lb.id, QStringLiteral("exec")},
+                            {cl.id, QStringLiteral("exec")}, {}});
+        later.edges.append({QStringLiteral("e2"), {cl.id, QStringLiteral("then")},
+                            {lp.id, QStringLiteral("exec")}, {}});
+        const GenResult def = generateEnforce(later, cat, builtins, p);
+        check(def.code.contains(QStringLiteral(
+                  "GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM)"
+                  ".CallLater(RefreshHud, 250, false);")),
+              QStringLiteral("Call Later passes the method, unquoted"));
+        check(!def.code.contains(QStringLiteral("\"RefreshHud\"")),
+              QStringLiteral("and never as a string, which is a different call"));
+        check(def.code.contains(QStringLiteral("\tvoid RefreshHud()")),
+              QStringLiteral("the deferred method is written"));
+        check(!def.code.contains(QStringLiteral("ref Timer")),
+              QStringLiteral("a deferred call declares no member"));
+
+        GraphNode cancel;
+        cancel.id = QStringLiteral("x1");
+        cancel.kind = NodeKind::Builtin;
+        cancel.ref = bi::CancelCallLater;
+        cancel.opts.insert(QStringLiteral("name"), QStringLiteral("RefreshHud"));
+        Graph cancelling = later;
+        cancelling.nodes << cancel;
+        cancelling.edges.append({QStringLiteral("e3"), {cl.id, QStringLiteral("exec")},
+                                 {cancel.id, QStringLiteral("exec")}, {}});
+        check(generateEnforce(cancelling, cat, builtins, p).code.contains(
+                  QStringLiteral("GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM)"
+                                 ".Remove(RefreshHud);")),
+              QStringLiteral("Cancel Call Later removes the same reference"));
+
+        // Nothing on the callback pin schedules an empty method, which is the
+        // one way this node can be wired and still do nothing.
+        Graph bare = timerGraph(QStringLiteral("Reload"), false);
+        bare.edges.removeLast();
+        bool empty = false;
+        for (const QString &w : generateEnforce(bare, cat, builtins, p).warnings)
+            if (w.contains(QStringLiteral("empty method"))) empty = true;
+        check(empty, QStringLiteral("a timer with nothing to run is reported"));
+    }
+
     // A file is more than one class. The generator answers for a class, so the
     // preamble and the line between two classes are assembleScriptFile's own
     // and it is the only thing that can put the file's ending on them. Before
@@ -713,6 +935,90 @@ int main(int argc, char *argv[])
         }
         out << "       project totals: " << totalErrors << " errors, "
             << totalWarnings << " warnings" << Qt::endl;
+    }
+
+    // The timing rules. Each one is a mistake the engine reports as silence:
+    // a callback nothing reaches, a Stop aimed at a name nobody used, a queue
+    // entry left repeating after its object is gone.
+    {
+        const auto rules = [&](const Graph &g) {
+            QStringList ids;
+            for (const Diagnostic &d : analyzeGraph(g, cat, builtins).diagnostics)
+                ids << d.rule;
+            return ids;
+        };
+        Graph g;
+        g.className = QStringLiteral("SUDO_Timing");
+        g.baseClass = QStringLiteral("ItemBase");
+        GraphNode begin;
+        begin.id = QStringLiteral("evt");
+        begin.kind = NodeKind::Builtin;
+        begin.ref = bi::Begin;
+        GraphNode later;
+        later.id = QStringLiteral("c1");
+        later.kind = NodeKind::Builtin;
+        later.ref = bi::CallLater;
+        later.opts.insert(QStringLiteral("name"), QStringLiteral("Poll"));
+        later.inputs.insert(QStringLiteral("ms"), QStringLiteral("250"));
+        later.inputs.insert(QStringLiteral("repeat"), QStringLiteral("true"));
+        GraphNode pr;
+        pr.id = QStringLiteral("p1");
+        pr.kind = NodeKind::Builtin;
+        pr.ref = bi::Print;
+        pr.inputs.insert(QStringLiteral("value"), QStringLiteral("\"poll\""));
+        g.nodes << begin << later << pr;
+        g.edges.append({QStringLiteral("e1"), {begin.id, QStringLiteral("exec")},
+                        {later.id, QStringLiteral("exec")}, {}});
+        g.edges.append({QStringLiteral("e2"), {later.id, QStringLiteral("then")},
+                        {pr.id, QStringLiteral("exec")}, {}});
+
+        check(rules(g).contains(QStringLiteral("DZ319")),
+              QStringLiteral("a repeating deferred call with no cancel is reported"));
+
+        // A Timer does not need the same treatment, and must not be told it
+        // does: releasing the ref member runs the destructor, which takes it
+        // off the queue.
+        Graph timerLoop = g;
+        timerLoop.nodes[1].ref = bi::SetTimer;
+        timerLoop.nodes[1].inputs.insert(QStringLiteral("seconds"), QStringLiteral("5.0"));
+        timerLoop.edges[1].from.pin = QStringLiteral("elapsed");
+        check(!rules(timerLoop).contains(QStringLiteral("DZ319")),
+              QStringLiteral("a repeating timer is not told to cancel itself"));
+
+        // Adding the cancel clears it.
+        Graph cancelled = g;
+        GraphNode cancel;
+        cancel.id = QStringLiteral("x1");
+        cancel.kind = NodeKind::Builtin;
+        cancel.ref = bi::CancelCallLater;
+        cancel.opts.insert(QStringLiteral("name"), QStringLiteral("Poll"));
+        cancelled.nodes << cancel;
+        cancelled.edges.append({QStringLiteral("e3"), {later.id, QStringLiteral("exec")},
+                                {cancel.id, QStringLiteral("exec")}, {}});
+        check(!rules(cancelled).contains(QStringLiteral("DZ319")),
+              QStringLiteral("cancelling it clears the finding"));
+        check(!rules(cancelled).contains(QStringLiteral("DZ318")),
+              QStringLiteral("a matching name is not reported as a mismatch"));
+
+        // A cancel that names nothing, and one that names the wrong queue.
+        Graph misnamed = cancelled;
+        misnamed.nodes.last().opts.insert(QStringLiteral("name"), QStringLiteral("Other"));
+        check(rules(misnamed).contains(QStringLiteral("DZ318")),
+              QStringLiteral("a cancel naming nothing is reported"));
+
+        Graph wrongQueue = cancelled;
+        wrongQueue.nodes.last().opts.insert(QStringLiteral("category"),
+                                            QStringLiteral("gameplay"));
+        check(rules(wrongQueue).contains(QStringLiteral("DZ318")),
+              QStringLiteral("cancelling on the wrong queue is reported"));
+
+        // Nothing on the callback pin.
+        Graph bare = g;
+        bare.edges.removeLast();
+        check(rules(bare).contains(QStringLiteral("DZ317")),
+              QStringLiteral("an unwired callback pin is reported"));
+        check(!rules(bare).contains(QStringLiteral("DZ205")),
+              QStringLiteral("and not also called a branch that decides nothing"));
     }
 
     out << Qt::endl << (failures == 0 ? "ALL CORE TESTS PASSED"

@@ -1114,6 +1114,97 @@ int main(int argc, char *argv[])
               QStringLiteral("regenerates the call"));
     }
 
+    // What the Set Timer node round trips, and what it does not.
+    //
+    // It is the first node that writes more than statements: a `ref` member, two
+    // lines in the flow, and a whole callback method. Three claims, and they are
+    // not the same claim:
+    //
+    //   1. the graph regenerates its own file byte for byte           (holds)
+    //   2. the file it wrote survives a trip through the importer     (holds)
+    //   3. the importer rebuilds the composite node from that file    (does not)
+    //
+    // The third is declined rather than approximated. Recognising it would mean
+    // matching a member declaration, two statements inside one method, and a
+    // second method somewhere else in the class, and proving the string literal
+    // in the middle of it equals that second method's name. The importer's unit
+    // is one method, and a shape that spans three of them and a field is not a
+    // shape it can refuse cleanly when it is only nearly right. Half-recognising
+    // it would silently move a user's hand-written callback into a node that
+    // owns it, so the parts come back as parts: the member is a variable, the
+    // two lines are call nodes, the callback is a declared function. Nothing is
+    // lost and nothing is invented.
+    out << Qt::endl << "a node that writes a member and a method" << Qt::endl;
+    {
+        Graph g;
+        g.className = QStringLiteral("SUDO_Timed");
+        g.baseClass = QStringLiteral("ItemBase");
+        GraphNode begin;
+        begin.id = QStringLiteral("evt");
+        begin.kind = NodeKind::Builtin;
+        begin.ref = bi::Begin;
+        GraphNode timer;
+        timer.id = QStringLiteral("t1");
+        timer.kind = NodeKind::Builtin;
+        timer.ref = bi::SetTimer;
+        timer.opts.insert(QStringLiteral("name"), QStringLiteral("Reload"));
+        timer.inputs.insert(QStringLiteral("seconds"), QStringLiteral("5.0"));
+        timer.inputs.insert(QStringLiteral("repeat"), QStringLiteral("false"));
+        GraphNode pr;
+        pr.id = QStringLiteral("p1");
+        pr.kind = NodeKind::Builtin;
+        pr.ref = bi::Print;
+        pr.inputs.insert(QStringLiteral("value"), QStringLiteral("\"tick\""));
+        g.nodes << begin << timer << pr;
+        g.edges.append({QStringLiteral("e1"), {begin.id, QStringLiteral("exec")},
+                        {timer.id, QStringLiteral("exec")}, {}});
+        g.edges.append({QStringLiteral("e2"), {timer.id, QStringLiteral("elapsed")},
+                        {pr.id, QStringLiteral("exec")}, {}});
+
+        const QString written = generateEnforce(g, cat, builtins, project).code;
+        check(generateEnforce(g, cat, builtins, project).code == written,
+              QStringLiteral("the graph regenerates its own file byte for byte"));
+
+        const ImportResult back = importEnforceText(written, cat, builtins, project);
+        check(back.ok && !back.scripts.isEmpty(),
+              QStringLiteral("the file it wrote can be opened again"));
+        if (back.ok && !back.scripts.isEmpty()) {
+            const Graph &reopened = back.scripts.first().graph;
+            const QString again =
+                generateEnforce(reopened, cat, builtins, project).code;
+            check(again == written,
+                  QStringLiteral("and comes back out of the importer byte for byte"));
+
+            // Declined, on purpose, and pinned so it cannot start half working.
+            int composites = 0;
+            for (const GraphNode &n : reopened.nodes)
+                if (n.ref == bi::SetTimer || n.ref == bi::CallLater
+                    || n.ref == bi::StopTimer || n.ref == bi::CancelCallLater)
+                    composites++;
+            check(composites == 0,
+                  QStringLiteral("the importer does not rebuild the composite node (%1)")
+                      .arg(composites));
+
+            // What it does come back as, so "nothing is lost" is measured
+            // rather than asserted.
+            bool member = false;
+            for (const GraphVariable &v : reopened.variables)
+                if (v.name == QLatin1String("m_Reload")
+                    && v.type == QLatin1String("Timer"))
+                    member = true;
+            check(member, QStringLiteral("the member comes back as a Timer variable"));
+            check(member && (reopened.variables.isEmpty()
+                             || generateEnforce(reopened, cat, builtins, project)
+                                    .code.contains(QStringLiteral("ref Timer m_Reload;"))),
+                  QStringLiteral("and is still written ref"));
+            bool callback = false;
+            for (const GraphFunction &f : reopened.functions)
+                if (f.name == QLatin1String("ReloadElapsed")) callback = true;
+            check(callback,
+                  QStringLiteral("the callback comes back as a declared function"));
+        }
+    }
+
     // Exploding a raw node has to leave the chain it was part of intact.
     out << Qt::endl << "explode in place" << Qt::endl;
     {

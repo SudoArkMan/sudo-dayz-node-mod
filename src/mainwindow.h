@@ -205,6 +205,10 @@ private:
     // headless UI check only: with the variable unset, which is every normal
     // run, this returns at once.
     void browseForScreenshot();
+    // Drops the menu named by SUDO_UI_MENU open, so the menu bar can be checked
+    // the way a user meets it. Same deal as browseForScreenshot: unset in every
+    // normal run, and then this returns at once.
+    void openMenuForScreenshot();
     // The read only bar over the canvas, and the dim tab text that goes with it.
     void updateReadOnlyBar();
     // True when the active script came out of another author's mod, in which

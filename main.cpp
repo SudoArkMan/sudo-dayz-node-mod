@@ -14,7 +14,10 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPixmap>
 #include <QThread>
 #include <QTimer>
 
@@ -166,7 +169,20 @@ int main(int argc, char *argv[])
         // nobody at the keyboard is a run that never ends. A screenshot changes
         // nothing on disk, so there is nothing here worth asking about.
         QTimer::singleShot(1200, &app, [&win, out]() {
-            const bool saved = win.grab().save(out);
+            QPixmap shot = win.grab();
+            // A menu, a combo popup and a tooltip are all top level windows of
+            // their own, so grab() on the main window paints straight over the
+            // place they sit. Painted back in at the offset they hold on screen,
+            // or a picture of an open menu is a picture without one.
+            QPainter into(&shot);
+            const QPoint origin = win.mapToGlobal(QPoint(0, 0));
+            for (QWidget *top : QApplication::topLevelWidgets()) {
+                if (top == &win || !top->isVisible() || !top->isWindow()) continue;
+                if (!qobject_cast<QMenu *>(top)) continue;
+                into.drawPixmap(top->mapToGlobal(QPoint(0, 0)) - origin, top->grab());
+            }
+            into.end();
+            const bool saved = shot.save(out);
             std::_Exit(saved ? 0 : 1);
         });
     }

@@ -646,10 +646,20 @@ ModEntry readModPath(const QString &path, QString *error)
     case ModPathKind::None:
         break;
     }
-    if (error)
-        *error = QStringLiteral("%1 is not a pbo, a mod folder, or a folder with script "
-                                "in it")
-                     .arg(QDir::toNativeSeparators(path));
+    if (error) {
+        // Two different answers, because "it is not a mod" sends somebody
+        // looking inside a file that is not there at all. The whole path for the
+        // one that is missing, since that is what has to be checked; the name
+        // alone for the one that is there, since the reason is the useful half
+        // and a status line that opens with 150 characters of path pushes it off
+        // the end.
+        *error = QFileInfo::exists(path)
+                     ? QStringLiteral("%1 is not a pbo, a mod folder, or a folder with "
+                                      "script in it")
+                           .arg(QFileInfo(path).fileName())
+                     : QStringLiteral("%1 is not there any more")
+                           .arg(QDir::toNativeSeparators(path));
+    }
     return {};
 }
 

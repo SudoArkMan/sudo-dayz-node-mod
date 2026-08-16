@@ -762,6 +762,48 @@ Emitted emitNode(Ctx &ctx, const GraphNode &node, int depth)
         return ownedBy(node.id, lines);
     }
 
+    // ---- timing
+    //
+    // Only the statements are written here. The `ref` member and the callback
+    // method the last argument names are written once per node by
+    // generateEnforce, from the same bi::timingName, which is what makes the
+    // string and the method it dispatches to the same decision rather than two.
+    if (node.ref == bi::SetTimer) {
+        const QString name = bi::timingName(node);
+        const QString member = bi::timerMember(name);
+        const QString seconds = expr(ctx, node, QStringLiteral("seconds"));
+        const QString loop = expr(ctx, node, QStringLiteral("repeat"));
+        return ownedBy(node.id,
+                       {pad + member + QStringLiteral(" = new Timer(")
+                            + bi::callCategoryConstant(node) + QStringLiteral(");"),
+                        pad + member + QStringLiteral(".Run(") + seconds
+                            + QStringLiteral(", this, \"") + bi::timerCallback(name)
+                            + QStringLiteral("\", null, ") + loop + QStringLiteral(");")});
+    }
+
+    if (node.ref == bi::StopTimer) {
+        // Guarded, because the member is null until the Set Timer node has run
+        // and calling into null is a crash rather than a no-op.
+        const QString member = bi::timerMember(bi::timingName(node));
+        return ownedBy(node.id, {pad + QStringLiteral("if (") + member + QStringLiteral(") ")
+                                 + member + QStringLiteral(".Stop();")});
+    }
+
+    if (node.ref == bi::CallLater || node.ref == bi::CancelCallLater) {
+        const QString name = bi::timingName(node);
+        const QString queue = QStringLiteral("GetGame().GetCallQueue(")
+                              + bi::callCategoryConstant(node) + QLatin1Char(')');
+        if (node.ref == bi::CancelCallLater)
+            return ownedBy(node.id, {pad + queue + QStringLiteral(".Remove(") + name
+                                     + QStringLiteral(");")});
+        // The first argument is a reference to the method, not its name, so it
+        // is written bare. Quoting it is a different call and does not convert.
+        return ownedBy(node.id,
+                       {pad + queue + QStringLiteral(".CallLater(") + name + QStringLiteral(", ")
+                        + expr(ctx, node, QStringLiteral("ms")) + QStringLiteral(", ")
+                        + expr(ctx, node, QStringLiteral("repeat")) + QStringLiteral(");")});
+    }
+
     if (node.ref == QLatin1String("bi.branch")) {
         const QString cond = expr(ctx, node, QStringLiteral("cond"));
         const Emitted t = subChain(ctx, node, QStringLiteral("true"), depth + 1);
@@ -1852,6 +1894,92 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
         bodies.append(block);
     }
 
+    // -------------------------------------------- timers and deferred calls
+    //
+    // The one place a node writes more than statements. A Set Timer node owns a
+    // `ref Timer` member and a callback method as well as the two lines it puts
+    // in the flow, and a Call Later node owns a callback method. All three
+    // pieces are built from one bi::timingName, so the string the engine
+    // dispatches on and the method it dispatches to are the same decision.
+    //
+    // The `ref` is written here rather than offered as a choice. A Timer that
+    // is not held by a ref member is collected as soon as the call returns and
+    // never fires, because the timer queue holds a plain array and does not own
+    // what is in it. Leaving that to a checkbox is leaving the classic bug on
+    // the table.
+    QStringList timingMembers;
+    QSet<QString> timingMethods;
+    for (const GraphNode &n : graph.nodes) {
+        const bool isTimer = n.ref == bi::SetTimer;
+        if (!isTimer && n.ref != bi::CallLater) continue;
+
+        const QString name = bi::timingName(n);
+        const QString method = isTimer ? bi::timerCallback(name) : name;
+        const QString what = isTimer ? QStringLiteral("Set Timer")
+                                     : QStringLiteral("Call Later");
+        if (timingMethods.contains(method) || seenMethods.contains(method)) {
+            ctx.warnings.append(
+                what + QStringLiteral(" node \"") + name
+                + QStringLiteral("\" wants to generate ") + method
+                + QStringLiteral("(), which this class already has. Only the first is "
+                                 "generated, so the rest of them run the wrong chain. Give "
+                                 "each one its own name."));
+            continue;
+        }
+        timingMethods.insert(method);
+
+        // A method body of its own, so it starts with the state a method body
+        // starts with rather than whatever the flow that scheduled it left.
+        ctx.temps.clear();
+        ctx.chainCache.clear();
+        ctx.retType = QStringLiteral("void");
+        // These methods are the generator's, not an author's, so they are
+        // written in the generator's own indentation whatever the graph carries.
+        ctx.style = BodyStyle();
+
+        const QString pin = isTimer ? QStringLiteral("elapsed") : QStringLiteral("then");
+        const Emitted body = emitChain(ctx, execChain(graph, n.id, pin), 2);
+        if (body.isEmpty())
+            ctx.warnings.append(what + QStringLiteral(" node \"") + name
+                                + QStringLiteral("\" has nothing on its ") + pin
+                                + QStringLiteral(" pin, so it schedules an empty method. Chain "
+                                                 "the work you want deferred from that pin."));
+
+        if (isTimer)
+            timingMembers << ind(1) + QStringLiteral("ref Timer ") + bi::timerMember(name)
+                                 + QLatin1Char(';');
+
+        Emitted block;
+        block.add(ind(1) + QStringLiteral("void ") + method + QStringLiteral("()"), n.id);
+        block.add(ind(1) + QLatin1Char('{'), n.id);
+        if (body.isEmpty())
+            block.add(ind(2) + QStringLiteral("// chain nodes from the ") + pin
+                          + QStringLiteral(" pin of the ") + what + QStringLiteral(" node"),
+                      n.id);
+        else
+            block.add(body);
+        block.add(ind(1) + QLatin1Char('}'), n.id);
+        bodies.append(block);
+    }
+
+    // A Stop Timer or Cancel Call Later that names nothing is the string
+    // mismatch this whole design exists to remove, so it is reported rather
+    // than written out to do nothing at runtime.
+    for (const GraphNode &n : graph.nodes) {
+        const bool stop = n.ref == bi::StopTimer;
+        if (!stop && n.ref != bi::CancelCallLater) continue;
+        const QString name = bi::timingName(n);
+        const QString method = stop ? bi::timerCallback(name) : name;
+        if (timingMethods.contains(method)) continue;
+        ctx.warnings.append(
+            (stop ? QStringLiteral("Stop Timer \"") : QStringLiteral("Cancel Call Later \""))
+            + name
+            + QStringLiteral("\" does not match any ")
+            + (stop ? QStringLiteral("Set Timer") : QStringLiteral("Call Later"))
+            + QStringLiteral(" node in this script, so it stops nothing. Give both nodes the "
+                             "same name."));
+    }
+
     // Nothing below here is a method any author wrote, so the rest of the file
     // is assembled with the generator's own indentation.
     ctx.style = BodyStyle();
@@ -1884,6 +2012,9 @@ GenResult generateEnforce(const Graph &graph, const Catalog &cat, const Builtins
                        + (v.def.isEmpty() ? QString() : QStringLiteral(" = ") + v.def)
                        + QLatin1Char(';');
     }
+    // After the declared variables, in node order, so the file the graph writes
+    // is the same file every time it writes it.
+    members += timingMembers;
 
     QStringList ctorLines;
     for (const GraphVariable *v : synced) {

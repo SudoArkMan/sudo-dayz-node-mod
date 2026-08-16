@@ -42,6 +42,26 @@ int indexIn(const QString &key, int prefixLen, int count)
     return ok && n >= 0 && n < count ? n : -1;
 }
 
+// Query words. Any whitespace separates, not just the space bar, because a
+// query pasted out of a signature carries whatever was between the arguments.
+QStringList splitTerms(const QString &q)
+{
+    QStringList out;
+    QString word;
+    for (const QChar c : q) {
+        if (!c.isSpace()) {
+            word.append(c);
+            continue;
+        }
+        if (!word.isEmpty()) {
+            out.append(word);
+            word.clear();
+        }
+    }
+    if (!word.isEmpty()) out.append(word);
+    return out;
+}
+
 } // namespace
 
 bool Catalog::load(const QString &jsonPath)
@@ -702,6 +722,22 @@ QVector<SearchHit> Catalog::search(const QString &query, const SearchOptions &op
     const int limit = opts.limit > 0 ? opts.limit : 60;
     if (q.isEmpty() && opts.ofClass.isEmpty()) return {};
 
+    // Two words are a description, not a name: "set health", "timer run",
+    // "config get text". Nothing in the catalogue holds the space, so matching
+    // the whole string with one contains() answered nothing for any of them and
+    // the search box looked broken for the most natural thing to type.
+    //
+    // A single word keeps the old path exactly. It is not a special case for
+    // its own sake: the importer and the lowering resolve every method name
+    // through this function, and every method name is one word, so leaving that
+    // path untouched is what keeps a change to the search box out of the
+    // conversion rates.
+    const QStringList terms = splitTerms(q);
+    const bool multi = terms.size() > 1;
+    // "set health" against SetHealth. The words are how the reader spells it;
+    // joined is how the declaration does.
+    const QString joined = multi ? terms.join(QString()) : q;
+
     QSet<QString> allowed;
     if (!opts.ofClass.isEmpty())
         for (const ClassInfo &c : ancestors(opts.ofClass))
@@ -722,10 +758,41 @@ QVector<SearchHit> Catalog::search(const QString &query, const SearchOptions &op
 
         const QString nameLower = e.name.toLower();
         int score = -1;
-        if (nameLower == q) score = 1000;
-        else if (nameLower.startsWith(q)) score = 800 - nameLower.size();
-        else if (nameLower.contains(q)) score = 500 - nameLower.indexOf(q);
-        else if (e.hay.contains(q)) score = 300;
+        if (!multi) {
+            if (nameLower == q) score = 1000;
+            else if (nameLower.startsWith(q)) score = 800 - nameLower.size();
+            else if (nameLower.contains(q)) score = 500 - nameLower.indexOf(q);
+            else if (e.hay.contains(q)) score = 300;
+        } else {
+            // Every word has to land somewhere on the row, across the name, the
+            // class that declares it, the category and the signature. That last
+            // one is what lets "insert string" find the array overload that
+            // takes one, which is otherwise only reachable by reading all 22.
+            int inName = 0;
+            bool all = true;
+            for (const QString &t : terms) {
+                if (nameLower.contains(t)) {
+                    inName++;
+                    continue;
+                }
+                if (!e.sub.contains(t, Qt::CaseInsensitive)
+                    && !e.cat.contains(t, Qt::CaseInsensitive)
+                    && !e.sig.contains(t, Qt::CaseInsensitive)) {
+                    all = false;
+                    break;
+                }
+            }
+            // The same ladder as a single word, measured against the joined
+            // spelling, so "set health" still puts SetHealth on top. Words that
+            // do not sit together in the name fall below the contains tier, and
+            // the more of them the name itself carries the higher it sits.
+            if (all) {
+                if (nameLower == joined) score = 1000;
+                else if (nameLower.startsWith(joined)) score = 800 - nameLower.size();
+                else if (nameLower.contains(joined)) score = 500 - nameLower.indexOf(joined);
+                else score = 200 + inName * 100 - qMin(nameLower.size(), 99);
+            }
+        }
         if (score < 0) continue;
 
         // prefer shallower / more commonly used owners

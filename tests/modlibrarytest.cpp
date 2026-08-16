@@ -556,6 +556,18 @@ static void testOpenPathsAreReadOnly(const Catalog &cat, const Builtins &builtin
           QStringLiteral("a root refuses to open as one mod, with a reason (\"%1\")")
               .arg(error));
 
+    // A pbo on a stick that has been unplugged, or a row left over from last
+    // launch. "It is not a mod" sends somebody looking inside a file that is not
+    // there at all, so the two answers have to be different ones.
+    QString missing;
+    const bool goneRefused =
+        !readModPath(QDir(temp.path()).filePath(QStringLiteral("gone.pbo")), &missing)
+             .isValid();
+    check(goneRefused && missing.contains(QLatin1String("not there")),
+          QStringLiteral("a path that is gone says so rather than that it is not a mod "
+                         "(\"%1\")")
+              .arg(missing));
+
     // An unpacked tree: the same two scripts, on disk, with no archive at all.
     const QString unpacked = QDir(temp.path()).filePath(QStringLiteral("UnpackedMod"));
     QDir().mkpath(unpacked + QStringLiteral("/Scripts/4_World"));

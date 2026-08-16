@@ -50,10 +50,16 @@ public:
     // runs; these four read as a timeline, earliest moment first.
     QStringList beginModeOrder() const { return m_beginOrder; }
 
-    // The choices behind the two opts the Inspector has to edit. Without a list
-    // to offer, `op` and `type` are only reachable by hand-editing the .sdzn.
+    // The choices behind the opts the Inspector has to edit. Without a list to
+    // offer, `op`, `type` and `category` are only reachable by hand-editing the
+    // .sdzn. Every node that takes one still works untouched, so the picker is
+    // polish rather than a thing a graph cannot be built without.
     static const QStringList &binaryOperators(); // bi.op, opts["op"]
     static const QStringList &literalTypes();    // bi.literal, opts["type"]
+    // Timing nodes, opts["category"]. Keys, not the constants they emit.
+    static const QStringList &callCategories();
+    // What one of those keys means, for a picker and for the inspector text.
+    static QString callCategoryLabel(const QString &key);
     // True when the operator yields a bool whatever it is given, which is what
     // decides the shape of the Operator node's pins.
     static bool operatorYieldsBool(const QString &op);
@@ -86,6 +92,29 @@ extern const QString Raw;
 extern const QString Cast;
 extern const QString Literal;
 extern const QString Print;
+
+// Timing. These four are the only nodes that write more than statements: Set
+// Timer declares a `ref` member and a whole callback method, Call Later writes
+// a callback method. Everything about that is derived from one name, so the
+// member, the call, the string the engine dispatches on and the method it
+// dispatches to cannot disagree with each other.
+extern const QString SetTimer;
+extern const QString StopTimer;
+extern const QString CallLater;
+extern const QString CancelCallLater;
+
+// The identifier a timing node works from. Read off opts["name"], reduced to
+// something that can be an Enforce identifier, and falling back to the node's
+// own id so an untouched node still generates a unique member and method rather
+// than colliding with the next one.
+QString timingName(const GraphNode &node);
+// `m_Reload` and `ReloadElapsed` for a timer named Reload. A deferred call has
+// no member and its callback is the name itself, which is what puts a readable
+// `CallLater(RefreshHud, 250, false)` at the call site.
+QString timerMember(const QString &name);
+QString timerCallback(const QString &name);
+// The CALL_CATEGORY_* constant a timing node's opts["category"] names.
+QString callCategoryConstant(const GraphNode &node);
 
 // Cast To / New Object target class. Two spellings reached the file format:
 // "cls" is what both builds write, "class" is what some older projects carry.

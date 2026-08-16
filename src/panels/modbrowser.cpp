@@ -75,6 +75,13 @@ QLabel *placeholder(const QString &text, QWidget *parent)
     label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     label->setContentsMargins(10, 10, 10, 10);
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // Asks for nothing. A wrapped label's own minimum is the height its text
+    // needs at the width it is given, and the stack it sits in takes the larger
+    // of its pages, so left alone these three paragraphs set the floor under the
+    // dock, the dock sets it under the column, and a window asked for 800 tall
+    // comes back 866. A placeholder that clips in a tiny dock is the right
+    // trade: the list it stands in for would show one row there anyway.
+    label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     QPalette dim = label->palette();
     dim.setColor(QPalette::WindowText, theme::textDim());
     label->setPalette(dim);
@@ -370,15 +377,22 @@ void ModBrowserPanel::onScanProgress(int done, int total)
 
 void ModBrowserPanel::onScanFinished(int found, bool cancelled)
 {
+    Q_UNUSED(found);
     if (cancelled) {
         setStatus(tr("Scan cancelled. Showing what was already known."));
         return;
     }
+    // Both halves counted over the list the rows come from, which is the scan
+    // plus anything opened by path. `found` is the scan on its own, and counting
+    // one half with it and the other over the list put "266 mods installed, 217
+    // of them ship script" under a start page saying 267, with one of the 217
+    // never installed at all.
+    const QVector<ModEntry> mods = m_library->mods();
     int withScripts = 0;
-    for (const ModEntry &entry : m_library->mods())
+    for (const ModEntry &entry : mods)
         if (entry.hasScripts()) ++withScripts;
-    setStatus(tr("%1 installed, %2 of them ship script")
-                  .arg(countLabel(found, tr("mod"), tr("mods")))
+    setStatus(tr("%1 on this machine, %2 of them ship script")
+                  .arg(countLabel(int(mods.size()), tr("mod"), tr("mods")))
                   .arg(withScripts));
 }
 

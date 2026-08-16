@@ -1432,6 +1432,10 @@ void emptyBranch(const Ctx &ctx, QVector<Diagnostic> &out)
             if (p.dir == PinDir::Out && p.type.kind == PinKind::Exec)
                 execOuts.append(p.id);
         if (execOuts.size() < 2) continue;
+        // A timing node's second output is a callback, not a branch, and
+        // "decides nothing" is the wrong thing to say about one. DZ317 covers
+        // them, and says what is actually wrong.
+        if (n.ref == bi::SetTimer || n.ref == bi::CallLater) continue;
 
         QSet<QString> wired;
         for (const Link &l : ctx.linksFrom(n.id)) wired.insert(l.fromPin);
@@ -1743,9 +1747,9 @@ void timerNeverRun(const Ctx &ctx, QVector<Diagnostic> &out)
         const MethodSig *m = ctx.sig(n.id);
         if (!m || m->name != QLatin1String("Run") || !isTimer(m->owner)) continue;
         const Link *t = ctx.linkInto(n.id, QStringLiteral("target"));
-        // An unwired target says nothing about which timer is meant, and the
-        // catalogue flags Timer::Run as an event so the node may not even carry
-        // a target pin. Stay quiet rather than accuse a timer that does run.
+        // An unwired target says nothing about which timer is meant, so one of
+        // them takes the whole rule out: accusing a timer that does run is
+        // worse than missing one that does not.
         if (!t) return;
         started.insert(valueIdentity(*t));
     }
@@ -1789,6 +1793,101 @@ void timerNeverRun(const Ctx &ctx, QVector<Diagnostic> &out)
                                        "The constructor argument is the call category, "
                                        "not a delay."),
                         n.id));
+    }
+}
+
+// The Set Timer and Call Later nodes, which are the only ones that schedule
+// work to run outside the chain that placed them. Everything here is a string
+// or a lifetime mistake that the engine reports as nothing at all: a callback
+// that is never reached, a Stop aimed at a timer that was never named, an entry
+// left repeating on a queue after the object that wanted it is gone.
+void timingNodeIssues(const Ctx &ctx, QVector<Diagnostic> &out)
+{
+    // Every callback this graph declares, and which node declared it.
+    QHash<QString, const GraphNode *> timers;    // timer name -> Set Timer node
+    QHash<QString, const GraphNode *> deferred;  // call name  -> Call Later node
+    for (const GraphNode &n : ctx.graph.nodes) {
+        if (n.ref == bi::SetTimer) timers.insert(bi::timingName(n), &n);
+        else if (n.ref == bi::CallLater) deferred.insert(bi::timingName(n), &n);
+    }
+
+    for (const GraphNode &n : ctx.graph.nodes) {
+        if (!ctx.reachable.contains(n.id)) continue;
+        const bool isTimer = n.ref == bi::SetTimer;
+        const bool isLater = n.ref == bi::CallLater;
+        const bool isStop = n.ref == bi::StopTimer;
+        const bool isCancel = n.ref == bi::CancelCallLater;
+        if (!isTimer && !isLater && !isStop && !isCancel) continue;
+        const QString name = bi::timingName(n);
+
+        if (isTimer || isLater) {
+            const QString pin = isTimer ? QStringLiteral("elapsed") : QStringLiteral("then");
+            bool wired = false;
+            for (const Link &l : ctx.linksFrom(n.id))
+                if (l.fromPin == pin) { wired = true; break; }
+            if (!wired)
+                out.append(diag(Severity::Warning, QStringLiteral("DZ317"),
+                                QStringLiteral("Nothing is wired to the \"%1\" pin, so this "
+                                               "schedules a method with no body in it.")
+                                    .arg(pin),
+                                QStringLiteral("Chain the work you want to happen later from "
+                                               "that pin. The exec pin beside it is the flow "
+                                               "carrying on now, which is not the same thing."),
+                                n.id, pin));
+        }
+
+        // A Stop or a Cancel is matched to its partner by name and by nothing
+        // else, so a name that matches nothing is a node that runs and does
+        // nothing, with no error anywhere to say so.
+        if (isStop && !timers.contains(name))
+            out.append(diag(Severity::Warning, QStringLiteral("DZ318"),
+                            QStringLiteral("No Set Timer node in this script is named \"%1\", "
+                                           "so this stops nothing.").arg(name),
+                            QStringLiteral("Give this node and the Set Timer node the same "
+                                           "name, or remove it."),
+                            n.id));
+        if (isCancel && !deferred.contains(name))
+            out.append(diag(Severity::Warning, QStringLiteral("DZ318"),
+                            QStringLiteral("No Call Later node in this script is named \"%1\", "
+                                           "so this cancels nothing.").arg(name),
+                            QStringLiteral("Give this node and the Call Later node the same "
+                                           "name, or remove it."),
+                            n.id));
+        // Both halves have to name the same queue, because Remove is asked of
+        // one queue and finds only what was scheduled on it.
+        if ((isStop || isCancel)) {
+            const GraphNode *partner = isStop ? timers.value(name) : deferred.value(name);
+            if (partner && bi::callCategoryConstant(*partner)
+                               != bi::callCategoryConstant(n))
+                out.append(diag(Severity::Warning, QStringLiteral("DZ318"),
+                                QStringLiteral("\"%1\" was scheduled on %2 and this node asks "
+                                               "%3, which holds a different queue.")
+                                    .arg(name, bi::callCategoryConstant(*partner),
+                                         bi::callCategoryConstant(n)),
+                                QStringLiteral("Set both nodes to the same queue."),
+                                n.id));
+        }
+
+        // A repeating deferred call outlives its object. The timer does not:
+        // its `ref` member is released with the object and the destructor takes
+        // it off the queue. The call queue holds the entry itself, so nothing
+        // releases it, and vanilla ships a bug of exactly this shape.
+        if (isLater && n.inputs.value(QStringLiteral("repeat")) == QLatin1String("true")) {
+            bool cancelled = false;
+            for (const GraphNode &other : ctx.graph.nodes)
+                if (other.ref == bi::CancelCallLater && bi::timingName(other) == name)
+                    cancelled = true;
+            if (!cancelled)
+                out.append(diag(Severity::Warning, QStringLiteral("DZ319"),
+                                QStringLiteral("\"%1\" repeats and nothing cancels it, so it "
+                                               "keeps firing after this object is gone.")
+                                    .arg(name),
+                                QStringLiteral("Add a Cancel Call Later node with the same "
+                                               "name on the End (EEDelete) chain. A repeating "
+                                               "Timer does not need this, because its `ref` "
+                                               "member is released with the object."),
+                                n.id));
+        }
     }
 }
 
@@ -2285,6 +2384,7 @@ AnalysisResult analyzeGraph(const Graph &graph, const Catalog &cat,
     unsyncableType(ctx, out);
     missingServerGuard(ctx, out);
     timerNeverRun(ctx, out);
+    timingNodeIssues(ctx, out);
     persistNotSynced(ctx, out);
     moddedWithoutSuper(ctx, out);
     mutatedWhileIterating(ctx, out);
