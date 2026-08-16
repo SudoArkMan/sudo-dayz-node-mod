@@ -253,6 +253,10 @@ private:
     QProcess *m_server = nullptr;
     QProcess *m_client = nullptr;
     QTimer *m_clientDelay = nullptr;
+    // Assembled when the session starts, not when the timer fires. A refresh
+    // during the wait would otherwise hand the client a different mod chain
+    // from the one the server came up with.
+    RunCommand m_pendingClient;
     QString m_buildCarry;
     QString m_serverCarry;
     QString m_clientCarry;

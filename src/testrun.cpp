@@ -390,7 +390,8 @@ RunStep makeJunction(const QString &link, const QString &target)
         const QString have = clean(linkInfo.junctionTarget());
         if (have.compare(wanted, Qt::CaseInsensitive) == 0) {
             step.ok = true;
-            step.detail = QStringLiteral("Already linked to %1.")
+            // No full stop after a path, or the path reads as if it ends in one.
+            step.detail = QStringLiteral("Already points at %1")
                               .arg(QDir::toNativeSeparators(wanted));
             return step;
         }
@@ -421,7 +422,7 @@ RunStep makeJunction(const QString &link, const QString &target)
                           .arg(QDir::toNativeSeparators(link));
     }
     if (step.ok)
-        step.detail = QStringLiteral("Linked to %1.")
+        step.detail = QStringLiteral("Now points at %1")
                           .arg(QDir::toNativeSeparators(wanted));
     return step;
 }
@@ -564,10 +565,11 @@ TestRun::TestRun(QObject *parent) : QObject(parent)
     m_clientDelay = new QTimer(this);
     m_clientDelay->setSingleShot(true);
     connect(m_clientDelay, &QTimer::timeout, this, [this]() {
-        QString error;
-        const RunCommand cmd = clientCommand(&error);
+        const RunCommand cmd = m_pendingClient;
+        m_pendingClient = RunCommand();
         if (!cmd.isValid()) {
-            emit log(QStringLiteral("! Client not started: %1").arg(error));
+            emit log(QStringLiteral("! The client command went missing during the "
+                                    "wait; nothing was started."));
             emit busyChanged();
             return;
         }
@@ -579,7 +581,18 @@ TestRun::TestRun(QObject *parent) : QObject(parent)
     });
 }
 
-TestRun::~TestRun() = default;
+TestRun::~TestRun()
+{
+    // Closing the editor takes the session with it, server first. QProcess
+    // would kill these anyway on the way out, but as a warning with no reason
+    // attached, and a diag server left running with nothing on screen to stop
+    // it is worse than losing the session.
+    for (QProcess *proc : { m_server, m_client, m_build }) {
+        if (!proc || proc->state() == QProcess::NotRunning) continue;
+        proc->kill();
+        proc->waitForFinished(3000);
+    }
+}
 
 void TestRun::refresh(const Project &project)
 {
@@ -1171,6 +1184,7 @@ bool TestRun::startTest(QString *error)
 
     m_serverCarry.clear();
     m_clientCarry.clear();
+    m_pendingClient = client;
     m_server = makeProcess(QStringLiteral("Server"), &m_serverCarry);
     emitCommand(server);
     m_server->setWorkingDirectory(server.workingDir);
@@ -1190,6 +1204,7 @@ QVector<RunStep> TestRun::stop()
 
     if (m_clientDelay->isActive()) {
         m_clientDelay->stop();
+        m_pendingClient = RunCommand();
         RunStep step;
         step.title = QStringLiteral("Cancel client");
         step.ok = true;

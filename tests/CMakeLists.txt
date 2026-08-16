@@ -249,6 +249,41 @@ target_link_libraries(deprulestest PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
 )
 
+# The installed mods as a library. Builds a mod of its own in a QTemporaryDir to
+# check the read path and the read only promise, then walks whatever is really
+# installed and prints how much of it the importer can model. Forces the
+# offscreen platform itself, so it runs with no display:
+#   ./tests/modlibrarytest ../resources [sample size] [--shot browser.png]
+add_executable(modlibrarytest
+  modlibrarytest.cpp
+  ../src/modlibrary.cpp
+  ../src/pbo/pboreader.cpp
+  ../src/panels/modbrowser.cpp
+  ../src/document.cpp
+  ../src/moddeps.cpp
+  ../src/pins.cpp ../src/graph.cpp ../src/catalog.cpp ../src/project.cpp
+  ../src/builtins.cpp ../src/scriptapi.cpp ../src/templates.cpp
+  ../src/config/configtree.cpp
+  ../src/enforce/lexer.cpp ../src/enforce/parser.cpp ../src/enforce/lower.cpp
+  ../src/enforce/layout.cpp ../src/enforce/import.cpp
+  ../src/codegen.cpp ../src/analysis.cpp ../src/theme.cpp
+)
+target_include_directories(modlibrarytest PRIVATE ../src)
+target_link_libraries(modlibrarytest PRIVATE
+  Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+# PBO archives read without DayZ Tools. The synthetic half builds its own
+# archives in a QTemporaryDir; the corpus half walks every pbo under the
+# installed mods and prints the rate, skipping itself when there are none:
+#   ./tests/pbotest ../resources [--all] [--limit N] [--workshop <dir>]
+add_executable(pbotest
+  pbotest.cpp
+  ../src/pbo/pboreader.cpp
+)
+target_include_directories(pbotest PRIVATE ../src)
+target_link_libraries(pbotest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+
 # Running the mod: prerequisite detection against the real machine, a junction
 # made and removed under a temporary name, the project.cfg rewrite line by line,
 # and the build and launch command lines printed rather than executed. Starts no

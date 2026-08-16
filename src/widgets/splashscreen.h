@@ -3,14 +3,20 @@
 // The bar reports real work. Startup is three stages the caller drives in
 // order, and each one names itself before it blocks, so what the user reads is
 // what the process is doing rather than a countdown invented up front.
+//
+// Not a QSplashScreen: that class answers QEvent::Show by waiting for its own
+// window to be mapped, and Qt sends that event before it maps anything, so the
+// wait runs its full one second timeout every time. A second is most of this
+// app's startup, and it is the second the splash is meant to be covering.
 #pragma once
 
-#include <QSplashScreen>
+#include <QPixmap>
 #include <QString>
+#include <QWidget>
 
 class QTimer;
 
-class SplashScreen : public QSplashScreen {
+class SplashScreen : public QWidget {
     Q_OBJECT
 public:
     SplashScreen();
@@ -25,10 +31,15 @@ public:
     // there until the next stage starts.
     void endStage();
 
+    // Closes once `window` is on screen, so the desktop never shows through
+    // between the two.
+    void finish(QWidget *window);
+
 protected:
-    void drawContents(QPainter *painter) override;
+    void paintEvent(QPaintEvent *event) override;
 
 private:
+    QPixmap m_art;
     QTimer *m_ease;
     QString m_stage;
     QString m_version;

@@ -1,6 +1,7 @@
 #include "branding.h"
 
 #include <QIcon>
+#include <QImage>
 #include <QPixmap>
 #include <QSize>
 #include <QString>
@@ -29,8 +30,14 @@ QIcon branding::appIcon()
 
 QPixmap branding::splashArt(qreal dpr)
 {
-    QPixmap art(variant(QStringLiteral("splash"), dpr));
-    if (art.isNull()) return art;
+    const QImage file(variant(QStringLiteral("splash"), dpr));
+    if (file.isNull()) return {};
+
+    // Dropped to RGB because the art is opaque to the last pixel: the splash
+    // window paints it over its whole face, and an alpha channel it never uses
+    // only costs a blend on every repaint the progress bar asks for.
+    QPixmap art = QPixmap::fromImage(file.convertToFormat(QImage::Format_RGB32));
+
     // The two files hold the same picture at two densities, so the ratio is the
     // file's own, not the screen's: stamping the screen's would shrink the 1x
     // art on a 1.5x display instead of leaving it at 760x440.

@@ -8,6 +8,7 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QDir>
+#include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -150,7 +151,9 @@ void TestPanel::buildUi()
     m_checks->setUniformRowHeights(true);
     m_checks->setSelectionMode(QAbstractItemView::SingleSelection);
     m_checks->header()->setStretchLastSection(true);
-    m_checks->setMinimumHeight(120);
+    // Ten rows without a scroll. The whole value of the list is being able to
+    // see at a glance which one is red.
+    m_checks->setMinimumHeight(160);
     split->addWidget(m_checks);
 
     m_log = new QPlainTextEdit(split);
@@ -162,9 +165,20 @@ void TestPanel::buildUi()
         QStringLiteral("Command lines and their output land here."));
     split->addWidget(m_log);
 
-    split->setStretchFactor(0, 3);
-    split->setStretchFactor(1, 4);
+    // The checklist leads until something has been run. The log grows into the
+    // space the user gives it, which is what the splitter is for.
+    split->setStretchFactor(0, 5);
+    split->setStretchFactor(1, 3);
     layout->addWidget(split, 1);
+}
+
+void TestPanel::reveal()
+{
+    auto *dock = qobject_cast<QDockWidget *>(parentWidget());
+    // A dock closed from the View menu stays closed. Reopening it would take
+    // the canvas space back from under the user.
+    if (!dock || !dock->toggleViewAction()->isChecked()) return;
+    dock->raise();
 }
 
 void TestPanel::refresh()
@@ -243,6 +257,7 @@ void TestPanel::report(const RunStep &step)
 
 void TestPanel::setUpWorkDrive()
 {
+    reveal();
     appendLog(QStringLiteral("--- Set up work drive"));
     int failed = 0;
     const QVector<RunStep> steps = m_run->linkWorkDrive();
@@ -259,6 +274,7 @@ void TestPanel::setUpWorkDrive()
 
 void TestPanel::buildPbo()
 {
+    reveal();
     appendLog(QStringLiteral("--- Build PBO"));
 
     // The chain is written first because the build is the point where the
@@ -278,6 +294,7 @@ void TestPanel::buildPbo()
 
 void TestPanel::launchTest()
 {
+    reveal();
     appendLog(QStringLiteral("--- Launch test"));
     QString error;
     if (!m_run->startTest(&error)) {
@@ -290,6 +307,7 @@ void TestPanel::launchTest()
 
 void TestPanel::stopTest()
 {
+    reveal();
     appendLog(QStringLiteral("--- Stop"));
     for (const RunStep &step : m_run->stop()) report(step);
     emit statusMessage(QStringLiteral("Stopped."));

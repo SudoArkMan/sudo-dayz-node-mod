@@ -60,6 +60,9 @@ private slots:
 
 private:
     void buildUi();
+    // Brings this dock to the front when it is tabbed behind another. Pressing
+    // a shortcut should put the log where the answer will appear.
+    void reveal();
     void appendLog(const QString &line);
     // Command first, then output, then the verdict. Same shape for every step,
     // so a log reads the same whichever button produced it.

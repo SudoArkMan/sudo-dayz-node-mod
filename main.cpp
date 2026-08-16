@@ -40,10 +40,11 @@ QString findResource(const QString &name)
     return {};
 }
 
-// The catalogue parse and its search index are one call and take a second or
-// more, which is long enough that a splash frozen through it reads as a hang.
-// Nothing else touches the Document until the thread has been joined, so the
-// handoff is the join and there is no shared state to guard.
+// The catalogue parse and its search index are one call: 2.9 MB of JSON into
+// 6,108 classes and 29,024 methods, and the one part of startup that can stall
+// on a cold disk. It runs off the GUI thread so the splash keeps painting
+// through it. Nothing else touches the Document until the thread has been
+// joined, so the handoff is the join and there is no shared state to guard.
 class CatalogLoader : public QThread {
 public:
     CatalogLoader(Document *doc, QString path)
@@ -115,8 +116,12 @@ int main(int argc, char *argv[])
     const QString catalogPath = parser.isSet(catalogOpt)
                                     ? parser.value(catalogOpt)
                                     : findResource(QStringLiteral("catalog.json"));
+    // The ceilings are where each stage measured out on a warm start: the
+    // catalogue about a fifth of the wait, the window build about half, showing
+    // it the rest. A cold disk shifts weight into the first one, which is why
+    // it gets more of the bar than a warm run alone would give it.
     if (splash)
-        splash->beginStage(QStringLiteral("Loading node catalogue"), 0.62);
+        splash->beginStage(QStringLiteral("Loading node catalogue"), 0.45);
     const bool loaded = loadCatalogue(doc, catalogPath, splash.get());
     if (splash) splash->endStage();
 
@@ -136,7 +141,7 @@ int main(int argc, char *argv[])
     }
 
     if (splash)
-        splash->beginStage(QStringLiteral("Building the editor window"), 0.88);
+        splash->beginStage(QStringLiteral("Building the editor window"), 0.85);
     MainWindow win(&doc);
     win.resize(1600, 950);
     if (splash) splash->endStage();

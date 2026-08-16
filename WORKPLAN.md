@@ -41,6 +41,35 @@ nothing may depend on it alone.
 3. **PBO reading and mod import** — open any installed mod and read its scripts as graphs.
 4. **Mod browser** — the 254 installed mods as a browsable library, each showing its node layout.
 
+## Two ways to test a mod, and the app needs both
+
+The user's point, and it is right: the template can launch **offline** for a quick look, but not
+everything works there, so testing on a **dev server** has to be a first-class choice rather than
+the only one or an afterthought.
+
+Only `DayZDiag_x64.exe` is usable for either. Retail `DayZ_x64.exe` and `DayZServer_x64.exe` both
+block past the loading screen once `-filePatching` is on.
+
+Offline, one process, fast to iterate:
+
+    DayZDiag_x64.exe -mission=<mission folder> -profiles=<client profiles> -mod=@A;@B -filePatching
+
+Dev server, two processes, server first, client once the port is open:
+
+    DayZDiag_x64.exe -server -config=<serverDZ.cfg> -profiles=<server profiles> \
+        -mission=<mission> -mod=@A;@B -filePatching -port=2302
+    DayZDiag_x64.exe -profiles=<client profiles> -mod=@A;@B -connect=127.0.0.1 -port=2302 \
+        -filePatching
+
+The template supplies both halves already: `Missions/<Mod>.ChernarusPlus` for the mission and
+`Workbench/server.cfg` for the server, with `allowFilePatching = 1` set.
+
+The UI must say what offline cannot show, because finding out by chasing a bug that only exists
+offline is the expensive way to learn it: a server-only mod chain (`-serverMod=`) is not applied,
+anything that depends on a second client cannot happen, and COT's permissions need the per-player
+files a server writes on first boot. Verify that list against the tooling before printing it as
+fact rather than repeating it from here.
+
 ## PBO notes
 
 The format is a header of entries (filename, packing method, original size, reserved, timestamp,

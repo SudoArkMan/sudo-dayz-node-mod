@@ -77,7 +77,10 @@ namespace {
 QColor rowAlt()       { return QColor("#1c232c"); } // alternating item rows over Base
 QColor hoverBg()      { return QColor("#333d4b"); } // one step above headerBg
 QColor accentHi()     { return QColor("#6da5dd"); } // hover / link
-QColor accentLo()     { return QColor("#476e97"); } // pressed / checked
+// Pressed and checked fills, and the selection band of a panel that does not
+// have focus. Seated far enough that @text@ on it holds the 4.9:1 the old
+// accent gave, which is the pairing an unfocused list is read through.
+QColor accentLo()     { return QColor("#446990"); }
 
 // The brand accent is light enough that a near-white label on a band of it
 // lands at 3.0:1, worse than the 3.9:1 the old accent gave. Filled selections
@@ -731,7 +734,10 @@ void theme::apply(QApplication &app)
     p.setColor(QPalette::Disabled, QPalette::AlternateBase, panelBg());
     p.setColor(QPalette::Disabled, QPalette::Button, panelBg());
     p.setColor(QPalette::Disabled, QPalette::Highlight, QColor("#343f4d"));
-    p.setColor(QPalette::Disabled, QPalette::HighlightedText, textDim());
+    // Not textDim: the brand's muted grey is darker than the one this band was
+    // tuned against, and a selected row in a disabled list would read at 3.0:1
+    // instead of the 3.8:1 it had. Lifted just far enough to get that back.
+    p.setColor(QPalette::Disabled, QPalette::HighlightedText, QColor("#919cad"));
     p.setColor(QPalette::Disabled, QPalette::PlaceholderText, QColor("#5f6772"));
     p.setColor(QPalette::Disabled, QPalette::Light, panelBg());
 

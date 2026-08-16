@@ -110,11 +110,12 @@ private:
     QTimer *m_statusResetTimer;
     AnalysisResult m_analysis;
     // The brand mark on the right of the toolbar, the flexible gap that holds
-    // it there, and the height its pixmap was last cut for.
+    // it there, and the height and screen ratio its pixmap was last cut for.
     QToolBar *m_toolBar = nullptr;
     QWidget *m_toolBarGap = nullptr;
     QLabel *m_cornerMark = nullptr;
     int m_cornerHeight = 0;
+    qreal m_cornerRatio = 0.0;
     // Where the next node lands. Set by the canvas right-click, consumed by
     // whichever surface the user picks a node from; unset means the view centre.
     QPointF m_pendingAddPos;

@@ -698,11 +698,15 @@ void MainWindow::updateCornerMark()
 
     // Cut to the bar rather than to a constant: the bar's height follows the
     // user's font size, and a fixed pixmap would either float in it or push it
-    // taller. The guard matters because this runs on every resize.
+    // taller. The guard matters because this runs on every resize. Dragging the
+    // window to a screen of another density is a recut too, not just a rescale,
+    // or the mark goes soft on the second monitor.
     const int height = qBound(14, m_toolBar->height() - 8, 32);
-    if (height != m_cornerHeight) {
+    const qreal ratio = devicePixelRatioF();
+    if (height != m_cornerHeight || !qFuzzyIsNull(ratio - m_cornerRatio)) {
         m_cornerHeight = height;
-        m_cornerMark->setPixmap(branding::cornerMark(height, devicePixelRatioF()));
+        m_cornerRatio = ratio;
+        m_cornerMark->setPixmap(branding::cornerMark(height, ratio));
     }
 
     // The mark is decoration and the actions are the toolbar's job, so a narrow

@@ -1,12 +1,17 @@
 #include "pins.h"
 
+#include "branding.h"
+
 #include <QHash>
 #include <QRegularExpression>
 
 QColor pinColor(PinKind kind)
 {
     switch (kind) {
-    case PinKind::Exec:     return QColor("#d5dce4");
+    // Exec is the neutral UI foreground and Any is muted text: both follow
+    // the theme rather than carrying a copy of it, which is how they ended
+    // up two hexes behind after the rebrand.
+    case PinKind::Exec:     return branding::text();
     case PinKind::Bool:     return QColor("#d9534f");
     case PinKind::Int:      return QColor("#1eb980");
     case PinKind::Float:    return QColor("#9fdb2f");
@@ -15,9 +20,9 @@ QColor pinColor(PinKind kind)
     case PinKind::Object:   return QColor("#4da3ff");
     case PinKind::Enum:     return QColor("#b06fe0");
     case PinKind::Typename: return QColor("#7ee081");
-    case PinKind::Any:      return QColor("#8b96a3");
+    case PinKind::Any:      return branding::mutedText();
     }
-    return QColor("#8b96a3");
+    return branding::mutedText();
 }
 
 QString pinKindName(PinKind kind)

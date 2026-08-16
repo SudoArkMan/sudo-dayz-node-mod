@@ -33,6 +33,7 @@ add_executable(DAYZSUDONodeMod
   src/graph.h       src/graph.cpp
   src/project.h     src/project.cpp
   src/moddeps.h     src/moddeps.cpp
+  src/modlibrary.h  src/modlibrary.cpp
   src/scriptapi.h   src/scriptapi.cpp
   src/events.h      src/events.cpp
   src/templates.h   src/templates.cpp
@@ -50,6 +51,7 @@ add_executable(DAYZSUDONodeMod
   src/enforce/layout.h       src/enforce/layout.cpp
   src/enforce/highlighter.h  src/enforce/highlighter.cpp
   src/config/configtree.h    src/config/configtree.cpp
+  src/pbo/pboreader.h        src/pbo/pboreader.cpp
   src/widgets/configeditor.h src/widgets/configeditor.cpp
   src/widgets/valueeditor.h  src/widgets/valueeditor.cpp
   src/widgets/codeeditor.h   src/widgets/codeeditor.cpp
@@ -69,6 +71,7 @@ add_executable(DAYZSUDONodeMod
   src/panels/inspectorpanel.h  src/panels/inspectorpanel.cpp
   src/panels/codeviewpanel.h   src/panels/codeviewpanel.cpp
   src/panels/explorerpanel.h   src/panels/explorerpanel.cpp
+  src/panels/modbrowser.h      src/panels/modbrowser.cpp
   src/panels/testpanel.h       src/panels/testpanel.cpp
   src/mainwindow.h  src/mainwindow.cpp
 )
