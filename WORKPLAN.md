@@ -76,5 +76,16 @@ The format is a header of entries (filename, packing method, original size, rese
 data size), a zero-length terminating entry, then the data blobs back to back in the same order,
 then a 20 byte SHA1 trailer. DayZ ships them uncompressed in practice. A native reader is preferred
 over shelling out to `BankRev.exe`: it works headless in tests, has no install dependency, and the
-254 installed mods are the corpus to prove it against. Keep `BankRev.exe` as a fallback for anything
-the reader refuses.
+254 installed mods are the corpus to prove it against.
+
+Measured, `pbotest --all`, 16 Aug: 1874 archives over 253 mods, 1874 opened, sizes reconciled on all
+of them, 9,343,981 packed entries decoded and checksum-matched, 0 refused, 575.7 MB in 33.8 s.
+Against BankRev as an outside oracle: 648 entries byte for byte, 0 differed. `BankRev.exe` is no
+longer a fallback worth keeping, because it is the weaker reader of the two: it turns down all five
+obfuscated archives the native reader opens, and it silently declines to write 373 entries it did
+read. Its remaining use is as a second opinion in the test, not in the app.
+
+`modlibrarytest`: 266 mods scanned, 1887 pbos, 0 refused. On a 1-in-6 sample of the 216 mods that
+ship script, **23% of methods become node graphs** and the rest keep their text, well below the 64%
+seen on the user's own code. Third-party mod code is the harder corpus and that number is the one to
+move; it is per-method, so a mod at 0% is a mod whose graphs are all raw-body nodes.
