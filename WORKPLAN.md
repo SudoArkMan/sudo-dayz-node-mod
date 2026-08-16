@@ -74,7 +74,22 @@ fact rather than repeating it from here.
 
 The format is a header of entries (filename, packing method, original size, reserved, timestamp,
 data size), a zero-length terminating entry, then the data blobs back to back in the same order,
-then a 20 byte SHA1 trailer. DayZ ships them uncompressed in practice. A native reader is preferred
+then a 20 byte SHA1 trailer.
+
+The compressed mime is LZSS, but the two-byte token is a distance back into the **already-produced
+output**, not an index into a 4096 byte ring buffer. Textbook Okumura LZSS decodes the first 20 or so
+bytes of a DayZ script correctly and then turns to noise, which is the failure mode that reads as
+success. Reading behind the start of the output yields `0x20`, and 3,985 entries in the installed
+corpus depend on that. The 4 byte trailer after each stream is the sum of the decoded bytes and is
+checked on every read, so a wrong decode is refused rather than returned. That check is what makes
+the 100% figure below mean anything.
+
+The corpus is genuinely hostile, measured not assumed: 22,956 entry names containing `..`, 578,059
+that look absolute, 1,034,830 carrying control or reserved characters, one archive with a 150 MB
+header claiming 1,298,973 entries, and a 2.1 GB archive. Bound the entry count by `fileSize / 21`
+rather than a constant, or the three genuine million-entry mods get refused. Bound decompression by
+`dataSize * 9 + 64`, the ceiling of what LZSS can expand, so a hostile size field cannot force an
+allocation. A native reader is preferred
 over shelling out to `BankRev.exe`: it works headless in tests, has no install dependency, and the
 254 installed mods are the corpus to prove it against.
 
