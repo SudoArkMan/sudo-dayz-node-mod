@@ -13,9 +13,7 @@ modded class MissionServer
 		super.OnInit();
 
 		if (!GetGame().IsServer())
-		{
 			return;
-		}
 
 		SUDO_ApiClient client = SUDO_ApiClient.Get();
 		client.Request("status");

@@ -9,6 +9,7 @@
 #include "theme.h"
 #include "version.h"
 #include "widgets/splashscreen.h"
+#include "widgets/startpage.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -110,6 +111,22 @@ int main(int argc, char *argv[])
                                QStringLiteral("Save a window screenshot and exit."),
                                QStringLiteral("png"));
     parser.addOption(shotOpt);
+    // Starts on a template rather than on the start page. The gallery is one
+    // press away from the editor, and a picture of the page it lands on is the
+    // only way to check that press without a display, so the harness has to be
+    // able to make it.
+    QCommandLineOption templateOpt(
+        QStringLiteral("template"),
+        QStringLiteral("Start from a template in resources/templates, by folder name."),
+        QStringLiteral("id"));
+    parser.addOption(templateOpt);
+    // The window is 1600 by 950 unless this says otherwise. A layout only ever
+    // breaks at a size somebody actually runs, so checking a second one has to
+    // be possible from here.
+    QCommandLineOption sizeOpt(QStringLiteral("size"),
+                               QStringLiteral("Window size, WIDTHxHEIGHT."),
+                               QStringLiteral("WxH"));
+    parser.addOption(sizeOpt);
     parser.process(app);
 
     theme::apply(app);
@@ -154,7 +171,16 @@ int main(int argc, char *argv[])
     if (splash)
         splash->beginStage(QStringLiteral("Building the editor window"), 0.85);
     MainWindow win(&doc);
-    win.resize(1600, 950);
+    QSize windowSize(1600, 950);
+    if (parser.isSet(sizeOpt)) {
+        const QStringList wh = parser.value(sizeOpt).split(QLatin1Char('x'));
+        if (wh.size() == 2) {
+            const int w = wh.at(0).toInt();
+            const int h = wh.at(1).toInt();
+            if (w > 0 && h > 0) windowSize = QSize(w, h);
+        }
+    }
+    win.resize(windowSize);
     if (splash) splash->endStage();
 
     const QStringList args = parser.positionalArguments();
@@ -167,6 +193,24 @@ int main(int argc, char *argv[])
     if (splash) {
         splash->endStage();
         splash->finish(&win);
+    }
+
+    // After show, on purpose. Pressing a gallery tile is something that happens
+    // to a window that is already up, and a tab bar handed a current tab while
+    // its window has never been shown lays itself out against a width it does
+    // not have yet and comes back empty. Driving it the way a person drives it
+    // is also the only way the picture is of what a person would see.
+    if (parser.isSet(templateOpt)) {
+        const QString id = parser.value(templateOpt);
+        bool found = false;
+        for (const StartTemplate &tpl : startTemplates()) {
+            if (tpl.id != id) continue;
+            found = true;
+            win.startFromTemplate(tpl);
+            break;
+        }
+        if (!found)
+            qWarning("no template named %s in resources/templates", qPrintable(id));
     }
 
     if (parser.isSet(shotOpt)) {

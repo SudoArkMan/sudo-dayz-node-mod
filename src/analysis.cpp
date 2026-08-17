@@ -798,8 +798,13 @@ void unresolvedNodes(const Ctx &ctx, QVector<Diagnostic> &out)
 void baseClassExists(const Ctx &ctx, QVector<Diagnostic> &out)
 {
     const Graph &g = ctx.graph;
+    // The catalogue is not the whole world. A mod's own classes and the classes
+    // of an indexed dependency are real types this graph cannot look up, and a
+    // dependency nobody has indexed could hold any name at all.
+    if (ctx.depCtx.unindexedDependency) return;
     const auto known = [&ctx](const QString &n) {
-        return !n.isEmpty() && ctx.cat.classId(n) >= 0;
+        return !n.isEmpty()
+               && (ctx.cat.classId(n) >= 0 || ctx.depCtx.knownClasses.contains(n));
     };
 
     if (g.modded) {
@@ -876,6 +881,13 @@ void missingRequiredInput(const Ctx &ctx, QVector<Diagnostic> &out)
             if (pin.label.contains(QLatin1Char('='))) continue;
             // `target` defaults to `this`
             if (pin.id == QLatin1String("target")) continue;
+            // A Return with nothing on its value pin is `return;`, which is
+            // what a void method wants and is what the node's own help says it
+            // emits. The generator even fills in a default when the method has
+            // a return type, so there is no shape of this that fails to
+            // compile, and calling it a missing input is calling a bare return
+            // a mistake.
+            if (n.ref == bi::Return && pin.id == QLatin1String("value")) continue;
             if (!n.inputs.value(pin.id).isEmpty()) continue;
             // an editable pin left blank still yields a literal, so only object
             // and array pins are genuinely unsatisfiable
@@ -939,6 +951,12 @@ void execCycle(const Ctx &ctx, QVector<Diagnostic> &out)
 void functionMustReturn(const Ctx &ctx, QVector<Diagnostic> &out)
 {
     for (const GraphFunction &f : ctx.graph.functions) {
+        // A function the importer kept as text has a body: the text it came in
+        // as, written back out verbatim. It has no Function node because it
+        // never became one, which is a statement about this tool and not about
+        // the code, and "generates an empty body" would be simply untrue.
+        if (!f.rawBody.isEmpty()) continue;
+
         const QString key = QStringLiteral("fn.entry.%1").arg(f.id);
         const GraphNode *entry = nullptr;
         for (const GraphNode &n : ctx.graph.nodes)
@@ -1337,6 +1355,10 @@ void unknownVariableType(const Ctx &ctx, QVector<Diagnostic> &out)
         // see, and typedefs are not indexed, so only complain when nothing in
         // reach could explain the name.
         if (t.cls == ctx.graph.className) continue;
+        if (ctx.depCtx.knownClasses.contains(t.cls)) continue;
+        // And a dependency nobody has indexed could hold it, so the tool has
+        // not earned the word "not" here.
+        if (ctx.depCtx.unindexedDependency) continue;
 
         // A near miss is worth naming: the correct spelling is usually one
         // case change away, and hunting for it in 6,000 classes is the part

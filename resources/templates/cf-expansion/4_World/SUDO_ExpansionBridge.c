@@ -17,10 +17,11 @@
 // mod then fails to build on every server without Expansion, which is the exact
 // thing this template exists to prevent.
 //
-// So the guards live inside method bodies instead. A method holding a
-// preprocessor line is kept as the text it was written as and written back
-// unchanged, which is why this class is the one part of the template that is
-// not nodes. That is deliberate, not a failure.
+// So the guards live inside method bodies instead. A preprocessor line inside a
+// body arrives on the canvas as a raw node holding that one line, and is written
+// back as the text it came in as. All three methods below are graphs, and the
+// #ifdef, #else and #endif in them are three of those raw nodes. Editing around
+// them is ordinary work; editing the raw nodes themselves is editing Enforce.
 //
 // The rule that keeps it working: no Expansion type appears in any signature or
 // any member declaration in this file. Methods take and return vanilla types

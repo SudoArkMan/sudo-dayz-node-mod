@@ -75,6 +75,20 @@ struct DependencyContext {
     // it, so a project with no mod folder reports nothing rather than
     // everything.
     bool configRead = false;
+
+    // Class names that exist but are not in the vanilla catalogue: the other
+    // scripts in this project, and the classes of any dependency that has been
+    // indexed. Without them the rules that check a name against the catalogue
+    // call every one of a mod's own classes a mistake, which is exactly
+    // backwards on any project holding more than one file.
+    QStringList knownClasses;
+    // At least one declared dependency has no index on this machine, so a name
+    // this tool does not recognise may well be theirs. Under it the two rules
+    // that say a class "does not exist" say nothing instead: a tool that has
+    // not read half the chain has not earned that sentence. They stay exact
+    // when every dependency is indexed and when there are none, which is the
+    // ordinary case.
+    bool unindexedDependency = false;
 };
 
 // `scriptId` is this graph's id in the owning project. It is what tells a

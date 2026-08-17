@@ -26,9 +26,7 @@ modded class PlayerBase
 		super.EEKilled(killer);
 
 		if (!GetGame().IsServer())
-		{
 			return;
-		}
 
 		PlayerIdentity victimIdentity = GetIdentity();
 		if (victimIdentity)

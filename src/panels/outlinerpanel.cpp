@@ -196,11 +196,36 @@ void OutlinerPanel::refresh()
     }
 
     if (m_list->count() == 0) {
-        auto *empty = new QListWidgetItem(
-            filter.isEmpty() ? tr("No nodes yet. Add one from the palette.")
-                             : tr("Nothing matches that filter."),
-            m_list);
+        // A class the importer read whole but could model none of has methods
+        // and no nodes, and "no nodes yet" reads as an empty new script over a
+        // class that is entirely present and will generate exactly as it came
+        // in. Which of the two it is is worth saying, because the answer
+        // decides whether there is anything to do here.
+        int keptAsText = 0;
+        if (graph)
+            for (const GraphFunction &fn : graph->functions)
+                if (!fn.rawBody.isEmpty()) keptAsText++;
+
+        QString message;
+        QString tip;
+        if (!filter.isEmpty()) {
+            message = tr("Nothing matches that filter.");
+        } else if (keptAsText > 0) {
+            // Short enough to survive the panel width, because the half that
+            // gets clipped is the half nobody reads.
+            message = keptAsText == 1
+                          ? tr("No nodes. 1 method is kept as text.")
+                          : tr("No nodes. %1 methods are kept as text.").arg(keptAsText);
+            tip = tr("The importer could not model these method bodies, so it kept "
+                     "them as the Enforce they came in as. Generate returns them "
+                     "unchanged, and Generated Code shows them.");
+        } else {
+            message = tr("No nodes yet. Add one from the palette.");
+        }
+
+        auto *empty = new QListWidgetItem(message, m_list);
         empty->setFlags(Qt::NoItemFlags);
         empty->setForeground(theme::textDim());
+        if (!tip.isEmpty()) empty->setToolTip(tip);
     }
 }

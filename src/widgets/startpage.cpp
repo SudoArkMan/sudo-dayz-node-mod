@@ -15,6 +15,7 @@
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -559,15 +560,11 @@ QString startTemplateGroupSummary(StartTemplateGroup group)
 {
     switch (group) {
     case StartTemplateGroup::Working:
-        return QStringLiteral("Whole scripts that do the job on a server, as graphs "
-                              "you can edit. Save the project, then export into a "
-                              "mod folder.");
+        return QStringLiteral("Scripts that run on a server, as graphs you can edit.");
     case StartTemplateGroup::Blank:
-        return QStringLiteral("A class header and nothing in it, for code no "
-                              "template covers.");
+        return QStringLiteral("A class header and nothing in it.");
     case StartTemplateGroup::ToRead:
-        return QStringLiteral("Shipped work, opened to look at rather than to "
-                              "build on.");
+        return QStringLiteral("Shipped work, to look at rather than build on.");
     }
     return QString();
 }
@@ -586,27 +583,24 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
 
     StartTemplate api = filesTemplate(
         resources, QStringLiteral("api-requests"), QStringLiteral("API requests"),
-        QStringLiteral("Calls an HTTP endpoint from the server and handles the reply "
-                       "on the callback it arrives on, because the answer comes back "
-                       "somewhere else and later."),
+        QStringLiteral("Calls an endpoint from the server, and takes the reply on "
+                       "the callback it arrives on."),
         QStringLiteral("SUDO_Api"));
     templates.append(api);
 
     StartTemplate kit = filesTemplate(
         resources, QStringLiteral("starting-kit"),
         QStringLiteral("Grant a player an item on spawn"),
-        QStringLiteral("Gives a fresh character a kit through the one hook a "
-                       "returning player never reaches, and puts anything that will "
-                       "not fit on the ground instead of dropping it."),
+        QStringLiteral("A kit through the one hook a returning player never "
+                       "reaches, so nobody gets it twice."),
         QStringLiteral("SUDO_StartingKit"));
     templates.append(kit);
 
     StartTemplate cf = filesTemplate(
         resources, QStringLiteral("cf-module"),
         QStringLiteral("Integrate CF tools"),
-        QStringLiteral("A Community Framework module wired the way CF's own is, "
-                       "registered by attribute, server only by an override rather "
-                       "than a runtime test."),
+        QStringLiteral("A CF module wired the way CF's own is, and server only by "
+                       "an override rather than a test."),
         QStringLiteral("SUDO_CFModule"));
     cf.dependencies = {QStringLiteral("JM_CF_Scripts")};
     cf.requiredAddons = {QStringLiteral("DZ_Scripts"), QStringLiteral("JM_CF_Scripts")};
@@ -615,9 +609,8 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     StartTemplate expansion = filesTemplate(
         resources, QStringLiteral("cf-expansion"),
         QStringLiteral("Integrate CF and Expansion"),
-        QStringLiteral("Detects Expansion at compile time and again at runtime, and "
-                       "keeps every Expansion type behind a guard so the mod still "
-                       "builds on a server that does not run it."),
+        QStringLiteral("Finds Expansion at build time and at runtime, and still "
+                       "builds where it is not installed."),
         QStringLiteral("SUDO_Expansion"));
     expansion.dependencies = {QStringLiteral("JM_CF_Scripts")};
     // Optional, and nothing from Expansion in requiredAddons. Listing one would
@@ -630,17 +623,15 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     StartTemplate stats = filesTemplate(
         resources, QStringLiteral("player-stats"),
         QStringLiteral("Log player stats to JSON"),
-        QStringLiteral("Writes one versioned JSON file per player under $profile:, "
-                       "on disconnect and on a timer, through a temporary file so a "
-                       "crash costs one interval rather than the history."),
+        QStringLiteral("One versioned JSON file per player under $profile:, written "
+                       "through a temporary so a crash costs an interval."),
         QStringLiteral("SUDO_Stats"));
     templates.append(stats);
 
     StartTemplate board = filesTemplate(
         resources, QStringLiteral("leaderboard"), QStringLiteral("A leaderboard mod"),
-        QStringLiteral("Counts kills the way the admin log does, keeps a top ten on a "
-                       "timer, and shows it in chat, with no menu and no network "
-                       "message of its own."),
+        QStringLiteral("Counts kills the way the admin log does and shows a top ten "
+                       "in chat. No menu, no RPC."),
         QStringLiteral("SUDO_Leaderboard"));
     templates.append(board);
 
@@ -649,9 +640,8 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     StartTemplate item;
     item.id = QStringLiteral("item.empty");
     item.title = QStringLiteral("Empty item script");
-    item.summary = QStringLiteral("A class of your own with a constructor and a "
-                                  "destructor and nothing in them yet, for code no "
-                                  "vanilla class owns.");
+    item.summary = QStringLiteral("A class of your own, with a constructor and a "
+                                  "destructor and nothing in them.");
     item.kind = StartTemplateKind::Script;
     item.group = StartTemplateGroup::Blank;
     item.script.className = QStringLiteral("MyItem");
@@ -663,8 +653,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     modded.id = QStringLiteral("modded.itembase");
     modded.title = QStringLiteral("Modded ItemBase");
     modded.summary = QStringLiteral("Reopens ItemBase and overrides EEInit with its "
-                                    "super call in place, which is where an item's "
-                                    "own setup goes.");
+                                    "super call already in place.");
     modded.kind = StartTemplateKind::Script;
     modded.group = StartTemplateGroup::Blank;
     modded.script.className = QStringLiteral("ItemBase");
@@ -676,9 +665,8 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     StartTemplate mission;
     mission.id = QStringLiteral("modded.missionserver");
     mission.title = QStringLiteral("Modded MissionServer");
-    mission.summary = QStringLiteral("Reopens MissionServer and overrides OnInit, on "
-                                     "the mission layer where server side setup has "
-                                     "to live.");
+    mission.summary = QStringLiteral("Reopens MissionServer and overrides OnInit, "
+                                     "where server side setup lives.");
     mission.kind = StartTemplateKind::Script;
     mission.group = StartTemplateGroup::Blank;
     mission.script.className = QStringLiteral("MissionServer");
@@ -691,8 +679,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
     showcase.id = QStringLiteral("project.showcase");
     showcase.title = QStringLiteral("Node showcase");
     showcase.summary = QStringLiteral("The demo project, already wired: an event, a "
-                                      "branch, graph variables and a server only "
-                                      "guard, to read rather than to build.");
+                                      "branch, variables and a server guard.");
     showcase.kind = StartTemplateKind::Project;
     showcase.group = StartTemplateGroup::ToRead;
     if (!resources.isEmpty())
@@ -994,7 +981,24 @@ QWidget *StartPage::buildTemplatesPanel()
         tiles->addWidget(note);
         firstGroup = false;
 
-        for (const StartTemplate &tpl : inGroup) {
+        // Two across, not ten down. Ten tiles in one column is a list, and a
+        // list this long puts two thirds of itself under the fold at every
+        // window size the app runs at: the whole reason for grouping them goes
+        // with it, because the second and third headings are never on screen.
+        // Paired, the set is about half as tall and the three headings are all
+        // above the fold on a laptop.
+        //
+        // Two and not three: a card's floor is 140 pixels wide, and the panel is
+        // about 500 at the narrow end, so a third column would be tiles nothing
+        // fits in rather than more tiles.
+        auto *grid = new QGridLayout;
+        grid->setContentsMargins(0, 0, 0, 0);
+        grid->setHorizontalSpacing(8);
+        grid->setVerticalSpacing(8);
+        grid->setColumnStretch(0, 1);
+        grid->setColumnStretch(1, 1);
+        for (int i = 0; i < inGroup.size(); ++i) {
+            const StartTemplate &tpl = inGroup.at(i);
             auto *tile = new StartCard(tpl.title, tpl.summary, m_gallery);
             tile->setKicker(tpl.kicker());
             tile->setEnabled(tpl.available);
@@ -1005,11 +1009,33 @@ QWidget *StartPage::buildTemplatesPanel()
                         : QFileInfo(tpl.projectPath).fileName();
                 tile->setToolTip(QStringLiteral("%1 is not installed beside the app.")
                                      .arg(what));
+            } else if (tpl.kind == StartTemplateKind::Files) {
+                // The tile line is one sentence because it has to fit; the rest
+                // of what somebody wants before pressing it is here. Which files
+                // land, and what config.cpp has to say, are the two questions a
+                // working template raises and neither fits on a card.
+                QStringList detail;
+                detail << tpl.summary;
+                QStringList names;
+                for (const QString &file : tpl.files)
+                    names << QFileInfo(QFileInfo(file).absolutePath()).fileName()
+                                 + QLatin1Char('/') + QFileInfo(file).fileName();
+                detail << QStringLiteral("Writes: %1").arg(names.join(QStringLiteral(", ")));
+                if (!tpl.requiredAddons.isEmpty())
+                    detail << QStringLiteral("config.cpp: requiredAddons[] = { \"%1\" };")
+                                  .arg(tpl.requiredAddons.join(QStringLiteral("\", \"")));
+                tile->setToolTip(detail.join(QStringLiteral("\n\n")));
             }
             connect(tile, &QAbstractButton::clicked, this,
                     [this, tpl]() { emit templateRequested(tpl); });
-            tiles->addWidget(tile);
+            grid->addWidget(tile, i / 2, i % 2);
         }
+        // An odd group would otherwise stretch its last tile across the gap.
+        if (inGroup.size() % 2 == 1)
+            grid->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding,
+                                          QSizePolicy::Minimum),
+                          (inGroup.size() - 1) / 2, 1);
+        tiles->addLayout(grid);
     }
     tiles->addStretch(1);
 

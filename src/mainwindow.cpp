@@ -1948,6 +1948,14 @@ void MainWindow::refreshTabs()
         if (s.id == p.activeId) active = i;
     }
     m_tabs->setCurrentIndex(active);
+    // A bar told to make a tab other than the first one current, at a moment
+    // when it has not been laid out yet, scrolls to reach it and leaves its own
+    // layout dirty: it then reports a height of zero and the whole row vanishes
+    // off the top of the editor while the tabs are all still in it. Nothing
+    // resizes it afterwards, so nothing ever asks it to think again. Every open
+    // that lands on the first script misses this, because setting an index that
+    // is already current does nothing at all.
+    m_tabs->updateGeometry();
     updateReadOnlyBar();
     updateReopenAction();
 }
@@ -2089,7 +2097,25 @@ void MainWindow::runAnalysis()
 {
     const Graph *g = m_doc->activeGraph();
     if (!g) return;
-    m_analysis = analyzeGraph(*g, m_doc->catalog(), m_doc->builtins());
+
+    // What else is in reach besides the vanilla catalogue. Without it every
+    // class the project declares itself reads as a name that does not exist,
+    // which is the wrong answer on any project holding more than one script and
+    // is the state a template lands in on its first frame.
+    const Project &p = m_doc->project();
+    DependencyContext depCtx;
+    depCtx.deps = p.dependencies;
+    for (const ScriptEntry &s : p.scripts)
+        if (!s.graph.className.isEmpty())
+            depCtx.knownClasses.append(s.graph.className);
+    // Nothing here indexes a dependency's script tree yet, so a project that
+    // declares one has a part of its chain this tool has not read. Saying so is
+    // what stops "CF_ModuleWorld does not exist" being reported to somebody
+    // whose only mistake was not owning a copy of CF.
+    depCtx.unindexedDependency = !p.dependencies.isEmpty();
+
+    m_analysis = analyzeGraph(*g, m_doc->catalog(), m_doc->builtins(), p.activeId,
+                              depCtx);
     m_scene->setAnalysis(m_analysis);
     updateStatusCounts();
 }
@@ -2634,7 +2660,20 @@ void MainWindow::startFromTemplateFiles(const StartTemplate &tpl)
         return;
     }
 
-    m_doc->setActiveScript(firstId);
+    // Land on the graph with the most nodes in it, not on the first file in
+    // load order. A method the importer kept as text leaves no node behind, so
+    // a script whose every method is text opens on an empty canvas reading "no
+    // nodes yet" over a class that is entirely present in the generated code.
+    // Landing there is the worst first frame a working template could have, and
+    // which file it happens to be is an accident of alphabetical order.
+    QString landOn = firstId;
+    int best = -1;
+    for (const ScriptEntry &s : p.scripts) {
+        if (s.graph.nodes.size() <= best) continue;
+        best = s.graph.nodes.size();
+        landOn = s.id;
+    }
+    m_doc->setActiveScript(landOn);
     // Never saved anywhere, so the project is modified from the first frame and
     // Save has to ask where it goes.
     m_doc->touchGraph();
@@ -2655,13 +2694,38 @@ void MainWindow::startFromTemplateFiles(const StartTemplate &tpl)
     if (keptAsText > 0)
         report += QStringLiteral(", %1 kept as text").arg(keptAsText);
     report += QStringLiteral(". Save the project to give it a file.");
-    flashStatus(report);
 
-    // The one part of a working mod that does not live in the project file.
+    // The addons this one needs beyond the ones every DayZ mod already has.
+    // Every template requires DZ_Scripts, which the bundled config.cpp already
+    // declares, so naming that alone would be noise; anything past it is a line
+    // somebody has to type or the mod does not load.
+    QStringList extraAddons;
+    for (const QString &addon : tpl.requiredAddons)
+        if (addon != QLatin1String("DZ_Scripts")) extraAddons << addon;
+
+    const QString addonLine =
+        tpl.requiredAddons.isEmpty()
+            ? QString()
+            : QStringLiteral("config.cpp needs requiredAddons[] = { \"%1\" };")
+                  .arg(tpl.requiredAddons.join(QStringLiteral("\", \"")));
+
+    if (extraAddons.isEmpty()) {
+        flashStatus(report);
+    } else {
+        // Said in the line rather than only in the tooltip on it, and left up
+        // rather than cleared after four seconds. Leaving an addon out of
+        // requiredAddons does not fail here and does not fail at compile: the
+        // mod builds, ships, and the server refuses to compile the script at
+        // boot naming a class the author never typed. One line now is the whole
+        // difference, so it stays on screen until something replaces it.
+        m_message->setText(QStringLiteral("  ") + report + QLatin1Char(' ')
+                           + addonLine);
+        setSeverity(m_message, "note");
+        m_statusResetTimer->stop();
+    }
+
     QStringList tip;
-    if (!tpl.requiredAddons.isEmpty())
-        tip << QStringLiteral("config.cpp needs requiredAddons[] = { \"%1\" };")
-                   .arg(tpl.requiredAddons.join(QStringLiteral("\", \"")));
+    if (!addonLine.isEmpty()) tip << addonLine;
     if (!failed.isEmpty())
         tip << QStringLiteral("These files could not be read: %1")
                    .arg(failed.join(QStringLiteral(", ")));

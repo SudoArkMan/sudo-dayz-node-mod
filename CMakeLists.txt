@@ -276,6 +276,12 @@ install(FILES
     DESTINATION resources)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/mod-template"
         DESTINATION resources)
+# The start page's working templates: real Enforce, imported when a tile is
+# pressed. A tile whose folder did not install is shown and refused with a
+# reason rather than being left out, so a missing copy here is visible in the
+# gallery instead of being a tile that does nothing.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/templates"
+        DESTINATION resources)
 
 # resources/brand is deliberately absent: brand.qrc compiles it into the binary,
 # so a copy on disk would be the same artwork twice.

@@ -28,6 +28,18 @@
       "cfgMods": "JM_CommunityOnlineTools"
     },
     {
+      "id": "DayZExpansion_Core_Scripts",
+      "displayName": "DayZ Expansion - Core",
+      "shortName": "EXP",
+      "addons": ["DayZExpansion_Core_Scripts"],
+      "requires": ["DayZExpansion_ModStorage_Scripts", "DF_Scripts"],
+      "loadedDefine": "EXPANSIONMODCORE",
+      "badgeColor": "#c86ee0",
+      "why": "The largest third party DayZ mod. Depend on it as an optional dependency rather than a hard one: EXPANSIONMODCORE is published by an empty preload PBO for exactly that, so a feature behind #ifdef on it compiles on a server that does not run Expansion. Detect it at runtime with GetGame().ConfigIsExisting(\"CfgMods DZ_Expansion_Core_Preload\"), which is the shape Expansion uses on itself.",
+      "sourceHint": "DayZExpansion/Core/Scripts",
+      "cfgMods": "DZ_Expansion_Core"
+    },
+    {
       "id": "DF_Scripts",
       "displayName": "Dabs Framework",
       "shortName": "DF",

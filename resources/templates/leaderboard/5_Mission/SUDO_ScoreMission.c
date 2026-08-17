@@ -39,9 +39,7 @@ modded class MissionServer
 		super.OnInit();
 
 		if (!GetGame().IsServer())
-		{
 			return;
-		}
 
 		// Reads the file and holds the board for the rest of the session.
 		SUDO_ScoreStore.Get();

@@ -10,6 +10,7 @@
 // QTemporaryDir plays P:, and nothing in this file creates, renames or removes
 // anything under the real work drive, which holds the user's unpacked game
 // data and every other mod they have.
+#include "analysis.h"
 #include "builtins.h"
 #include "catalog.h"
 #include "codegen.h"
@@ -194,6 +195,11 @@ struct RoundTrip {
     int rawBodies = 0;    // methods kept whole as text
     QStringList rawNames; // and which ones, so -v says where to look
     QStringList notes;    // what the importer said about the file
+    // What the analyser says about the graphs this file produced. An Error is a
+    // failure: a template that opens with a red badge on it is a template that
+    // teaches the wrong thing on the first frame.
+    QStringList errors;
+    QStringList warnings;
     QString generated;
     QString error;
 };
@@ -221,7 +227,9 @@ static int rawBodiesIn(const Graph &g)
 static QVector<RoundTrip> roundTripTemplate(const QStringList &sources,
                                             const QString &templatesRoot,
                                             const Catalog &cat,
-                                            const Builtins &builtins)
+                                            const Builtins &builtins,
+                                            const QStringList &declaredAddons,
+                                            const QVector<ModDependency> &deps)
 {
     QVector<RoundTrip> trips;
     Project project;
@@ -284,6 +292,24 @@ static QVector<RoundTrip> roundTripTemplate(const QStringList &sources,
         }
     }
 
+    // The chain and the config, exactly as the tile declares them, so DZ314 and
+    // its neighbours are checked against what a project scaffolded from this
+    // template would really carry rather than against nothing.
+    project.dependencies = deps;
+    DependencyContext depCtx;
+    depCtx.deps = deps;
+    depCtx.declaredAddons = declaredAddons;
+    depCtx.patchClass = QStringLiteral("MT_Scripts");
+    depCtx.configPath = QStringLiteral("config.cpp");
+    depCtx.configRead = true;
+    // The classes the template declares itself, which is what a template with
+    // more than one file is made of, and the admission that a declared
+    // dependency has not been read. Both match what the window passes.
+    for (const ScriptEntry &s : project.scripts)
+        if (!s.graph.className.isEmpty())
+            depCtx.knownClasses.append(s.graph.className);
+    depCtx.unindexedDependency = !deps.isEmpty();
+
     // Second pass, with the whole project in hand, which is the state the app
     // is in the moment the tile has finished.
     for (int i = 0; i < trips.size(); ++i) {
@@ -294,10 +320,27 @@ static QVector<RoundTrip> roundTripTemplate(const QStringList &sources,
             const Graph &g = project.scripts.at(s).graph;
             trip.methods += g.functions.size();
             trip.rawBodies += rawBodiesIn(g);
-            for (const GraphFunction &fn : g.functions)
-                if (!fn.rawBody.isEmpty())
-                    trip.rawNames << g.className + QStringLiteral("::") + fn.name;
+            for (const GraphFunction &fn : g.functions) {
+                trip.rawNames << (fn.rawBody.isEmpty() ? QStringLiteral("nodes ")
+                                                       : QStringLiteral("text  "))
+                                     + g.className + QStringLiteral("::") + fn.name;
+            }
+            // Events that lowered leave no function behind at all, so they are
+            // named off the nodes instead or they would not appear anywhere.
+            for (const GraphNode &n : g.nodes)
+                if (n.kind == NodeKind::Event)
+                    trip.rawNames << QStringLiteral("event ") + g.className
+                                         + QStringLiteral("::") + n.ref;
             classes << generateEnforce(g, cat, builtins, project).code;
+
+            const AnalysisResult found = analyzeGraph(g, cat, builtins,
+                                                      project.scripts.at(s).id, depCtx);
+            for (const Diagnostic &d : found.diagnostics) {
+                const QString line = g.className + QStringLiteral(": ") + d.rule
+                                     + QStringLiteral(" ") + d.message;
+                if (d.severity == Severity::Error) trip.errors << line;
+                else if (d.severity == Severity::Warning) trip.warnings << line;
+            }
         }
         trip.generated = assembleScriptFile(classes, preambles.at(i), eols.at(i));
         trip.exact = trip.generated == sourceText.at(i);
@@ -337,6 +380,14 @@ int main(int argc, char *argv[])
                                            : QStringLiteral("resources");
         const bool bless = app.arguments().contains(QStringLiteral("--bless"));
         const bool verbose = app.arguments().contains(QStringLiteral("-v"));
+        // `--probe <dir>` runs the same round trip over a folder of your own,
+        // laid out the same way, and reports without asserting anything. It is
+        // how a template is written: put the file somewhere, probe it, and move
+        // whatever came back as text until it stops doing that.
+        QString probeDir;
+        const QStringList args = app.arguments();
+        const int probeAt = args.indexOf(QStringLiteral("--probe"));
+        if (probeAt > 0 && probeAt + 1 < args.size()) probeDir = args.at(probeAt + 1);
         out << Qt::endl << "start page templates: import, generate, compare" << Qt::endl;
 
         Catalog cat;
@@ -348,11 +399,16 @@ int main(int argc, char *argv[])
             const QString templatesRoot = resources + QStringLiteral("/templates");
             // Named here rather than read off the folder, so a template that
             // was never installed is a failure and not a silent skip.
-            const QStringList expected = {
+            QStringList expected = {
                 QStringLiteral("api-requests"),  QStringLiteral("starting-kit"),
                 QStringLiteral("cf-module"),     QStringLiteral("cf-expansion"),
                 QStringLiteral("player-stats"),  QStringLiteral("leaderboard"),
             };
+            QString root = templatesRoot;
+            if (!probeDir.isEmpty()) {
+                root = QFileInfo(probeDir).absolutePath();
+                expected = {QFileInfo(probeDir).fileName()};
+            }
 
             int files = 0;
             int nodeFiles = 0;
@@ -360,8 +416,9 @@ int main(int argc, char *argv[])
             int totalLowered = 0;
             int totalRaw = 0;
             int totalMethods = 0;
+            int totalWarnings = 0;
             for (const QString &id : expected) {
-                const QString dir = templatesRoot + QLatin1Char('/') + id;
+                const QString dir = root + QLatin1Char('/') + id;
                 if (!QFileInfo(dir).isDir()) {
                     check(false, QStringLiteral("%1: folder is there").arg(id));
                     continue;
@@ -380,8 +437,38 @@ int main(int argc, char *argv[])
                 check(!sources.isEmpty(),
                       QStringLiteral("%1: ships at least one script").arg(id));
 
+                // The same chain and the same config.cpp the gallery tile
+                // declares. Restated here rather than read off the tile, so the
+                // two have to be changed together.
+                //
+                // Not a guard against dropping CF, and it was checked rather
+                // than assumed: running these two templates with JM_CF_Scripts
+                // left out of declaredAddons reports zero errors and zero
+                // warnings. DZ314, DZ315 and DZ316 all read the list that
+                // dependenciesUsed() builds, and that list only counts nodes
+                // whose ref starts "dep.<addon>.", which is a call into an
+                // indexed dependency. These templates reach CF through a base
+                // class (extends CF_ModuleWorld) and through raw statements,
+                // and a project started from a tile has no scriptRoot for CF to
+                // index, so no node here carries a dep. ref. What keeps CF in
+                // requiredAddons is the line the tile shows and the config.cpp
+                // block in the template's own file header, not a rule.
+                QStringList declaredAddons = {QStringLiteral("DZ_Scripts")};
+                QVector<ModDependency> deps;
+                if (id == QLatin1String("cf-module")
+                    || id == QLatin1String("cf-expansion")) {
+                    declaredAddons << QStringLiteral("JM_CF_Scripts");
+                    deps.append(knownDependency(QStringLiteral("JM_CF_Scripts")));
+                }
+                if (id == QLatin1String("cf-expansion")) {
+                    ModDependency exp =
+                        knownDependency(QStringLiteral("DayZExpansion_Core_Scripts"));
+                    exp.optional = true;
+                    deps.append(exp);
+                }
+
                 const QVector<RoundTrip> trips =
-                    roundTripTemplate(sources, templatesRoot, cat, builtins);
+                    roundTripTemplate(sources, root, cat, builtins, declaredAddons, deps);
                 for (const RoundTrip &trip : trips) {
                     files++;
                     if (!trip.ok) {
@@ -416,21 +503,44 @@ int main(int argc, char *argv[])
                                .arg(trip.rawBodies)
                                .arg(trip.methods)
                         << Qt::endl;
-                    // Which ones, and what the importer said. A count on its
-                    // own tells you there is work to do and not where.
+
+                    // A template opening with a red badge on a node teaches the
+                    // wrong thing on the first frame, so an Error is a failure
+                    // here and not a note. DZ303 is called out by name because
+                    // it is the one this set was written to avoid: it fires on
+                    // a server only call with no guard above it, and the answer
+                    // was to pick calls that do not need one rather than to
+                    // decorate the graph until it stops complaining.
+                    check(trip.errors.isEmpty(),
+                          QStringLiteral("%1: no errors (%2)")
+                              .arg(trip.rel, trip.errors.join(QStringLiteral("; "))));
+                    const QStringList dz303 = trip.warnings.filter(QStringLiteral("DZ303"))
+                                              + trip.errors.filter(QStringLiteral("DZ303"));
+                    check(dz303.isEmpty(), QStringLiteral("%1: no DZ303 (%2)")
+                                               .arg(trip.rel,
+                                                    dz303.join(QStringLiteral("; "))));
+                    totalWarnings += trip.warnings.size();
+
+                    // Which methods, what the importer said, and every warning
+                    // that is not a failure. A count on its own tells you there
+                    // is work to do and not where.
                     if (!verbose) continue;
                     for (const QString &name : trip.rawNames)
-                        out << "         text  " << name << Qt::endl;
+                        out << "         " << name << Qt::endl;
                     for (const QString &note : trip.notes)
                         out << "         note  " << note << Qt::endl;
+                    for (const QString &warn : trip.warnings)
+                        out << "         warn  " << warn << Qt::endl;
                 }
             }
             out << "       " << files << " template files, " << nodeFiles
                 << " with no method kept as text, " << totalRaw << " of "
                 << totalMethods << " methods as text, " << totalLowered << " of "
-                << totalStatements << " statements lowered" << Qt::endl;
-            check(files >= 12, QStringLiteral("every template file was looked at (%1)")
-                                   .arg(files));
+                << totalStatements << " statements lowered, " << totalWarnings
+                << " warnings" << Qt::endl;
+            if (probeDir.isEmpty())
+                check(files >= 12,
+                      QStringLiteral("every template file was looked at (%1)").arg(files));
         }
     }
 

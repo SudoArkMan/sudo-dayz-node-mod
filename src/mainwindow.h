@@ -64,6 +64,14 @@ public slots:
     bool saveProject();
     bool saveProjectAs();
     void newProject();
+    // A tile from the start page: a project that ships with the app, a
+    // skeleton imported into a project of its own, or a folder of working
+    // scripts imported the same way a mod folder's own files are.
+    //
+    // Public because the screenshot harness starts the app on a template. A
+    // gallery tile is one press from the editor, and a picture of what it lands
+    // on is the only way to check that press with no display.
+    void startFromTemplate(const StartTemplate &tpl);
     // The start page, in place of the editor. The editor is not torn down; it
     // keeps its graph, its docks and its scroll position and comes back as it
     // was.
@@ -130,10 +138,6 @@ private slots:
     // Unreal's custom event: a method this script declares. Asks for a name,
     // declares `void <name>()` and drops its entry node, as one undo step.
     void addCustomEvent();
-    // A tile from the start page: a project that ships with the app, a
-    // skeleton imported into a project of its own, or a folder of working
-    // scripts imported the same way a mod folder's own files are.
-    void startFromTemplate(const StartTemplate &tpl);
     // The Files kind. Split out because it is the only one that reads more than
     // one file and the only one that declares dependencies.
     void startFromTemplateFiles(const StartTemplate &tpl);

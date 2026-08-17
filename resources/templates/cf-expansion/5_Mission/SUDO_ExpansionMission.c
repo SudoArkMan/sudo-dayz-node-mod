@@ -11,9 +11,7 @@ modded class MissionServer
 		super.OnInit();
 
 		if (!GetGame().IsServer())
-		{
 			return;
-		}
 
 		Print("[SUDO_Exp] " + SUDO_ExpansionBridge.Describe());
 
