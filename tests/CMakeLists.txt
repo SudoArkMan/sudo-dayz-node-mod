@@ -25,10 +25,17 @@ target_link_libraries(crashtest PRIVATE nodemod_core nodemod_model)
 add_executable(eventstest eventstest.cpp)
 target_link_libraries(eventstest PRIVATE nodemod_core nodemod_model)
 
-# Mod scaffolding. Copies the bundled template into a QTemporaryDir and proves
-# the ModTemplate token is gone from every name and every body.
+# Templates, both kinds. Copies the bundled mod template into a QTemporaryDir
+# and proves the ModTemplate token is gone from every name and every body, then
+# imports every .c under resources/templates and regenerates it, which is the
+# only bar a start page template can be held to:
+#   ./tests/templatetest ../resources [--keep] [--bless]
+#
+# The importer and the generator arrive with nodemod_themed, so the round trip
+# under test is the one the app runs. Nothing here builds a QApplication.
 add_executable(templatetest templatetest.cpp)
-target_link_libraries(templatetest PRIVATE nodemod_core)
+target_link_libraries(templatetest PRIVATE
+  nodemod_core nodemod_model nodemod_themed)
 
 # Enforce tokeniser, checked against real vanilla source when P: is mounted.
 add_executable(lexertest lexertest.cpp)

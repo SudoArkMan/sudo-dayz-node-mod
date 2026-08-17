@@ -177,7 +177,7 @@ static bool buildFixtureMod(const QString &folder)
         // one, and the scan has to read the keys after it anyway.
         mod.write("name = \"Sudo Test Mod\";\n"
                   "picture = \"SudoTest\\GUI\\logo.paa\"\n"
-                  "author = \"Dillan\";\n"
+                  "author = \"SudoArkMan\";\n"
                   "tooltip = \"A mod written by the test\";  // trailing comment\n");
     }
     {
@@ -219,7 +219,7 @@ static void testSyntheticMod(const Catalog &cat, const Builtins &builtins)
     check(entry.isValid(), QStringLiteral("the folder reads as a mod"));
     check(entry.name == QLatin1String("Sudo Test Mod"),
           QStringLiteral("mod.cpp names it, not meta.cpp (got \"%1\")").arg(entry.name));
-    check(entry.author == QLatin1String("Dillan"),
+    check(entry.author == QLatin1String("SudoArkMan"),
           QStringLiteral("the author survives the line with no semicolon on it"));
     check(entry.picture == QLatin1String("SudoTest\\GUI\\logo.paa"),
           QStringLiteral("a picture path keeps its backslashes (got \"%1\")").arg(entry.picture));

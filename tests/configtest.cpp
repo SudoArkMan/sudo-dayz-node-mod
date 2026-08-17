@@ -363,9 +363,9 @@ int main(int argc, char **argv)
 
     {
         ConfigFile f = parseConfig(userConfig);
-        findValue(f, QStringLiteral("CfgMods/SudoTest3/author"))->scalar = configLiteral(QStringLiteral("Dillan"));
+        findValue(f, QStringLiteral("CfgMods/SudoTest3/author"))->scalar = configLiteral(QStringLiteral("SudoArkMan"));
         const QString out = writeConfig(f);
-        check(out.contains(QLatin1String("author=\"Dillan\";")), "scalar edit keeps the tight spacing");
+        check(out.contains(QLatin1String("author=\"SudoArkMan\";")), "scalar edit keeps the tight spacing");
         check(changedLines(userConfig, out) == 1,
               QStringLiteral("scalar edit touched %1 line(s)").arg(changedLines(userConfig, out)));
     }

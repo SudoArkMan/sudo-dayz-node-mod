@@ -115,7 +115,7 @@ static QString sudoTest3Config(const QString &templateConfig)
     QString text = readAll(templateConfig);
     text.replace(QLatin1String("ModTemplate"), QLatin1String("SudoTest3"));
     text.replace(QLatin1String("name=\"\""), QLatin1String("name=\"Sudo Test 3\""));
-    text.replace(QLatin1String("author=\"\""), QLatin1String("author=\"Dillan\""));
+    text.replace(QLatin1String("author=\"\""), QLatin1String("author=\"SudoArkMan\""));
     return text;
 }
 
@@ -278,7 +278,7 @@ int main(int argc, char *argv[])
     // 6. The two fields the launcher shows.
     {
         QString broken = realText;
-        broken.replace(QLatin1String("author=\"Dillan\""), QLatin1String("author=\"\""));
+        broken.replace(QLatin1String("author=\"SudoArkMan\""), QLatin1String("author=\"\""));
         const QVector<ConfigFinding> found = validateConfig(parseConfig(broken), context);
         check(mentions(found, QStringLiteral("author")),
               QStringLiteral("an empty author is reported"));

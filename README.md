@@ -146,7 +146,7 @@ round trip bar a change has to meet, and the house style.
 
 ## Licence
 
-MIT, in [LICENSE](LICENSE). Copyright 2026 Dillan Stephenson.
+MIT, in [LICENSE](LICENSE). Copyright 2026 SudoArkMan.
 
 This application uses the Qt framework under the GNU Lesser General Public
 License version 3, dynamically linked. Third party components, what a release

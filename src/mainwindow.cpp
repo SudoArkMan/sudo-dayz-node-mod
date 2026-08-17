@@ -2503,6 +2503,11 @@ void MainWindow::startFromTemplate(const StartTemplate &tpl)
         return;
     }
 
+    if (tpl.kind == StartTemplateKind::Files) {
+        startFromTemplateFiles(tpl);
+        return;
+    }
+
     if (!maybeSaveChanges(QStringLiteral("Starting from a template"))) return;
 
     // resetToNew first, so the import reads the project it is landing in rather
@@ -2536,6 +2541,134 @@ void MainWindow::startFromTemplate(const StartTemplate &tpl)
     m_view->zoomToFit();
     flashStatus(QStringLiteral("Started from %1. Save the project to give it a "
                                "file.").arg(tpl.title));
+}
+
+void MainWindow::startFromTemplateFiles(const StartTemplate &tpl)
+{
+    if (!tpl.available || tpl.files.isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("Templates"),
+            QStringLiteral("The %1 template is not installed. Its scripts ship in "
+                           "resources/templates/%2 beside the executable.")
+                .arg(tpl.title, tpl.id));
+        return;
+    }
+    if (!maybeSaveChanges(QStringLiteral("Starting from a template"))) return;
+
+    // resetToNew first, so every import below reads the project it is landing
+    // in rather than the one being replaced.
+    m_doc->resetToNew();
+    Project &p = m_doc->project();
+    p.scripts.clear();
+    p.activeId.clear();
+    if (!tpl.projectName.isEmpty()) p.name = tpl.projectName;
+
+    // Declared before the first import, so a call into a dependency resolves
+    // against the chain rather than against nothing. A dependency with no
+    // scriptRoot is a normal state: the facts are still worth carrying, the
+    // badges still draw, and the user points it at their own copy when they
+    // have one.
+    for (const QString &id : tpl.dependencies) {
+        ModDependency dep = knownDependency(id);
+        if (dep.id.isEmpty()) {
+            dep.id = id;
+            dep.displayName = id;
+            dep.shortName = shortNameFor(id);
+        }
+        p.dependencies.append(dep);
+    }
+    for (const QString &id : tpl.optionalDependencies) {
+        ModDependency dep = knownDependency(id);
+        if (dep.id.isEmpty()) {
+            dep.id = id;
+            dep.displayName = id;
+            dep.shortName = shortNameFor(id);
+        }
+        // What `optional` and `loadedDefine` were added for: the code behind
+        // the #ifdef compiles either way, and DZ315 has something to check.
+        dep.optional = true;
+        p.dependencies.append(dep);
+    }
+
+    QString firstId;
+    QStringList failed;
+    int classes = 0;
+    int keptAsText = 0;
+    QStringList notes;
+    for (const QString &file : tpl.files) {
+        QFile in(file);
+        if (!in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            failed << QFileInfo(file).fileName();
+            continue;
+        }
+        const QString text = QString::fromUtf8(in.readAll());
+        in.close();
+
+        const ImportResult result =
+            importEnforceText(text, m_doc->catalog(), m_doc->builtins(), p);
+        if (!result.ok || result.scripts.isEmpty()) {
+            failed << QFileInfo(file).fileName();
+            continue;
+        }
+
+        // An empty sourcePath on purpose. Saving must ask where the project
+        // goes, and exporting must ask for a mod folder, or the first Ctrl+S
+        // would write over the copy of the template that ships with the app.
+        const QString module =
+            QFileInfo(QFileInfo(file).absolutePath()).fileName();
+        const QString id = appendImportedScripts(result, QString(), module);
+        if (firstId.isEmpty()) firstId = id;
+        classes += result.scripts.size();
+        for (const ImportedScript &imported : result.scripts)
+            keptAsText += textKeptIn(imported.graph);
+        notes += result.notes;
+    }
+
+    if (firstId.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Templates"),
+                             QStringLiteral("None of the %1 template's scripts could "
+                                            "be read as a graph.")
+                                 .arg(tpl.title));
+        m_doc->resetToNew();
+        refreshTabs();
+        return;
+    }
+
+    m_doc->setActiveScript(firstId);
+    // Never saved anywhere, so the project is modified from the first frame and
+    // Save has to ask where it goes.
+    m_doc->touchGraph();
+    refreshTabs();
+    showEditor();
+    m_view->zoomToFit();
+
+    QString report = QStringLiteral("Started from %1: %2 script%3, %4 class%5")
+                         .arg(tpl.title)
+                         .arg(p.scripts.size())
+                         .arg(p.scripts.size() == 1 ? QString() : QStringLiteral("s"))
+                         .arg(classes)
+                         .arg(classes == 1 ? QString() : QStringLiteral("es"));
+    // Said out loud rather than left for somebody to find. These templates are
+    // written to regenerate byte for byte, and the pieces the graph could not
+    // model are the pieces that will be written back as the text they came in
+    // as. Reading that as a failure is the wrong reading, so it is named.
+    if (keptAsText > 0)
+        report += QStringLiteral(", %1 kept as text").arg(keptAsText);
+    report += QStringLiteral(". Save the project to give it a file.");
+    flashStatus(report);
+
+    // The one part of a working mod that does not live in the project file.
+    QStringList tip;
+    if (!tpl.requiredAddons.isEmpty())
+        tip << QStringLiteral("config.cpp needs requiredAddons[] = { \"%1\" };")
+                   .arg(tpl.requiredAddons.join(QStringLiteral("\", \"")));
+    if (!failed.isEmpty())
+        tip << QStringLiteral("These files could not be read: %1")
+                   .arg(failed.join(QStringLiteral(", ")));
+    tip += notes;
+    m_message->setToolTip(tip.isEmpty() ? report
+                                        : report + QStringLiteral("\n\n")
+                                              + tip.join(QLatin1Char('\n')));
 }
 
 void MainWindow::newMod()

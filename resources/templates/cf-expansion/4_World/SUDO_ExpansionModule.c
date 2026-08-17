@@ -5,6 +5,12 @@
 // is the only file in the mod that does, and branches on a bool. That is the
 // part you will actually edit, and it stays nodes.
 //
+// The two members are both kept because they can disagree, and the disagreement
+// is a real deployment either way round:
+//
+//   m_BuiltWithExpansion  this PBO was compiled with EXPANSIONMODCORE defined
+//   m_ExpansionLoaded     Expansion is on this server right now
+//
 // config.cpp carries CF and deliberately nothing from Expansion:
 //
 //     requiredAddons[] = { "DZ_Scripts", "JM_CF_Scripts" };
@@ -18,9 +24,6 @@
 
 class SUDO_ExpansionModule extends CF_ModuleWorld
 {
-	// Answered once at boot and read everywhere else. Both halves are kept
-	// because they can disagree: a mod built against Expansion and run without
-	// it is a real deployment, and so is the reverse.
 	bool m_BuiltWithExpansion;
 	bool m_ExpansionLoaded;
 
@@ -28,6 +31,9 @@ class SUDO_ExpansionModule extends CF_ModuleWorld
 	{
 		super.OnInit();
 
+		// Answered once, here, and read everywhere else. Every Enable call
+		// belongs in OnInit too: each one adds this module to a static event
+		// list.
 		m_BuiltWithExpansion = SUDO_ExpansionBridge.BuiltAgainstExpansion();
 		m_ExpansionLoaded = SUDO_ExpansionBridge.ExpansionIsLoaded();
 
@@ -37,6 +43,9 @@ class SUDO_ExpansionModule extends CF_ModuleWorld
 
 	override bool IsClient()
 	{
+		// Server only, declared rather than tested. CF turns this into a flag
+		// bit at construction and skips the module on the side it does not
+		// claim, so there is no runtime branch in any handler below.
 		return false;
 	}
 
@@ -45,9 +54,13 @@ class SUDO_ExpansionModule extends CF_ModuleWorld
 		super.OnMissionStart(sender, args);
 
 		if (m_ExpansionLoaded)
+		{
 			Print("[SUDO_Exp] Expansion is running on this server");
+		}
 		else
+		{
 			Print("[SUDO_Exp] Expansion is not running on this server");
+		}
 	}
 
 	override void OnInvokeConnect(Class sender, CF_EventArgs args)
@@ -58,15 +71,27 @@ class SUDO_ExpansionModule extends CF_ModuleWorld
 		// here and keep nothing.
 		CF_EventPlayerArgs playerArgs = CF_EventPlayerArgs.Cast(args);
 		if (!playerArgs)
+		{
 			return;
+		}
 
 		PlayerBase player = playerArgs.Player;
 		if (!player)
+		{
 			return;
+		}
 
 		if (m_ExpansionLoaded)
+		{
 			player.MessageImportant("Expansion features are on.");
+		}
 		else
+		{
 			player.MessageImportant("Running without Expansion.");
+		}
 	}
-}
+
+	// >>> user code, kept when the graph regenerates
+	// helpers you write here are preserved
+	// <<< user code
+};

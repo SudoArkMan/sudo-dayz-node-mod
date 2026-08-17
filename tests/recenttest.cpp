@@ -364,11 +364,31 @@ int main(int argc, char *argv[])
 
         int scripts = 0;
         int projects = 0;
+        int fileSets = 0;
         bool described = true;
         for (const StartTemplate &tpl : templates) {
             described = described && !tpl.summary.isEmpty() && !tpl.title.isEmpty();
             if (tpl.kind == StartTemplateKind::Project) {
                 ++projects;
+                continue;
+            }
+            // A Files tile ships real .c and has no skeleton to write. What it
+            // ships is checked where it can be checked properly, by importing
+            // it and generating it back: tests/templatetest.
+            if (tpl.kind == StartTemplateKind::Files) {
+                ++fileSets;
+                check(!tpl.projectName.isEmpty(),
+                      QStringLiteral("%1 names the project it starts").arg(tpl.title));
+                if (tpl.available) {
+                    check(!tpl.files.isEmpty(),
+                          QStringLiteral("%1 ships at least one script").arg(tpl.title));
+                    check(!tpl.kicker().isEmpty(),
+                          QStringLiteral("%1 says which modules it writes into (%2)")
+                              .arg(tpl.title, tpl.kicker()));
+                } else {
+                    line(QStringLiteral("  note %1 is not installed beside this build")
+                             .arg(tpl.title));
+                }
                 continue;
             }
             ++scripts;
@@ -392,6 +412,17 @@ int main(int argc, char *argv[])
         check(described, QStringLiteral("every tile says what it is for"));
         check(scripts >= 3, QStringLiteral("three script skeletons"));
         check(projects >= 1, QStringLiteral("and the showcase project"));
+        check(fileSets >= 6, QStringLiteral("and six templates that already work"));
+
+        // Every tile lands in a section, and every section it lands in has a
+        // heading. A group with no title would draw an empty label above its
+        // tiles rather than leaving them ungrouped, which is worse than either.
+        bool grouped = true;
+        for (const StartTemplate &tpl : templates)
+            grouped = grouped && !startTemplateGroupTitle(tpl.group).isEmpty()
+                      && !startTemplateGroupSummary(tpl.group).isEmpty();
+        check(grouped, QStringLiteral("every tile sits under a heading with a line "
+                                      "under it"));
 
         for (const StartTemplate &tpl : templates) {
             if (tpl.kind != StartTemplateKind::Project) continue;

@@ -215,7 +215,7 @@ as part of the upstream template.
 ## Brand artwork
 
 `resources/brand/` is original artwork for SUDO Servers, produced for this
-project. Copyright 2026 Dillan Stephenson. It is not covered by the MIT
+project. Copyright 2026 SudoArkMan. It is not covered by the MIT
 License in `LICENSE`: the code is MIT, the marks are not. Forks may use the
 code freely and should replace the artwork rather than ship a build that
 presents itself as SUDO Servers.
@@ -246,7 +246,7 @@ settled, this section has to be rewritten to match before a release goes out.
 ## Sample projects
 
 `resources/SUDO_Link.sdzn` and `resources/Showcase.sdzn` are the author's own
-node graphs, used as test fixtures. Copyright 2026 Dillan Stephenson, MIT with
+node graphs, used as test fixtures. Copyright 2026 SudoArkMan, MIT with
 the rest of the project. `SUDO_Link.sdzn` is the 25-script project that
 `coretest` and `importtest` measure against.
 

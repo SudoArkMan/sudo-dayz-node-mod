@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 
 $ProductName  = 'SUDO DayZ Node Mod'
 $ExeName      = 'DAYZSUDONodeMod.exe'
-$Publisher    = 'Dillan Stephenson'
+$Publisher    = 'SudoArkMan'
 $RegistryKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SUDODayZNodeMod'
 
 # Where the app keeps what it remembers, from the organisation and application

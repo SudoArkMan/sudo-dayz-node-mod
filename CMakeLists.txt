@@ -19,9 +19,9 @@ set(NODEMOD_VERSION_SUFFIX "" CACHE STRING
 set(NODEMOD_VERSION "${PROJECT_VERSION}${NODEMOD_VERSION_SUFFIX}")
 
 set(NODEMOD_PRODUCT     "SUDO DayZ Node Mod")
-set(NODEMOD_VENDOR      "Dillan Stephenson")
+set(NODEMOD_VENDOR      "SudoArkMan")
 set(NODEMOD_DESCRIPTION "Visual scripting for DayZ Enforce Script")
-set(NODEMOD_COPYRIGHT   "Copyright 2026 Dillan Stephenson")
+set(NODEMOD_COPYRIGHT   "Copyright 2026 SudoArkMan")
 
 # Where the update check looks when the settings file says nothing. Cache
 # entries rather than constants in the middle of a URL, so a fork points itself

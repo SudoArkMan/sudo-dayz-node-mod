@@ -26,7 +26,9 @@ modded class PlayerBase
 		super.EEKilled(killer);
 
 		if (!GetGame().IsServer())
+		{
 			return;
+		}
 
 		PlayerIdentity victimIdentity = GetIdentity();
 		if (victimIdentity)
@@ -37,10 +39,14 @@ modded class PlayerBase
 
 		// A death, not a kill.
 		if (killer == this)
+		{
 			return;
+		}
 
 		if (!killer)
+		{
 			return;
+		}
 
 		// The weapon first, then the object itself. An AI kill or a killer who
 		// has already disconnected gives null at one of the two steps, which is
@@ -48,21 +54,33 @@ modded class PlayerBase
 		EntityAI source = EntityAI.Cast(killer);
 		PlayerBase shooter;
 		if (source)
+		{
 			shooter = PlayerBase.Cast(source.GetHierarchyParent());
+		}
 
 		if (!shooter)
+		{
 			shooter = PlayerBase.Cast(killer);
+		}
 
 		if (!shooter || shooter == this)
+		{
 			return;
+		}
 
 		PlayerIdentity killerIdentity = shooter.GetIdentity();
 		if (!killerIdentity)
+		{
 			return;
+		}
 
 		SUDO_ScoreStore board = SUDO_ScoreStore.Get();
 		board.AddKill(killerIdentity.GetId(), killerIdentity.GetName());
 
 		shooter.MessageImportant("Kill counted.");
 	}
-}
+
+	// >>> user code, kept when the graph regenerates
+	// helpers you write here are preserved
+	// <<< user code
+};

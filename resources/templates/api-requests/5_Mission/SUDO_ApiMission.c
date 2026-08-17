@@ -13,9 +13,15 @@ modded class MissionServer
 		super.OnInit();
 
 		if (!GetGame().IsServer())
+		{
 			return;
+		}
 
 		SUDO_ApiClient client = SUDO_ApiClient.Get();
 		client.Request("status");
 	}
-}
+
+	// >>> user code, kept when the graph regenerates
+	// helpers you write here are preserved
+	// <<< user code
+};

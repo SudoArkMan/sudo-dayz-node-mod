@@ -5,9 +5,17 @@
 // the hive never reaches it. So there is no flag to persist and no duplicate to
 // guard against, and "grant on spawn" means what it says.
 //
-// InvokeOnConnect and PlayerBase::OnConnect are the wrong hooks for this. Both
-// fire on every connect, so granting there hands a returning player a second
-// kit every login.
+// The order CF wrote out, which is the clearest statement of it on disk:
+//
+//   new character       OnClientPrepareEvent, OnClientNewEvent, OnSelectPlayer,
+//                       InvokeOnConnect
+//   existing character  OnClientPrepareEvent, OnStoreLoad, OnClientReadyEvent,
+//                       OnSelectPlayer, InvokeOnConnect
+//   respawn             OnClientPrepareEvent, OnClientNewEvent, InvokeOnConnect
+//
+// So InvokeOnConnect and PlayerBase::OnConnect are the wrong hooks for this.
+// Both fire on every connect, and granting there hands a returning player a
+// second kit every login.
 //
 // StartingEquipSetup is the wrong hook too, for two reasons that are each
 // enough on their own. It is reached only from EquipCharacter, which
@@ -17,9 +25,8 @@
 // method is shadowed with no error anywhere.
 //
 // For a one time per account gift instead, override
-// InvokeOnConnect(PlayerBase, PlayerIdentity) and keep a set of
-// identity.GetId() in a store. The Log player stats to JSON template is that
-// store.
+// InvokeOnConnect(PlayerBase, PlayerIdentity) and keep a persisted set of
+// identity.GetId(). The Log player stats to JSON template is that store.
 
 modded class MissionServer
 {
@@ -30,10 +37,13 @@ modded class MissionServer
 		//
 		// No server only guard in here. This method returns a PlayerBase, and
 		// the guard's early return would hand null back to the connect path.
-		// MissionServer is server side already.
+		// MissionServer is server side already: it is constructed only by
+		// CreateCustomMission in the mission's init.c.
 		PlayerBase player = super.OnClientNewEvent(identity, pos, ctx);
 		if (!player)
+		{
 			return player;
+		}
 
 		GiveStartingKit(player);
 		return player;
@@ -58,16 +68,26 @@ modded class MissionServer
 			// too: its doc comment promises a ground fallback that its body
 			// does not have. SpawnInInventoryOrGroundPos is the call that does
 			// what that comment claims, and vanilla uses it eight times in
-			// crossbow.c.
+			// crossbow.c. PlayerBase overrides SpawnEntityOnGroundPos with a
+			// server side gate of its own, so the fallback is safe.
 			//
 			// Create at the destination rather than creating and then moving.
 			// TakeToDst returns true and silently does nothing when it is
 			// called more than once in a tick.
+			//
+			// Still null checked: a bad classname, or a full inventory over
+			// water, fails both halves.
 			EntityAI item = player.SpawnInInventoryOrGroundPos(type, player.GetInventory(), player.GetPosition());
 			if (!item)
+			{
 				Print("[SUDO_Kit] could not spawn " + type);
+			}
 		}
 
 		player.MessageImportant("Your starting kit is in your inventory.");
 	}
-}
+
+	// >>> user code, kept when the graph regenerates
+	// helpers you write here are preserved
+	// <<< user code
+};
