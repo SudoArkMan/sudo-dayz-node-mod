@@ -112,7 +112,7 @@ clean-machine start at the end of `tools/release.ps1` the check that matters.
   remote exists. They were left out rather than guessed at.
 - Turn on private vulnerability reporting in the repository's Security
   settings. `SECURITY.md` tells reporters to use it.
-- Confirm the email on the https://github.com/DillanStep profile is one that is
+- Confirm the contact address sudoarkman@gmail.com is one that is
   read, because `CODE_OF_CONDUCT.md` points at it.
 - Confirm the update check in `src/update.cpp` names the real owner and
   repository. It asks

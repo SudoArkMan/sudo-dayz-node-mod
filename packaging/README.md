@@ -193,7 +193,7 @@ Four steps, and only the last two leave this machine.
    the running build carries, and a mismatch is either an update that never
    appears or one that appears forever.
 
-The update check reads `https://api.github.com/repos/DillanStep/DAYZSUDONodeMod/releases`
+The update check reads `https://api.github.com/repos/SudoArkMan/sudo-dayz-node-mod/releases`
 by default, which is the repository this version resource names. Both halves are
 CMake cache entries, `NODEMOD_UPDATE_OWNER` and `NODEMOD_UPDATE_REPO`, so a fork
 repoints itself at configure time.

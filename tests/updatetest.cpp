@@ -685,7 +685,7 @@ int main(int argc, char *argv[])
         check(prefs.dueForCheck(now.addSecs(-60 * 60 * 5)),
               QStringLiteral("a clock put back leaves it due rather than never"));
 
-        equal(prefs.owner(), QStringLiteral("DillanStep"),
+        equal(prefs.owner(), QStringLiteral("SudoArkMan"),
               QStringLiteral("the owner has a default"));
         check(!prefs.repository().isEmpty(),
               QStringLiteral("and so does the repository"));
@@ -719,7 +719,7 @@ int main(int argc, char *argv[])
               QStringLiteral("the endpoint is over TLS"));
         check(url.contains(QStringLiteral("api.github.com")),
               QStringLiteral("and points at GitHub's API"));
-        check(url.contains(QStringLiteral("/DillanStep/")),
+        check(url.contains(QStringLiteral("/SudoArkMan/")),
               QStringLiteral("with the default owner in it"));
         // Encoded, not interpolated. A settings file is a text file somebody can
         // edit, and a repository name carrying a slash or a question mark would

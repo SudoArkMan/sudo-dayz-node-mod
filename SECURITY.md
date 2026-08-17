@@ -9,6 +9,10 @@ Use GitHub's private vulnerability reporting: go to the repository's
 advisory that only the maintainer can see, and it lets a fix be prepared before
 anything is public.
 
+If that option is not showing on the Security tab, email sudoarkman@gmail.com
+instead. Private reporting is a setting the repository owner has to turn on, and
+a report should never be lost because it was switched off.
+
 Useful things to include, in rough order of how much they help:
 
 - What an attacker gets. Reading a file outside the project, writing one,

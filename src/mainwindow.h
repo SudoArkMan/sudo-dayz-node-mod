@@ -130,9 +130,13 @@ private slots:
     // Unreal's custom event: a method this script declares. Asks for a name,
     // declares `void <name>()` and drops its entry node, as one undo step.
     void addCustomEvent();
-    // A tile from the start page: a project that ships with the app, or a
-    // skeleton imported into a project of its own.
+    // A tile from the start page: a project that ships with the app, a
+    // skeleton imported into a project of its own, or a folder of working
+    // scripts imported the same way a mod folder's own files are.
     void startFromTemplate(const StartTemplate &tpl);
+    // The Files kind. Split out because it is the only one that reads more than
+    // one file and the only one that declares dependencies.
+    void startFromTemplateFiles(const StartTemplate &tpl);
     // Writes the open project to its sidecar. Does nothing for a project with
     // no file behind it: the sidecar lives beside the project so that its
     // relative paths resolve, and there is nowhere to put one otherwise.

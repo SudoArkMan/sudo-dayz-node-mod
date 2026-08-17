@@ -482,12 +482,169 @@ QString checkedLine(const QDateTime &when)
     return QStringLiteral("checked %1").arg(relativeTime(when.toLocalTime()));
 }
 
+// The script modules a template's files are read out of, in the order DayZ
+// compiles them. A class cannot precede its base, so a 3_Game file that a
+// 4_World file extends has to be imported first or the second one resolves
+// against nothing.
+const char *const kModuleOrder[] = {"3_Game", "4_World", "5_Mission"};
+
+// Every .c under resources/templates/<id>, module by module, names sorted
+// inside a module so the same folder gives the same order on every machine.
+QStringList templateFilesIn(const QString &dir)
+{
+    QStringList found;
+    if (dir.isEmpty()) return found;
+    for (const char *module : kModuleOrder) {
+        const QDir sub(QDir(dir).filePath(QString::fromLatin1(module)));
+        if (!sub.exists()) continue;
+        const QStringList names =
+            sub.entryList({QStringLiteral("*.c")}, QDir::Files, QDir::Name);
+        for (const QString &name : names) found << sub.absoluteFilePath(name);
+    }
+    return found;
+}
+
+// A tile that ships files. Everything but the prose is derived from the folder,
+// so a template whose files were not installed says so instead of failing when
+// it is pressed.
+StartTemplate filesTemplate(const QString &resources, const QString &id,
+                            const QString &title, const QString &summary,
+                            const QString &projectName)
+{
+    StartTemplate tpl;
+    tpl.id = id;
+    tpl.title = title;
+    tpl.summary = summary;
+    tpl.kind = StartTemplateKind::Files;
+    tpl.group = StartTemplateGroup::Working;
+    tpl.projectName = projectName;
+    tpl.requiredAddons = {QStringLiteral("DZ_Scripts")};
+    if (!resources.isEmpty())
+        tpl.sourceDir = QDir(resources).absoluteFilePath(
+            QStringLiteral("templates/") + id);
+    tpl.files = templateFilesIn(tpl.sourceDir);
+    tpl.available = !tpl.files.isEmpty();
+    return tpl;
+}
+
 } // namespace
+
+QString StartTemplate::kicker() const
+{
+    if (kind == StartTemplateKind::Project) return QStringLiteral("project");
+    if (kind != StartTemplateKind::Files) return module;
+
+    // Which modules it writes into, in load order, each named once. A template
+    // that lands in three folders is a different proposition from one that
+    // lands in one, and that is worth knowing before the tile is pressed.
+    QStringList modules;
+    for (const QString &file : files) {
+        const QString name = QFileInfo(QFileInfo(file).absolutePath()).fileName();
+        if (!name.isEmpty() && !modules.contains(name)) modules.append(name);
+    }
+    return modules.join(QStringLiteral(", "));
+}
+
+QString startTemplateGroupTitle(StartTemplateGroup group)
+{
+    switch (group) {
+    case StartTemplateGroup::Working: return QStringLiteral("Mods that already work");
+    case StartTemplateGroup::Blank:   return QStringLiteral("Empty starts");
+    case StartTemplateGroup::ToRead:  return QStringLiteral("To read");
+    }
+    return QString();
+}
+
+QString startTemplateGroupSummary(StartTemplateGroup group)
+{
+    switch (group) {
+    case StartTemplateGroup::Working:
+        return QStringLiteral("Whole scripts that do the job on a server, as graphs "
+                              "you can edit. Save the project, then export into a "
+                              "mod folder.");
+    case StartTemplateGroup::Blank:
+        return QStringLiteral("A class header and nothing in it, for code no "
+                              "template covers.");
+    case StartTemplateGroup::ToRead:
+        return QStringLiteral("Shipped work, opened to look at rather than to "
+                              "build on.");
+    }
+    return QString();
+}
 
 QVector<StartTemplate> startTemplates(const QString &resourceDir)
 {
     const QString resources = resourceDir.isEmpty() ? findResourceDir() : resourceDir;
     QVector<StartTemplate> templates;
+
+    // ---- the six that already do something ---------------------------------
+    //
+    // First in the gallery, because "which of these do I want" nearly always
+    // has one of these as its answer and never has an empty class as its
+    // answer. Each one ships real .c files: see StartTemplateKind::Files for
+    // why that is the shape rather than a .sdzn.
+
+    StartTemplate api = filesTemplate(
+        resources, QStringLiteral("api-requests"), QStringLiteral("API requests"),
+        QStringLiteral("Calls an HTTP endpoint from the server and handles the reply "
+                       "on the callback it arrives on, because the answer comes back "
+                       "somewhere else and later."),
+        QStringLiteral("SUDO_Api"));
+    templates.append(api);
+
+    StartTemplate kit = filesTemplate(
+        resources, QStringLiteral("starting-kit"),
+        QStringLiteral("Grant a player an item on spawn"),
+        QStringLiteral("Gives a fresh character a kit through the one hook a "
+                       "returning player never reaches, and puts anything that will "
+                       "not fit on the ground instead of dropping it."),
+        QStringLiteral("SUDO_StartingKit"));
+    templates.append(kit);
+
+    StartTemplate cf = filesTemplate(
+        resources, QStringLiteral("cf-module"),
+        QStringLiteral("Integrate CF tools"),
+        QStringLiteral("A Community Framework module wired the way CF's own is, "
+                       "registered by attribute, server only by an override rather "
+                       "than a runtime test."),
+        QStringLiteral("SUDO_CFModule"));
+    cf.dependencies = {QStringLiteral("JM_CF_Scripts")};
+    cf.requiredAddons = {QStringLiteral("DZ_Scripts"), QStringLiteral("JM_CF_Scripts")};
+    templates.append(cf);
+
+    StartTemplate expansion = filesTemplate(
+        resources, QStringLiteral("cf-expansion"),
+        QStringLiteral("Integrate CF and Expansion"),
+        QStringLiteral("Detects Expansion at compile time and again at runtime, and "
+                       "keeps every Expansion type behind a guard so the mod still "
+                       "builds on a server that does not run it."),
+        QStringLiteral("SUDO_Expansion"));
+    expansion.dependencies = {QStringLiteral("JM_CF_Scripts")};
+    // Optional, and nothing from Expansion in requiredAddons. Listing one would
+    // make Expansion a hard requirement, which is the opposite of the point.
+    expansion.optionalDependencies = {QStringLiteral("DayZExpansion_Core_Scripts")};
+    expansion.requiredAddons = {QStringLiteral("DZ_Scripts"),
+                                QStringLiteral("JM_CF_Scripts")};
+    templates.append(expansion);
+
+    StartTemplate stats = filesTemplate(
+        resources, QStringLiteral("player-stats"),
+        QStringLiteral("Log player stats to JSON"),
+        QStringLiteral("Writes one versioned JSON file per player under $profile:, "
+                       "on disconnect and on a timer, through a temporary file so a "
+                       "crash costs one interval rather than the history."),
+        QStringLiteral("SUDO_Stats"));
+    templates.append(stats);
+
+    StartTemplate board = filesTemplate(
+        resources, QStringLiteral("leaderboard"), QStringLiteral("A leaderboard mod"),
+        QStringLiteral("Counts kills the way the admin log does, keeps a top ten on a "
+                       "timer, and shows it in chat, with no menu and no network "
+                       "message of its own."),
+        QStringLiteral("SUDO_Leaderboard"));
+    templates.append(board);
+
+    // ---- and the empty starts, which are still the right answer sometimes ---
 
     StartTemplate item;
     item.id = QStringLiteral("item.empty");
@@ -496,6 +653,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
                                   "destructor and nothing in them yet, for code no "
                                   "vanilla class owns.");
     item.kind = StartTemplateKind::Script;
+    item.group = StartTemplateGroup::Blank;
     item.script.className = QStringLiteral("MyItem");
     item.script.kind = ScriptKind::NewClass;
     item.module = QStringLiteral("4_World");
@@ -508,6 +666,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
                                     "super call in place, which is where an item's "
                                     "own setup goes.");
     modded.kind = StartTemplateKind::Script;
+    modded.group = StartTemplateGroup::Blank;
     modded.script.className = QStringLiteral("ItemBase");
     modded.script.baseClass = QStringLiteral("ItemBase");
     modded.script.kind = ScriptKind::ModdedClass;
@@ -521,6 +680,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
                                      "the mission layer where server side setup has "
                                      "to live.");
     mission.kind = StartTemplateKind::Script;
+    mission.group = StartTemplateGroup::Blank;
     mission.script.className = QStringLiteral("MissionServer");
     mission.script.baseClass = QStringLiteral("MissionServer");
     mission.script.kind = ScriptKind::ModdedClass;
@@ -534,6 +694,7 @@ QVector<StartTemplate> startTemplates(const QString &resourceDir)
                                       "branch, graph variables and a server only "
                                       "guard, to read rather than to build.");
     showcase.kind = StartTemplateKind::Project;
+    showcase.group = StartTemplateGroup::ToRead;
     if (!resources.isEmpty())
         showcase.projectPath =
             QDir(resources).absoluteFilePath(QStringLiteral("Showcase.sdzn"));
@@ -801,18 +962,54 @@ QWidget *StartPage::buildTemplatesPanel()
     tiles->setContentsMargins(0, 0, 0, 0);
     tiles->setSpacing(8);
 
-    for (const StartTemplate &tpl : m_templates) {
-        auto *tile = new StartCard(tpl.title, tpl.summary, m_gallery);
-        tile->setKicker(tpl.kind == StartTemplateKind::Project
-                            ? QStringLiteral("project")
-                            : tpl.module);
-        tile->setEnabled(tpl.available);
-        if (!tpl.available)
-            tile->setToolTip(QStringLiteral("%1 is not installed beside the app.")
-                                 .arg(QFileInfo(tpl.projectPath).fileName()));
-        connect(tile, &QAbstractButton::clicked, this,
-                [this, tpl]() { emit templateRequested(tpl); });
-        tiles->addWidget(tile);
+    // Ten tiles in one column is a list nobody reads to the bottom. Under
+    // headings it is three short answers to three different questions, and the
+    // one most people want is the first of them.
+    //
+    // Drawn in the order the groups are declared rather than in template order,
+    // so a tile added to a group later lands in its section without the list
+    // being resorted by hand.
+    const StartTemplateGroup order[] = {StartTemplateGroup::Working,
+                                        StartTemplateGroup::Blank,
+                                        StartTemplateGroup::ToRead};
+    bool firstGroup = true;
+    for (StartTemplateGroup group : order) {
+        QVector<StartTemplate> inGroup;
+        for (const StartTemplate &tpl : m_templates)
+            if (tpl.group == group) inGroup.append(tpl);
+        if (inGroup.isEmpty()) continue;
+
+        auto *heading = new QLabel(startTemplateGroupTitle(group), m_gallery);
+        heading->setFont(theme::uiFont(9, true));
+        // Air above a heading and not below it, so the heading reads as
+        // belonging to the tiles under it rather than floating between two
+        // sections. None above the first, which already has the panel's own.
+        heading->setContentsMargins(0, firstGroup ? 0 : 6, 0, 0);
+        tiles->addWidget(heading);
+
+        auto *note = new QLabel(startTemplateGroupSummary(group), m_gallery);
+        note->setFont(theme::uiFont(8));
+        note->setWordWrap(true);
+        dimLabel(note);
+        tiles->addWidget(note);
+        firstGroup = false;
+
+        for (const StartTemplate &tpl : inGroup) {
+            auto *tile = new StartCard(tpl.title, tpl.summary, m_gallery);
+            tile->setKicker(tpl.kicker());
+            tile->setEnabled(tpl.available);
+            if (!tpl.available) {
+                const QString what =
+                    tpl.kind == StartTemplateKind::Files
+                        ? QStringLiteral("resources/templates/%1").arg(tpl.id)
+                        : QFileInfo(tpl.projectPath).fileName();
+                tile->setToolTip(QStringLiteral("%1 is not installed beside the app.")
+                                     .arg(what));
+            }
+            connect(tile, &QAbstractButton::clicked, this,
+                    [this, tpl]() { emit templateRequested(tpl); });
+            tiles->addWidget(tile);
+        }
     }
     tiles->addStretch(1);
 

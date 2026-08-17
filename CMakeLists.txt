@@ -26,9 +26,9 @@ set(NODEMOD_COPYRIGHT   "Copyright 2026 Dillan Stephenson")
 # Where the update check looks when the settings file says nothing. Cache
 # entries rather than constants in the middle of a URL, so a fork points itself
 # somewhere else without editing code.
-set(NODEMOD_UPDATE_OWNER "DillanStep" CACHE STRING
+set(NODEMOD_UPDATE_OWNER "SudoArkMan" CACHE STRING
     "GitHub owner the update check reads releases from.")
-set(NODEMOD_UPDATE_REPO "DAYZSUDONodeMod" CACHE STRING
+set(NODEMOD_UPDATE_REPO "sudo-dayz-node-mod" CACHE STRING
     "GitHub repository the update check reads releases from.")
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/version.h.in"

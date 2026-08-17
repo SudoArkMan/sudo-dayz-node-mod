@@ -37,8 +37,7 @@ messages, and anywhere somebody is representing this project in public.
 ## Reporting
 
 If something here is being broken, tell the maintainer privately rather than
-arguing it out in a thread. Contact Dillan Stephenson through the email listed
-on the https://github.com/DillanStep profile.
+arguing it out in a thread. Email Dillan Stephenson at sudoarkman@gmail.com.
 
 Reports are read privately, and who reported what is not shared. You will not
 be told you should have handled it yourself.
