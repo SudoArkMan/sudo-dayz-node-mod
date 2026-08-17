@@ -35,12 +35,17 @@ function pageName(rel) {
   return titled.join("-");
 }
 
+// docs/images/README.md records how each screenshot was taken. That is for
+// whoever redoes them, not for a reader, so it stays in the repository.
+const SKIP = new Set([path.join("images", "README.md")]);
+
 function walk(dir, base = dir) {
   const out = [];
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) { out.push(...walk(p, base)); continue; }
-    if (e.name.endsWith(".md")) out.push(path.relative(base, p));
+    const rel = path.relative(base, p);
+    if (e.name.endsWith(".md") && !SKIP.has(rel)) out.push(rel);
   }
   return out;
 }
