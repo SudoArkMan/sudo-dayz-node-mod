@@ -1,0 +1,73 @@
+{
+  "name": "MyFirstMod",
+  "folders": [
+    "5_Mission"
+  ],
+  "scripts": [
+    {
+      "id": "s1",
+      "name": "MissionServer",
+      "folder": "5_Mission",
+      "graph": {
+        "className": "MissionServer",
+        "modded": true,
+        "module": "5_Mission",
+        "nodes": [
+          {
+            "id": "n1",
+            "kind": "event",
+            "ref": "m3783",
+            "x": 0,
+            "y": 0,
+            "inputs": {}
+          },
+          {
+            "id": "n2",
+            "kind": "builtin",
+            "ref": "bi.print",
+            "x": 340,
+            "y": 0,
+            "inputs": {}
+          },
+          {
+            "id": "n3",
+            "kind": "builtin",
+            "ref": "bi.litString",
+            "x": 40,
+            "y": 180,
+            "inputs": {
+              "v": "MyFirstMod: the mission started"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "s1_e1",
+            "from": {
+              "node": "n1",
+              "pin": "exec"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "exec"
+            }
+          },
+          {
+            "id": "s1_e2",
+            "from": {
+              "node": "n3",
+              "pin": "ret"
+            },
+            "to": {
+              "node": "n2",
+              "pin": "value"
+            }
+          }
+        ],
+        "variables": [],
+        "functions": []
+      }
+    }
+  ],
+  "activeId": "s1"
+}

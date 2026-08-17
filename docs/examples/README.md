@@ -6,6 +6,12 @@ the Enforce Script it produces beside it.
 All four live in [examples.sdzn](examples.sdzn) as separate scripts. Open that
 file in the application and you can click through them, or read them here.
 
+If you have not built a mod with this tool yet, start with
+[getting-started.md](../getting-started.md) instead. It walks one graph from an
+empty window to a line in a DayZ log, and the graph it builds is
+[first-mod.sdzn](first-mod.sdzn) beside this file. The four below assume you
+already know what an exec wire is.
+
 **The script under each example is the tool's own output, not code written to
 look like it.** It was produced by running the generator over `examples.sdzn`
 and pasting what came back:
